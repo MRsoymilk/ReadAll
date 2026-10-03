@@ -17,6 +17,13 @@ pub(crate) enum Action {
     Smaller,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TocEntry {
+    pub(crate) spine: usize,
+    pub(crate) title: String,
+    pub(crate) current: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Start {
     Beginning,
@@ -124,6 +131,45 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         let chapters = self.book.spine().len().max(1) as f32;
         let chapter_fraction = (self.frame.page + 1) as f32 / self.frame.pages.max(1) as f32;
         ((self.spine as f32 + chapter_fraction) / chapters).clamp(0.0, 1.0)
+    }
+
+    pub(crate) fn toc_entries(&self) -> Result<Vec<TocEntry>> {
+        let mut entries = Vec::new();
+        for spine in 0..self.book.spine().len() {
+            let Some(item) = self.book.spine().get(spine) else {
+                continue;
+            };
+            if !item.linear() {
+                continue;
+            }
+            let text = match self.book.read_spine_text(spine) {
+                Ok(text) => text,
+                Err(EpubError::Unsupported(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let title = chapter_title(&text, entries.len() + 1);
+            entries.push(TocEntry {
+                spine,
+                title,
+                current: spine == self.spine,
+            });
+            if entries.len() >= 512 {
+                break;
+            }
+        }
+        Ok(entries)
+    }
+
+    pub(crate) fn jump_to_spine(&mut self, spine: usize) -> Result<bool> {
+        if spine == self.spine && self.frame.page == 0 {
+            return Ok(false);
+        }
+        let chapter = readable_chapter(self.book, spine)?
+            .ok_or("selected EPUB chapter has no readable text")?;
+        self.switch_chapter(spine, chapter, PageTarget::First)
     }
 
     pub(crate) fn title(&self) -> String {
@@ -278,6 +324,22 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
 enum PageTarget {
     First,
     Last,
+}
+
+fn chapter_title(text: &str, ordinal: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if line.is_empty() {
+        return format!("第 {ordinal} 章");
+    }
+    let mut title: String = line.chars().take(48).collect();
+    if line.chars().count() > 48 {
+        title.push('…');
+    }
+    title
 }
 
 fn chapter_document(book: &EpubBook<'_>, spine: usize) -> Result<TextDocument> {
@@ -468,6 +530,29 @@ mod tests {
         assert_eq!(session.spine, 1);
         assert_eq!(session.frame().page, 0);
         assert!(!session.action(Action::Previous).unwrap());
+    }
+
+    #[test]
+    fn toc_lists_only_readable_chapters_and_jumps_to_them() {
+        let epub_bytes = test_epub::make_epub_with_empty_spines();
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+
+        let toc = session.toc_entries().unwrap();
+        assert_eq!(toc.len(), 2);
+        assert_eq!(toc[0].spine, 1);
+        assert_eq!(toc[1].spine, 3);
+        assert!(toc[0].current);
+        assert!(!toc[1].current);
+        assert!(toc[0].title.starts_with("AAAA"));
+
+        assert!(session.jump_to_spine(toc[1].spine).unwrap());
+        assert_eq!(session.spine, 3);
+        assert_eq!(session.frame().page, 0);
+        assert!(!session.jump_to_spine(3).unwrap());
+        assert!(session.jump_to_spine(0).is_err());
     }
 
     #[test]
