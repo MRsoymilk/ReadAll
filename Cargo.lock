@@ -16,6 +16,10 @@ name = "readall-core"
 version = "0.1.0"
 
 [[package]]
+name = "readall-font"
+version = "0.1.0"
+
+[[package]]
 name = "readall-platform"
 version = "0.1.0"
 dependencies = [

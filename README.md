@@ -32,6 +32,7 @@ Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成
 | 模块 | 职责 |
 | --- | --- |
 | `readall-core` | 文档输入约束、格式模型、文本解析、内容位置；不依赖文件路径或窗口对象 |
+| `readall-font` | 自研 TrueType/TTC 解析、Unicode 字形映射、真实字宽、简单及复合字形轮廓；不执行字体字节码 |
 | `readall-render` | 自研 RGBA 像素缓冲区、绘制指令、矩形裁剪与合成；无字体、曲线、GPU 或窗口呈现 |
 | `readall-platform` | 本地文件访问；后续承接窗口、系统输入、Android URI 和像素呈现 |
 | `readall` | 当前的诊断 CLI，后续的原生应用入口 |
@@ -43,6 +44,19 @@ Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成
 文本位置格式为 `txt-v1:<原始文件SHA-256>:<规范化UTF-8字节偏移>`。v1 去除编码 BOM，将 CRLF/CR 规范化为 LF；偏移不是 UTF-16 文件的原始字节位置，也不是字符序号或页码。原文件内容改变后，旧位置拒绝恢复。阅读进度自动持久化尚未实现。
 
 UTF-16 必须带 BOM；GBK 等旧编码和 UTF-32 尚未支持。无效编码、NUL/终端控制字符会报错，而不是有损替换。`ZIP` 签名只说明可能为 EPUB，尚不验证 ZIP/EPUB 结构。
+
+## 字体引擎
+
+`readall-font` 已支持静态 TrueType sfnt 与 TTC 指定 face、Unicode `cmap` 4/12、`hhea/hmtx` 字宽、长短 `loca`、简单轮廓与复合轮廓（平移、缩放、矩阵变换和实际轮廓点对齐）。循环引用、截断数据、越界索引及超出深度/点数/组件预算会报错。解析格式参考 [OpenType 规范](https://learn.microsoft.com/en-us/typography/opentype/spec/)、[字符映射](https://learn.microsoft.com/en-us/typography/opentype/spec/cmap)与[字形轮廓](https://learn.microsoft.com/en-us/typography/opentype/spec/glyf)。
+
+当前不支持 CFF/CFF2、WOFF、可变字体、字体塑形、hinting 字节码、phantom point 对齐或带变换的 USE_MY_METRICS。文件结构校验不等于字体真实性认证，也未实现字体校验和检查。字体加载上限默认 64 MiB；解析核心不访问系统路径。测试在 Rust 中构造小型样本，不将系统字体复制进项目。
+
+```sh
+cargo run -p readall-font --example inspect --offline -- --discover
+cargo run -p readall-font --example inspect --offline -- /usr/share/fonts/dejavu/DejaVuSans.ttf
+```
+
+上面的实际字体路径取决于系统安装情况；缺字显示 `MISSING`，不把 .notdef 当作该字符已受支持。
 
 ## 后续顺序
 

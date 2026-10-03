@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/readall-core", "crates/readall-render", "crates/readall-platform", "apps/readall"]
+members = ["crates/readall-core", "crates/readall-font", "crates/readall-render", "crates/readall-platform", "apps/readall"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
+readall-font = { path = "crates/readall-font" }
 readall-core = { path = "crates/readall-core" }
 readall-render = { path = "crates/readall-render" }
 readall-platform = { path = "crates/readall-platform" }
