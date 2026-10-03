@@ -220,6 +220,7 @@ pub struct EpubBook<'a> {
     title: Option<String>,
     manifest: Vec<ManifestItem>,
     spine: Vec<SpineItem>,
+    legacy_toc_manifest_index: Option<usize>,
     limits: EpubLimits,
 }
 
@@ -257,6 +258,7 @@ impl<'a> EpubBook<'a> {
             title: parsed.title,
             manifest: parsed.manifest,
             spine: parsed.spine,
+            legacy_toc_manifest_index: parsed.legacy_toc_manifest_index,
             limits,
         })
     }
@@ -366,25 +368,43 @@ impl<'a> EpubBook<'a> {
         Ok(self.archive.read(path)?)
     }
 
-    /// Returns the EPUB 3 table of contents from the manifest `nav` document.
+    /// Returns the publication table of contents. EPUB 3 Navigation Documents
+    /// take precedence; legacy EPUB 2 NCX is used as a compatibility fallback.
     /// Links that do not resolve to a spine document are ignored. Fragment IDs
     /// are preserved for callers that support intra-document navigation.
     pub fn navigation(&self) -> Result<Vec<NavigationEntry>> {
-        let Some(item) = self
+        if let Some(item) = self
             .manifest
             .iter()
             .find(|item| has_token(item.properties(), "nav"))
-        else {
+        {
+            if item.media_type() != "application/xhtml+xml" {
+                return Err(EpubError::Invalid(
+                    "EPUB navigation document is not application/xhtml+xml",
+                ));
+            }
+            let bytes = self.archive.read(item.path())?;
+            ensure_xml_size(&bytes, self.limits.max_xml_bytes)?;
+            return parse_navigation_document(
+                &bytes,
+                item.path(),
+                &self.manifest,
+                &self.spine,
+                self.limits.max_xml_bytes,
+                self.limits.max_spine_items,
+            );
+        }
+
+        let Some(index) = self.legacy_toc_manifest_index else {
             return Ok(Vec::new());
         };
-        if item.media_type() != "application/xhtml+xml" {
-            return Err(EpubError::Invalid(
-                "EPUB navigation document is not application/xhtml+xml",
-            ));
-        }
+        let item = self
+            .manifest
+            .get(index)
+            .ok_or(EpubError::Invalid("legacy NCX manifest index is invalid"))?;
         let bytes = self.archive.read(item.path())?;
         ensure_xml_size(&bytes, self.limits.max_xml_bytes)?;
-        parse_navigation_document(
+        parse_ncx_document(
             &bytes,
             item.path(),
             &self.manifest,
@@ -399,6 +419,7 @@ struct ParsedPackage {
     title: Option<String>,
     manifest: Vec<ManifestItem>,
     spine: Vec<SpineItem>,
+    legacy_toc_manifest_index: Option<usize>,
 }
 
 struct SpineReference {
@@ -518,6 +539,7 @@ fn parse_package(
     let mut depth = 0_usize;
     let mut manifest_depth = None;
     let mut spine_depth = None;
+    let mut legacy_toc_id = None;
     let mut title_depth = None;
     let mut title_text = String::new();
     for event in &events {
@@ -529,6 +551,9 @@ fn parse_package(
                     manifest_depth = Some(element_depth);
                 } else if local == "spine" && spine_depth.is_none() && !element.empty {
                     spine_depth = Some(element_depth);
+                    if let Some(toc) = element.attribute("toc") {
+                        legacy_toc_id = Some(owned(toc)?);
+                    }
                 } else if local == "title" && title_depth.is_none() && !element.empty {
                     title_depth = Some(element_depth);
                     title_text.clear();
@@ -614,6 +639,20 @@ fn parse_package(
     for (index, item) in manifest.iter().enumerate() {
         by_id.insert(item.id.as_str(), index);
     }
+    // OPF 2 `spine@toc` is legacy metadata. Treat a stale or malformed
+    // reference as advisory so adding NCX compatibility cannot make an
+    // otherwise readable EPUB fail package parsing. If the reference is not
+    // usable, fall back to the first manifest NCX resource when present.
+    let legacy_toc_manifest_index = legacy_toc_id
+        .as_deref()
+        .and_then(|id| by_id.get(id).copied())
+        .filter(|index| manifest[*index].media_type() == "application/x-dtbncx+xml")
+        .or_else(|| {
+            manifest
+                .iter()
+                .position(|item| item.media_type() == "application/x-dtbncx+xml")
+        });
+
     let mut spine = Vec::new();
     spine
         .try_reserve(spine_refs.len())
@@ -640,6 +679,7 @@ fn parse_package(
         title,
         manifest,
         spine,
+        legacy_toc_manifest_index,
     })
 }
 
@@ -762,6 +802,133 @@ fn parse_navigation_document(
                     toc_complete = true;
                     list_depth = 0;
                     link = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+#[derive(Debug)]
+struct NcxPoint {
+    element_depth: usize,
+    navigation_depth: usize,
+    label: String,
+    emitted: bool,
+}
+
+fn parse_ncx_document(
+    bytes: &[u8],
+    ncx_path: &str,
+    manifest: &[ManifestItem],
+    spine: &[SpineItem],
+    max_xml_bytes: usize,
+    max_entries: usize,
+) -> Result<Vec<NavigationEntry>> {
+    let events = xml::parse(bytes, xml_limits(max_xml_bytes))?;
+    let root = events.iter().find_map(|event| match event {
+        Event::Start(element) => Some(local_name(&element.name)),
+        _ => None,
+    });
+    if root != Some("ncx") {
+        return Err(EpubError::Invalid("NCX root element is not ncx"));
+    }
+
+    let mut entries = Vec::new();
+    entries
+        .try_reserve(max_entries.min(128))
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let mut depth = 0_usize;
+    let mut nav_map_depth = None;
+    let mut nav_label_depth = None;
+    let mut label_text_depth = None;
+    let mut points: Vec<NcxPoint> = Vec::new();
+    points
+        .try_reserve(16)
+        .map_err(|_| EpubError::AllocationFailed)?;
+
+    for event in &events {
+        match event {
+            Event::Start(element) => {
+                let element_depth = depth + 1;
+                let local = local_name(&element.name);
+                if local == "navMap" && nav_map_depth.is_none() && !element.empty {
+                    nav_map_depth = Some(element_depth);
+                } else if nav_map_depth.is_some() && local == "navPoint" && !element.empty {
+                    points
+                        .try_reserve(1)
+                        .map_err(|_| EpubError::AllocationFailed)?;
+                    points.push(NcxPoint {
+                        element_depth,
+                        navigation_depth: points.len(),
+                        label: String::new(),
+                        emitted: false,
+                    });
+                } else if !points.is_empty() && local == "navLabel" && !element.empty {
+                    nav_label_depth = Some(element_depth);
+                } else if nav_label_depth.is_some() && local == "text" && !element.empty {
+                    label_text_depth = Some(element_depth);
+                } else if !points.is_empty() && local == "content" {
+                    let src = required_attribute(element, "src", "NCX content src")?;
+                    let point = points.last_mut().expect("checked above");
+                    if point.emitted {
+                        return Err(EpubError::Invalid(
+                            "NCX navPoint has multiple content targets",
+                        ));
+                    }
+                    let label = normalize_navigation_label(&point.label)?;
+                    if label.is_empty() {
+                        return Err(EpubError::Invalid("NCX navPoint label is empty"));
+                    }
+                    let (path, fragment) = resolve_navigation_href(ncx_path, src)?;
+                    if let Some(spine_index) = spine_index_for_path(manifest, spine, &path) {
+                        if entries.len() >= max_entries {
+                            return Err(EpubError::LimitExceeded("navigation entries"));
+                        }
+                        entries
+                            .try_reserve(1)
+                            .map_err(|_| EpubError::AllocationFailed)?;
+                        entries.push(NavigationEntry {
+                            label,
+                            spine_index,
+                            fragment,
+                            depth: point.navigation_depth,
+                        });
+                    }
+                    point.emitted = true;
+                }
+                if !element.empty {
+                    depth = element_depth;
+                }
+            }
+            Event::Text(text) if label_text_depth.is_some() => {
+                if let Some(point) = points.last_mut() {
+                    append_navigation_label(&mut point.label, text)?;
+                }
+            }
+            Event::Text(_) => {}
+            Event::End(name) => {
+                let local = local_name(name);
+                if label_text_depth == Some(depth) && local == "text" {
+                    label_text_depth = None;
+                }
+                if nav_label_depth == Some(depth) && local == "navLabel" {
+                    nav_label_depth = None;
+                    label_text_depth = None;
+                }
+                if points
+                    .last()
+                    .is_some_and(|point| point.element_depth == depth && local == "navPoint")
+                {
+                    let point = points.pop().expect("checked above");
+                    if !point.emitted {
+                        return Err(EpubError::Invalid("NCX navPoint is missing content"));
+                    }
+                }
+                if nav_map_depth == Some(depth) && local == "navMap" {
+                    nav_map_depth = None;
+                    points.clear();
                 }
                 depth = depth.saturating_sub(1);
             }
@@ -1115,6 +1282,88 @@ mod tests {
                 data: b"<html><body>Extra</body></html>",
             },
         ])
+    }
+
+    fn ncx_fixture() -> Vec<u8> {
+        const CONTAINER: &[u8] = br#"<container><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        const PACKAGE: &[u8] = br#"<package version="2.0" xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>NCX Test</dc:title></metadata><manifest><item id="one" href="text/one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="text/two.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="one"/><itemref idref="two"/></spine></package>"#;
+        const NCX: &str = r#"<?xml version="1.0"?><!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/><docTitle><text>NCX Test</text></docTitle><navMap><navPoint id="p1" playOrder="1"><navLabel><text>旧目录第一章</text></navLabel><content src="text/one.xhtml#intro"/><navPoint id="p1-1" playOrder="2"><navLabel><text>第一章子节</text></navLabel><content src="text/one.xhtml#details"/></navPoint></navPoint><navPoint id="p2" playOrder="3"><navLabel><text>旧目录第二章</text></navLabel><content src="text/two.xhtml#deep"/></navPoint></navMap></ncx>"#;
+        epub(&[
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: CONTAINER,
+            },
+            Entry {
+                name: "OEBPS/package.opf",
+                data: PACKAGE,
+            },
+            Entry {
+                name: "OEBPS/text/one.xhtml",
+                data: b"<html><body><h1 id=\"intro\">One</h1><p id=\"details\">Details</p></body></html>",
+            },
+            Entry {
+                name: "OEBPS/text/two.xhtml",
+                data: b"<html><body><h1 id=\"deep\">Two</h1></body></html>",
+            },
+            Entry {
+                name: "OEBPS/toc.ncx",
+                data: NCX.as_bytes(),
+            },
+        ])
+    }
+
+    #[test]
+    fn epub2_ncx_navigation_is_used_when_epub3_nav_is_absent() {
+        let bytes = ncx_fixture();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        let navigation = book.navigation().unwrap();
+        assert_eq!(navigation.len(), 3);
+        assert_eq!(navigation[0].label(), "旧目录第一章");
+        assert_eq!(navigation[0].spine_index(), 0);
+        assert_eq!(navigation[0].fragment(), Some("intro"));
+        assert_eq!(navigation[0].depth(), 0);
+        assert_eq!(navigation[1].label(), "第一章子节");
+        assert_eq!(navigation[1].spine_index(), 0);
+        assert_eq!(navigation[1].fragment(), Some("details"));
+        assert_eq!(navigation[1].depth(), 1);
+        assert_eq!(navigation[2].label(), "旧目录第二章");
+        assert_eq!(navigation[2].spine_index(), 1);
+        assert_eq!(navigation[2].fragment(), Some("deep"));
+        assert_eq!(navigation[2].depth(), 0);
+
+        let details = book.locator_for_fragment(0, "details").unwrap().unwrap();
+        assert!(details.utf8_offset() > 0);
+    }
+
+    #[test]
+    fn stale_legacy_toc_reference_does_not_block_reading() {
+        const CONTAINER: &[u8] = br#"<container><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        const PACKAGE: &[u8] = br#"<package version="2.0"><metadata><title>Legacy</title></metadata><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="missing"><itemref idref="one"/></spine></package>"#;
+        let bytes = epub(&[
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: CONTAINER,
+            },
+            Entry {
+                name: "OEBPS/package.opf",
+                data: PACKAGE,
+            },
+            Entry {
+                name: "OEBPS/one.xhtml",
+                data: b"<html><body>Readable</body></html>",
+            },
+        ]);
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        assert_eq!(book.read_spine_text(0).unwrap(), "Readable");
+        assert!(book.navigation().unwrap().is_empty());
     }
 
     #[test]

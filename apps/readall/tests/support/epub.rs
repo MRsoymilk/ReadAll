@@ -92,6 +92,39 @@ pub fn make_epub_with_navigation() -> Vec<u8> {
 }
 
 #[allow(dead_code)]
+pub fn make_epub_with_ncx_navigation() -> Vec<u8> {
+    let chapter_one = format!(
+        "<html><body><h1 id=\"intro\">AAAA</h1><p>{}</p><h2 id=\"details\">WWWW</h2><p>{}</p></body></html>",
+        "AAAA WWWW ".repeat(40),
+        "WWWW AAAA ".repeat(40)
+    );
+    let chapter_two = format!(
+        "<html><body><h1 id=\"deep\">WWWW</h1><p>{}</p></body></html>",
+        "WWWW AAAA ".repeat(80)
+    );
+    let ncx = r#"<?xml version="1.0"?><!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint id="one"><navLabel><text>旧目录第一章</text></navLabel><content src="one.xhtml#intro"/><navPoint id="details"><navLabel><text>第一章子节</text></navLabel><content src="one.xhtml#details"/></navPoint></navPoint><navPoint id="two"><navLabel><text>旧目录第二章</text></navLabel><content src="two.xhtml#deep"/></navPoint></navMap></ncx>"#;
+    build_epub_named_with_navigation_resources(
+        "ReadAll NCX Test",
+        vec![
+            (
+                "one",
+                "one.xhtml",
+                "application/xhtml+xml",
+                chapter_one.into_bytes(),
+            ),
+            (
+                "two",
+                "two.xhtml",
+                "application/xhtml+xml",
+                chapter_two.into_bytes(),
+            ),
+        ],
+        None,
+        Some(ncx.as_bytes().to_vec()),
+    )
+}
+
+#[allow(dead_code)]
 pub fn make_epub_with_empty_spines() -> Vec<u8> {
     let chapter_one = format!(
         "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
@@ -150,6 +183,15 @@ fn build_epub_named_with_nav(
     spines: Vec<(&str, &str, &str, Vec<u8>)>,
     navigation: Option<Vec<u8>>,
 ) -> Vec<u8> {
+    build_epub_named_with_navigation_resources(title, spines, navigation, None)
+}
+
+fn build_epub_named_with_navigation_resources(
+    title: &str,
+    spines: Vec<(&str, &str, &str, Vec<u8>)>,
+    navigation: Option<Vec<u8>>,
+    ncx: Option<Vec<u8>>,
+) -> Vec<u8> {
     const CONTAINER: &[u8] = br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
 
     let mut package = format!(
@@ -165,7 +207,15 @@ fn build_epub_named_with_nav(
             r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
         );
     }
-    package.push_str("</manifest><spine>");
+    if ncx.is_some() {
+        package
+            .push_str(r#"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#);
+    }
+    if ncx.is_some() {
+        package.push_str("</manifest><spine toc=\"ncx\">");
+    } else {
+        package.push_str("</manifest><spine>");
+    }
     for (id, _, _, _) in &spines {
         package.push_str(&format!(r#"<itemref idref="{id}"/>"#));
     }
@@ -178,6 +228,9 @@ fn build_epub_named_with_nav(
     ];
     if let Some(navigation) = navigation {
         entries.push(("OEBPS/nav.xhtml".into(), navigation));
+    }
+    if let Some(ncx) = ncx {
+        entries.push(("OEBPS/toc.ncx".into(), ncx));
     }
     for (_, href, _, data) in spines {
         entries.push((format!("OEBPS/{href}"), data));

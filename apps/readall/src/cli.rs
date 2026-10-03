@@ -246,10 +246,10 @@ fn write_epub_info(book: &EpubBook<'_>, output: &mut impl Write) -> Result<()> {
     }
     match book.navigation() {
         Ok(navigation) if navigation.is_empty() => {
-            writeln!(output, "EPUB3 navigation: none")?;
+            writeln!(output, "Navigation: none")?;
         }
         Ok(navigation) => {
-            writeln!(output, "EPUB3 navigation entries: {}", navigation.len())?;
+            writeln!(output, "Navigation entries: {}", navigation.len())?;
             for entry in navigation.iter().take(32) {
                 let indent = "  ".repeat(entry.depth().min(8));
                 let fragment = entry
@@ -273,7 +273,7 @@ fn write_epub_info(book: &EpubBook<'_>, output: &mut impl Write) -> Result<()> {
             }
         }
         Err(error) => {
-            writeln!(output, "EPUB3 navigation: unreadable ({error})")?;
+            writeln!(output, "Navigation: unreadable ({error})")?;
         }
     }
     Ok(())
@@ -387,7 +387,7 @@ mod tests {
         let mut output = Vec::new();
         write_epub_info(&book, &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("EPUB3 navigation entries: 3"));
+        assert!(text.contains("Navigation entries: 3"));
         assert!(text.contains("正式目录第一章 -> spine 1#intro"));
         assert!(text.contains("  第一章详细部分 -> spine 1#details"));
         assert!(text.contains("正式目录第二章 -> spine 2#deep"));

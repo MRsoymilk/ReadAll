@@ -651,6 +651,36 @@ mod tests {
     }
 
     #[test]
+    fn toc_uses_epub2_ncx_when_epub3_navigation_is_absent() {
+        let epub_bytes = test_epub::make_epub_with_ncx_navigation();
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+
+        let toc = session.toc_entries().unwrap();
+        assert_eq!(toc.len(), 3);
+        assert_eq!(toc[0].title, "旧目录第一章");
+        assert_eq!(toc[0].spine, 0);
+        assert_eq!(toc[0].offset, 0);
+        assert_eq!(toc[0].depth, 0);
+        assert_eq!(toc[1].title, "第一章子节");
+        assert_eq!(toc[1].spine, 0);
+        assert!(toc[1].offset > 0);
+        assert_eq!(toc[1].depth, 1);
+        assert_eq!(toc[2].title, "旧目录第二章");
+        assert_eq!(toc[2].spine, 1);
+        assert_eq!(toc[2].offset, 0);
+
+        assert!(
+            session
+                .jump_to_toc_target(toc[1].spine, toc[1].offset)
+                .unwrap()
+        );
+        assert_eq!(session.anchor().utf8_offset(), toc[1].offset as u64);
+    }
+
+    #[test]
     fn explicit_spine_start_is_validated() {
         let epub_bytes = test_epub::make_epub();
         let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
