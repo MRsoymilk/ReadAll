@@ -49,10 +49,21 @@ fn event_bytes(object: u32, opcode: u16, body: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(body);
     bytes
 }
+fn protocol_write(stream: &mut UnixStream, bytes: &[u8]) {
+    match stream.write_all(bytes) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::NotConnected
+            ) => {}
+        Err(error) => panic!("mock protocol write failed: {error}"),
+    }
+}
 fn event(stream: &mut UnixStream, object: u32, opcode: u16, body: &[u8]) {
-    stream
-        .write_all(&event_bytes(object, opcode, body))
-        .unwrap();
+    protocol_write(stream, &event_bytes(object, opcode, body));
 }
 #[derive(Clone, Copy, Debug)]
 enum Kind {
@@ -138,7 +149,7 @@ fn serve(listener: UnixListener, scripted: bool) -> Observed {
                 // second protocol event and masquerade as a client failure.
                 let mut response = event_bytes(id, 0, &words(&[1]));
                 response.extend(event_bytes(1, 1, &words(&[id])));
-                stream.write_all(&response).unwrap();
+                protocol_write(&mut stream, &response);
             }
             (Kind::Registry, 0) => {
                 let name = word(&body, 0);
