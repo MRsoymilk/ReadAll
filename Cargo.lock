@@ -25,6 +25,7 @@ name = "readall-platform"
 version = "0.1.0"
 dependencies = [
  "readall-core",
+ "readall-render",
 ]
 
 [[package]]

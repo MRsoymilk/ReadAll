@@ -1,4 +1,10 @@
-//! Host adapters. Android SAF, windowing, and presentation are not implemented yet.
+//! Host adapters. Linux Wayland is opt-in; Android SAF and other window backends remain unimplemented.
+pub mod window;
+
+// Necessary native FFI is isolated; all other platform modules deny unsafe code.
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+#[allow(unsafe_code)]
+mod wayland;
 
 use std::{
     fs::File,
