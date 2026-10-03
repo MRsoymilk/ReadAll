@@ -20,6 +20,7 @@ pub(crate) enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TocEntry {
     pub(crate) spine: usize,
+    pub(crate) offset: usize,
     pub(crate) title: String,
     pub(crate) depth: usize,
 }
@@ -138,9 +139,6 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
             let mut entries = Vec::new();
             for item in navigation {
                 let spine = item.spine_index();
-                if entries.iter().any(|entry: &TocEntry| entry.spine == spine) {
-                    continue;
-                }
                 let Some(spine_item) = self.book.spine().get(spine) else {
                     continue;
                 };
@@ -155,8 +153,19 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
                 if text.trim().is_empty() {
                     continue;
                 }
+                let offset = match item.fragment() {
+                    Some(fragment) => self
+                        .book
+                        .locator_for_fragment(spine, fragment)
+                        .ok()
+                        .flatten()
+                        .and_then(|locator| usize::try_from(locator.utf8_offset()).ok())
+                        .unwrap_or(0),
+                    None => 0,
+                };
                 entries.push(TocEntry {
                     spine,
+                    offset,
                     title: item.label().to_owned(),
                     depth: item.depth(),
                 });
@@ -188,6 +197,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
             let title = chapter_title(&text, entries.len() + 1);
             entries.push(TocEntry {
                 spine,
+                offset: 0,
                 title,
                 depth: 0,
             });
@@ -198,13 +208,28 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         Ok(entries)
     }
 
+    #[cfg(test)]
     pub(crate) fn jump_to_spine(&mut self, spine: usize) -> Result<bool> {
-        if spine == self.spine && self.frame.page == 0 {
-            return Ok(false);
-        }
+        self.jump_to_toc_target(spine, 0)
+    }
+
+    pub(crate) fn jump_to_toc_target(&mut self, spine: usize, offset: usize) -> Result<bool> {
         let chapter = readable_chapter(self.book, spine)?
             .ok_or("selected EPUB chapter has no readable text")?;
-        self.switch_chapter(spine, chapter, PageTarget::First)
+        let anchor = self.book.locator(spine, offset)?;
+        if self.spine == spine && self.anchor == anchor {
+            return Ok(false);
+        }
+        let mut options = self.options.clone();
+        options.page = None;
+        options.at = Some(chapter.locator(offset)?);
+        let frame = self.renderer.render(&chapter, &options)?;
+        self.chapter = chapter;
+        self.spine = spine;
+        self.options = options;
+        self.frame = frame;
+        self.anchor = anchor;
+        Ok(true)
     }
 
     pub(crate) fn title(&self) -> String {
@@ -579,6 +604,8 @@ mod tests {
         assert_eq!(toc.len(), 2);
         assert_eq!(toc[0].spine, 1);
         assert_eq!(toc[1].spine, 3);
+        assert_eq!(toc[0].offset, 0);
+        assert_eq!(toc[1].offset, 0);
         assert_eq!(toc[0].depth, 0);
         assert_eq!(toc[1].depth, 0);
         assert!(toc[0].title.starts_with("AAAA"));
@@ -596,16 +623,31 @@ mod tests {
         let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
         let font_bytes = test_font::make_font();
         let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
-        let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
 
         let toc = session.toc_entries().unwrap();
-        assert_eq!(toc.len(), 2);
+        assert_eq!(toc.len(), 3);
         assert_eq!(toc[0].title, "正式目录第一章");
         assert_eq!(toc[0].spine, 0);
+        assert_eq!(toc[0].offset, 0);
         assert_eq!(toc[0].depth, 0);
-        assert_eq!(toc[1].title, "正式目录第二章");
-        assert_eq!(toc[1].spine, 1);
+        assert_eq!(toc[1].title, "第一章详细部分");
+        assert_eq!(toc[1].spine, 0);
+        assert!(toc[1].offset > 0);
         assert_eq!(toc[1].depth, 1);
+        assert_eq!(toc[2].title, "正式目录第二章");
+        assert_eq!(toc[2].spine, 1);
+        assert_eq!(toc[2].offset, 0);
+        assert_eq!(toc[2].depth, 0);
+
+        let target = toc[1].offset;
+        assert!(session.jump_to_toc_target(toc[1].spine, target).unwrap());
+        assert_eq!(session.anchor().spine_index(), 0);
+        assert_eq!(session.anchor().utf8_offset(), target as u64);
+        let exact = session.anchor().clone();
+        session.resize(260, 160).unwrap();
+        session.action(Action::Larger).unwrap();
+        assert_eq!(session.anchor(), &exact);
     }
 
     #[test]

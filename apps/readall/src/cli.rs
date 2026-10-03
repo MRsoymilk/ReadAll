@@ -387,9 +387,10 @@ mod tests {
         let mut output = Vec::new();
         write_epub_info(&book, &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("EPUB3 navigation entries: 2"));
+        assert!(text.contains("EPUB3 navigation entries: 3"));
         assert!(text.contains("正式目录第一章 -> spine 1#intro"));
-        assert!(text.contains("  正式目录第二章 -> spine 2#deep"));
+        assert!(text.contains("  第一章详细部分 -> spine 1#details"));
+        assert!(text.contains("正式目录第二章 -> spine 2#deep"));
     }
 
     #[test]

@@ -62,14 +62,15 @@ pub fn make_epub_with_long_title() -> Vec<u8> {
 #[allow(dead_code)]
 pub fn make_epub_with_navigation() -> Vec<u8> {
     let chapter_one = format!(
-        "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
-        "AAAA WWWW ".repeat(80)
+        "<html><body><h1 id=\"intro\">AAAA</h1><p>{}</p><h2 id=\"details\">WWWW</h2><p>{}</p></body></html>",
+        "AAAA WWWW ".repeat(40),
+        "WWWW AAAA ".repeat(40)
     );
     let chapter_two = format!(
-        "<html><body><h1>WWWW</h1><p>{}</p></body></html>",
+        "<html><body><h1 id=\"deep\">WWWW</h1><p>{}</p></body></html>",
         "WWWW AAAA ".repeat(80)
     );
-    let nav = r#"<?xml version="1.0"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="one.xhtml#intro">正式目录第一章</a><ol><li><a href="two.xhtml#deep">正式目录第二章</a></li></ol></li></ol></nav></body></html>"#;
+    let nav = r#"<?xml version="1.0"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="one.xhtml#intro">正式目录第一章</a><ol><li><a href="one.xhtml#details">第一章详细部分</a></li></ol></li><li><a href="two.xhtml#deep">正式目录第二章</a></li></ol></nav></body></html>"#;
     build_epub_named_with_nav(
         "ReadAll Navigation Test",
         vec![

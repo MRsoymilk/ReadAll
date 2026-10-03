@@ -80,19 +80,14 @@ mod enabled {
             ui_font: UiFont,
         ) -> WindowResult<Self> {
             let surface = session.frame().surface.clone();
-            let current_spine = session.anchor().spine_index();
             let toc = session.toc_entries()?;
-            let toc_selected = toc
-                .iter()
-                .position(|entry| entry.spine == current_spine)
-                .unwrap_or(0);
             let mut reader = ReaderWindow {
                 session,
                 progress,
                 surface,
                 ui_font,
                 toc,
-                toc_selected,
+                toc_selected: 0,
                 toc_scroll: 0,
                 toolbar: ToolbarMode::Expanded,
                 pointer: None,
@@ -100,7 +95,7 @@ mod enabled {
                 title_marquee_span: 0,
                 close_requested: false,
             };
-            reader.keep_toc_selected_visible();
+            reader.sync_toc_selection();
             reader.refresh_surface()?;
             Ok(reader)
         }
@@ -447,9 +442,9 @@ mod enabled {
                 },
             ])?;
             let hover = self.hover_target();
-            let current_spine = self.session.anchor().spine_index();
+            let current_toc = self.current_toc_index();
             let visible = self.visible_toc_rows();
-            for (row, entry) in self
+            for (row, _entry) in self
                 .toc
                 .iter()
                 .skip(self.toc_scroll)
@@ -459,7 +454,7 @@ mod enabled {
                 let index = self.toc_scroll + row;
                 let y = panel.y + 48 + row as i32 * 38;
                 let selected = index == self.toc_selected;
-                let current = entry.spine == current_spine;
+                let current = Some(index) == current_toc;
                 let hovered = hover == ReaderHover::TocRow(index);
                 if selected || current || hovered {
                     self.surface.draw(&[DrawCommand::FillRect {
@@ -506,19 +501,37 @@ mod enabled {
             Ok(())
         }
 
+        fn current_toc_index(&self) -> Option<usize> {
+            let anchor = self.session.anchor();
+            let current_spine = anchor.spine_index();
+            let current_offset = usize::try_from(anchor.utf8_offset()).unwrap_or(usize::MAX);
+            self.toc
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.spine == current_spine && entry.offset <= current_offset)
+                .max_by_key(|(_, entry)| entry.offset)
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    self.toc
+                        .iter()
+                        .position(|entry| entry.spine == current_spine)
+                })
+        }
+
         fn sync_toc_selection(&mut self) {
-            let current = self.session.anchor().spine_index();
-            if let Some(index) = self.toc.iter().position(|entry| entry.spine == current) {
+            if let Some(index) = self.current_toc_index() {
                 self.toc_selected = index;
                 self.keep_toc_selected_visible();
             }
         }
 
         fn jump_to_toc(&mut self, index: usize) -> WindowResult<bool> {
-            let Some(spine) = self.toc.get(index).map(|entry| entry.spine) else {
+            let Some((spine, offset)) =
+                self.toc.get(index).map(|entry| (entry.spine, entry.offset))
+            else {
                 return Ok(false);
             };
-            let changed = self.session.jump_to_spine(spine)?;
+            let changed = self.session.jump_to_toc_target(spine, offset)?;
             self.toc_selected = index;
             self.keep_toc_selected_visible();
             self.toolbar = ToolbarMode::Expanded;
@@ -1073,6 +1086,28 @@ mod enabled {
             );
             assert_eq!(reader.session.anchor().spine_index(), 1);
             assert_eq!(reader.toolbar, ToolbarMode::Expanded);
+        }
+
+        #[test]
+        fn toc_fragment_jump_selects_the_exact_entry_within_one_spine() {
+            let epub_bytes = test_epub::make_epub_with_navigation();
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui_font =
+                UiFont::from_bytes(font_bytes.clone(), PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui_font).unwrap();
+
+            assert_eq!(reader.toc.len(), 3);
+            assert_eq!(reader.current_toc_index(), Some(0));
+            let target_offset = reader.toc[1].offset;
+            assert!(target_offset > 0);
+            assert!(reader.jump_to_toc(1).unwrap());
+            assert_eq!(reader.session.anchor().spine_index(), 0);
+            assert_eq!(reader.session.anchor().utf8_offset(), target_offset as u64);
+            assert_eq!(reader.current_toc_index(), Some(1));
+            assert_eq!(reader.toc_selected, 1);
         }
 
         #[test]

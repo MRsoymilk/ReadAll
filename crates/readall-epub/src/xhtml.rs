@@ -6,7 +6,26 @@ use crate::{
     xml::{self, Event, XmlLimits, local_name},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtractedText {
+    pub(crate) text: String,
+    anchors: Vec<(String, usize)>,
+}
+
+impl ExtractedText {
+    pub(crate) fn anchor(&self, id: &str) -> Option<usize> {
+        self.anchors
+            .iter()
+            .find(|(candidate, _)| candidate == id)
+            .map(|(_, offset)| *offset)
+    }
+}
+
 pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
+    Ok(extract_with_anchors(bytes, max_bytes)?.text)
+}
+
+pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<ExtractedText> {
     let events = xml::parse(
         bytes,
         XmlLimits {
@@ -27,6 +46,10 @@ pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
         .try_reserve(bytes.len().min(64 * 1024))
         .map_err(|_| EpubError::AllocationFailed)?;
 
+    let mut anchors = Vec::new();
+    anchors
+        .try_reserve(32)
+        .map_err(|_| EpubError::AllocationFailed)?;
     let mut depth = 0_usize;
     let mut body_depth = None;
     let mut suppressed_depth = None;
@@ -52,6 +75,13 @@ pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
                         block_break(&mut output, max_bytes)?;
                         pending_space = false;
                     }
+                }
+                if body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && !is_suppressed(name)
+                    && let Some(id) = element.attribute("id")
+                {
+                    record_anchor(&mut anchors, id, output.len())?;
                 }
                 if !element.empty {
                     depth = current;
@@ -84,7 +114,32 @@ pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
     while output.ends_with([' ', '\n']) {
         output.pop();
     }
-    Ok(output)
+    for (_, offset) in &mut anchors {
+        *offset = (*offset).min(output.len());
+    }
+    Ok(ExtractedText {
+        text: output,
+        anchors,
+    })
+}
+
+fn record_anchor(anchors: &mut Vec<(String, usize)>, id: &str, offset: usize) -> Result<()> {
+    if id.is_empty() || anchors.iter().any(|(existing, _)| existing == id) {
+        return Ok(());
+    }
+    if id.len() > 4096 || anchors.len() >= 16_384 {
+        return Err(EpubError::LimitExceeded("XHTML anchor metadata"));
+    }
+    let mut value = String::new();
+    value
+        .try_reserve_exact(id.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    value.push_str(id);
+    anchors
+        .try_reserve(1)
+        .map_err(|_| EpubError::AllocationFailed)?;
+    anchors.push((value, offset));
+    Ok(())
 }
 
 fn is_suppressed(name: &str) -> bool {
@@ -197,6 +252,21 @@ mod tests {
             text,
             "Chapter & One\n\nHello world!\nNext line.\n\nFirst\n\nSecond"
         );
+    }
+
+    #[test]
+    fn element_ids_map_to_canonical_text_offsets() {
+        let extracted = extract_with_anchors(
+            br#"<html><body id="top"><p>Before</p><section id="target"><h2 xml:id="heading">Target</h2><p>After</p></section></body></html>"#,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(extracted.anchor("top"), Some(0));
+        let target = extracted.anchor("target").unwrap();
+        let heading = extracted.anchor("heading").unwrap();
+        assert_eq!(&extracted.text[target..target + "Target".len()], "Target");
+        assert_eq!(target, heading);
+        assert!(extracted.anchor("missing").is_none());
     }
 
     #[test]

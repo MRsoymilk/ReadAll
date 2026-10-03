@@ -316,6 +316,35 @@ impl<'a> EpubBook<'a> {
         })
     }
 
+    /// Resolves an XHTML element ID to the canonical text offset used by
+    /// `epub-v1` locators. Missing IDs are not an error so callers can fall
+    /// back to the beginning of the target spine document.
+    pub fn locator_for_fragment(
+        &self,
+        spine_index: usize,
+        fragment: &str,
+    ) -> Result<Option<EpubLocator>> {
+        let item = self
+            .spine_item(spine_index)
+            .ok_or(EpubError::Invalid("spine index is out of range"))?;
+        if item.media_type() != "application/xhtml+xml" {
+            return Err(EpubError::Unsupported(
+                "spine item is not application/xhtml+xml",
+            ));
+        }
+        let bytes = self.archive.read(item.path())?;
+        ensure_xml_size(&bytes, self.limits.max_xml_bytes)?;
+        let extracted = xhtml::extract_with_anchors(&bytes, self.limits.max_xml_bytes)?;
+        let Some(offset) = extracted.anchor(fragment) else {
+            return Ok(None);
+        };
+        Ok(Some(EpubLocator {
+            book_id: self.id,
+            spine_index,
+            utf8_offset: offset as u64,
+        }))
+    }
+
     pub fn restore(&self, locator: &EpubLocator) -> Result<(usize, usize)> {
         if locator.book_id != self.id {
             return Err(EpubError::InvalidLocator(
@@ -790,7 +819,7 @@ fn resolve_navigation_href(base_file: &str, href: &str) -> Result<(String, Optio
     } else {
         resolve_path(base_file, resource)?
     };
-    let fragment = fragment.map(owned).transpose()?;
+    let fragment = fragment.map(percent_decode_fragment).transpose()?;
     Ok((path, fragment))
 }
 
@@ -891,6 +920,39 @@ fn percent_decode_component(raw: &str) -> Result<String> {
     }
     let value = std::str::from_utf8(&bytes)
         .map_err(|_| EpubError::Invalid("resource path is not UTF-8"))?;
+    owned(value)
+}
+
+fn percent_decode_fragment(raw: &str) -> Result<String> {
+    if raw.len() > 4096 {
+        return Err(EpubError::LimitExceeded("navigation fragment bytes"));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve(raw.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let raw = raw.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%' {
+            if index + 2 >= raw.len() {
+                return Err(EpubError::Invalid("truncated fragment percent escape"));
+            }
+            let high = hex(raw[index + 1])?;
+            let low = hex(raw[index + 2])?;
+            let byte = high << 4 | low;
+            if byte == 0 {
+                return Err(EpubError::Invalid("NUL in navigation fragment"));
+            }
+            bytes.push(byte);
+            index += 3;
+        } else {
+            bytes.push(raw[index]);
+            index += 1;
+        }
+    }
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| EpubError::Invalid("navigation fragment is not UTF-8"))?;
     owned(value)
 }
 
@@ -1038,7 +1100,7 @@ mod tests {
             },
             Entry {
                 name: "OEBPS/text/one.xhtml",
-                data: b"<html><body><h1>Wrong first line one</h1></body></html>",
+                data: b"<html><body><h1 id=\"intro\">Wrong first line one</h1><p id=\"details\">Details</p></body></html>",
             },
             Entry {
                 name: "OEBPS/text/two.xhtml",
@@ -1073,6 +1135,22 @@ mod tests {
         assert_eq!(navigation[2].spine_index(), 1);
         assert_eq!(navigation[2].fragment(), None);
         assert_eq!(navigation[2].depth(), 0);
+
+        let intro = book.locator_for_fragment(0, "intro").unwrap().unwrap();
+        let details = book.locator_for_fragment(0, "details").unwrap().unwrap();
+        assert_eq!(intro.utf8_offset(), 0);
+        assert!(details.utf8_offset() > intro.utf8_offset());
+        assert!(book.locator_for_fragment(0, "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn navigation_fragments_are_percent_decoded_without_path_rules() {
+        let (path, fragment) =
+            resolve_navigation_href("OEBPS/nav.xhtml", "text/one.xhtml#%E7%AB%A0%E8%8A%82/1")
+                .unwrap();
+        assert_eq!(path, "OEBPS/text/one.xhtml");
+        assert_eq!(fragment.as_deref(), Some("章节/1"));
+        assert!(resolve_navigation_href("OEBPS/nav.xhtml", "text/one.xhtml#%00").is_err());
     }
 
     #[test]
