@@ -9,6 +9,8 @@ mod native_epub;
 mod progress;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod session;
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+mod svg_icon;
 #[cfg(test)]
 #[path = "../tests/support/epub.rs"]
 mod test_epub;

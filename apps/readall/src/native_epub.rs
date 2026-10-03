@@ -14,6 +14,9 @@ mod enabled {
     use crate::{
         epub_session::{Action as ReaderAction, EpubSession, Start, TocEntry},
         progress::EpubProgressStore,
+        svg_icon::{
+            self, CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, LIST, MINUS, PLUS,
+        },
         text_page::Options,
         ui::{UiFont, UiPainter, builtin_font_bytes},
     };
@@ -64,147 +67,6 @@ mod enabled {
             && i64::from(y) < bottom
     }
 
-    fn draw_down_chevron(surface: &mut Surface, x: i32, y: i32, color: Color) -> WindowResult<()> {
-        surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(x, y, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 4, y + 4, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 8, y + 8, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 12, y + 8, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 16, y + 4, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 20, y, 4, 4),
-                color,
-            },
-        ])?;
-        Ok(())
-    }
-
-    fn draw_left_chevron(surface: &mut Surface, x: i32, y: i32, color: Color) -> WindowResult<()> {
-        surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 8, y, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 4, y + 4, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x, y + 8, 4, 8),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 4, y + 16, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 8, y + 20, 4, 4),
-                color,
-            },
-        ])?;
-        Ok(())
-    }
-
-    fn draw_right_chevron(surface: &mut Surface, x: i32, y: i32, color: Color) -> WindowResult<()> {
-        surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(x, y, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 4, y + 4, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 8, y + 8, 4, 8),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x + 4, y + 16, 4, 4),
-                color,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(x, y + 20, 4, 4),
-                color,
-            },
-        ])?;
-        Ok(())
-    }
-
-    fn draw_toolbar_icon(
-        surface: &mut Surface,
-        index: usize,
-        rect: Rect,
-        color: Color,
-    ) -> WindowResult<()> {
-        let cx = rect.x + rect.width as i32 / 2;
-        let cy = rect.y + rect.height as i32 / 2;
-        match index {
-            0 => draw_left_chevron(surface, cx - 6, cy - 12, color)?,
-            1 => {
-                surface.draw(&[
-                    DrawCommand::FillRect {
-                        rect: Rect::new(cx - 10, cy - 10, 4, 4),
-                        color,
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(cx - 3, cy - 10, 15, 3),
-                        color,
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(cx - 10, cy - 2, 4, 4),
-                        color,
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(cx - 3, cy - 2, 15, 3),
-                        color,
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(cx - 10, cy + 6, 4, 4),
-                        color,
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(cx - 3, cy + 6, 15, 3),
-                        color,
-                    },
-                ])?;
-            }
-            2 => surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(cx - 10, cy - 2, 20, 4),
-                color,
-            }])?,
-            3 => surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(cx - 10, cy - 2, 20, 4),
-                    color,
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(cx - 2, cy - 10, 4, 20),
-                    color,
-                },
-            ])?,
-            4 => draw_right_chevron(surface, cx - 6, cy - 12, color)?,
-            5 => draw_down_chevron(surface, cx - 12, cy - 6, color)?,
-            _ => {}
-        }
-        Ok(())
-    }
-
     impl<'book, 'archive, 'font, 'font_bytes> ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
         fn new(
             session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
@@ -232,36 +94,66 @@ mod enabled {
         }
 
         fn toolbar_rect(&self) -> Rect {
-            let width = 324_u32.min(self.surface.width().saturating_sub(24));
+            let width = 520_u32.min(self.surface.width().saturating_sub(24));
             Rect::new(
                 ((self.surface.width().saturating_sub(width)) / 2) as i32,
-                self.surface.height().saturating_sub(78) as i32,
+                self.surface.height().saturating_sub(190) as i32,
                 width,
-                54,
+                174,
             )
         }
 
         fn collapsed_rect(&self) -> Rect {
             Rect::new(
-                self.surface.width().saturating_sub(56) as i32 / 2,
-                self.surface.height().saturating_sub(38) as i32,
-                56,
-                28,
+                self.surface.width().saturating_sub(88) as i32 / 2,
+                self.surface.height().saturating_sub(42) as i32,
+                88,
+                30,
             )
         }
 
         fn toolbar_button_rect(&self, index: usize) -> Rect {
             let bar = self.toolbar_rect();
-            let button = 48_i32;
-            let total = 6 * button;
-            let start = bar.x + ((bar.width as i32 - total) / 2);
-            Rect::new(start + index as i32 * button, bar.y + 3, 48, 48)
+            let content_y = bar.y + 32;
+            let content_h = bar.height.saturating_sub(40);
+            let side_w = 96_u32.min(bar.width / 4);
+            let right_x = bar.x + bar.width as i32 - side_w as i32 - 8;
+            let center_left = bar.x + side_w as i32 + 20;
+            let center_right = right_x - 12;
+            let center_width = (center_right - center_left).max(0) as u32;
+            let pair_gap = 8_u32.min(center_width);
+            let pair_button = center_width
+                .saturating_sub(pair_gap)
+                .checked_div(2)
+                .unwrap_or(0)
+                .min(82);
+            let pair_total = pair_button.saturating_mul(2).saturating_add(pair_gap);
+            let pair_start = center_left + center_width.saturating_sub(pair_total) as i32 / 2;
+            match index {
+                0 => Rect::new(bar.x + 8, content_y, side_w, content_h),
+                1 => Rect::new(
+                    center_left + center_width.saturating_sub(112) as i32 / 2,
+                    content_y + 44,
+                    112_u32.min(center_width),
+                    38,
+                ),
+                2 => Rect::new(pair_start, content_y + 88, pair_button, 38),
+                3 => Rect::new(
+                    pair_start + pair_button as i32 + pair_gap as i32,
+                    content_y + 88,
+                    pair_button,
+                    38,
+                ),
+                4 => Rect::new(right_x, content_y, side_w, content_h),
+                5 => Rect::new(bar.x, bar.y, bar.width, 28),
+                _ => Rect::new(0, 0, 0, 0),
+            }
         }
 
         fn toc_panel_rect(&self) -> Rect {
             let toolbar = self.toolbar_rect();
             let width = 520_u32.min(self.surface.width().saturating_sub(32));
-            let max_height = self.surface.height().saturating_sub(170).min(390);
+            let max_height = self.surface.height().saturating_sub(290).min(390);
             let height = max_height.max(160);
             Rect::new(
                 ((self.surface.width().saturating_sub(width)) / 2) as i32,
@@ -360,45 +252,149 @@ mod enabled {
         fn draw_collapsed_control(&mut self) -> WindowResult<()> {
             let rect = self.collapsed_rect();
             let hovered = self.hover_target() == ReaderHover::Collapsed;
-            let color = if hovered {
-                Color::rgba(50, 58, 70, 210)
-            } else {
-                Color::rgba(70, 78, 90, 105)
-            };
-            draw_down_chevron(&mut self.surface, rect.x + 18, rect.y + 9, color)?;
+            self.surface.draw(&[
+                DrawCommand::FillRect {
+                    rect: Rect::new(rect.x + 2, rect.y + 2, rect.width, rect.height),
+                    color: Color::rgba(0, 0, 0, 28),
+                },
+                DrawCommand::FillRect {
+                    rect,
+                    color: if hovered {
+                        Color::rgba(31, 37, 47, 232)
+                    } else {
+                        Color::rgba(31, 37, 47, 185)
+                    },
+                },
+            ])?;
+            svg_icon::draw(
+                &mut self.surface,
+                CHEVRON_UP,
+                Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 4, 22, 22),
+                Color::rgba(245, 248, 252, if hovered { 255 } else { 220 }),
+            )?;
             Ok(())
         }
 
         fn draw_toolbar(&mut self) -> WindowResult<()> {
             let rect = self.toolbar_rect();
             let hover = self.hover_target();
+            let handle = self.toolbar_button_rect(5);
+            let prev = self.toolbar_button_rect(0);
+            let toc = self.toolbar_button_rect(1);
+            let smaller = self.toolbar_button_rect(2);
+            let larger = self.toolbar_button_rect(3);
+            let next = self.toolbar_button_rect(4);
+            let line = Color::rgba(255, 255, 255, 28);
+            let panel = Color::rgba(31, 37, 47, 225);
+            let hover_fill = Color::rgba(255, 255, 255, 34);
+            let active_fill = Color::rgba(70, 117, 195, 225);
             self.surface.draw(&[
                 DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 2, rect.y + 3, rect.width, rect.height),
-                    color: Color::rgba(0, 0, 0, 38),
+                    rect: Rect::new(rect.x + 3, rect.y + 4, rect.width, rect.height),
+                    color: Color::rgba(0, 0, 0, 34),
+                },
+                DrawCommand::FillRect { rect, color: panel },
+                DrawCommand::FillRect {
+                    rect: Rect::new(rect.x + 10, rect.y + 28, rect.width.saturating_sub(20), 1),
+                    color: line,
                 },
                 DrawCommand::FillRect {
-                    rect,
-                    color: Color::rgba(31, 37, 47, 225),
+                    rect: Rect::new(
+                        prev.x + prev.width as i32 + 10,
+                        prev.y + 43,
+                        next.x.saturating_sub(prev.x + prev.width as i32 + 20) as u32,
+                        1,
+                    ),
+                    color: line,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(
+                        prev.x + prev.width as i32 + 10,
+                        prev.y + 87,
+                        next.x.saturating_sub(prev.x + prev.width as i32 + 20) as u32,
+                        1,
+                    ),
+                    color: line,
                 },
             ])?;
-            for index in 0..6 {
-                let button = self.toolbar_button_rect(index);
+
+            for (index, button) in [
+                (0, prev),
+                (1, toc),
+                (2, smaller),
+                (3, larger),
+                (4, next),
+                (5, handle),
+            ] {
                 let hovered = hover == ReaderHover::Toolbar(index);
                 let active = index == 1 && self.toolbar == ToolbarMode::Toc;
                 if hovered || active {
                     self.surface.draw(&[DrawCommand::FillRect {
-                        rect: Rect::new(button.x + 4, button.y + 4, 40, 40),
-                        color: if active {
-                            Color::rgba(70, 117, 195, 230)
+                        rect: if index == 5 {
+                            Rect::new(
+                                button.x + 8,
+                                button.y + 3,
+                                button.width.saturating_sub(16),
+                                22,
+                            )
                         } else {
-                            Color::rgba(255, 255, 255, 36)
+                            Rect::new(
+                                button.x + 3,
+                                button.y + 3,
+                                button.width.saturating_sub(6),
+                                button.height.saturating_sub(6),
+                            )
                         },
+                        color: if active { active_fill } else { hover_fill },
                     }])?;
                 }
-                let color = Color::rgba(240, 244, 250, if hovered { 255 } else { 220 });
-                draw_toolbar_icon(&mut self.surface, index, button, color)?;
             }
+
+            let icon = Color::rgba(244, 247, 252, 235);
+            svg_icon::draw(
+                &mut self.surface,
+                CHEVRON_DOWN,
+                Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 3, 22, 22),
+                icon,
+            )?;
+            svg_icon::draw(
+                &mut self.surface,
+                CHEVRON_LEFT,
+                Rect::new(prev.x + prev.width as i32 / 2 - 14, prev.y + 30, 28, 28),
+                icon,
+            )?;
+            svg_icon::draw(
+                &mut self.surface,
+                CHEVRON_RIGHT,
+                Rect::new(next.x + next.width as i32 / 2 - 14, next.y + 30, 28, 28),
+                icon,
+            )?;
+            svg_icon::draw(
+                &mut self.surface,
+                LIST,
+                Rect::new(toc.x + 13, toc.y + 7, 24, 24),
+                icon,
+            )?;
+            svg_icon::draw(
+                &mut self.surface,
+                MINUS,
+                Rect::new(smaller.x + 10, smaller.y + 7, 24, 24),
+                icon,
+            )?;
+            svg_icon::draw(
+                &mut self.surface,
+                PLUS,
+                Rect::new(larger.x + 10, larger.y + 7, 24, 24),
+                icon,
+            )?;
+
+            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
+            let label = Color::rgba(239, 243, 249, 235);
+            text.draw(prev.x + 25, prev.y + 74, 13, "上一页", label)?;
+            text.draw(next.x + 25, next.y + 74, 13, "下一页", label)?;
+            text.draw(toc.x + 45, toc.y + 9, 14, "目录", label)?;
+            text.draw(smaller.x + 36, smaller.y + 9, 13, "字体", label)?;
+            text.draw(larger.x + 36, larger.y + 9, 13, "字体", label)?;
             Ok(())
         }
 
@@ -943,6 +939,36 @@ mod enabled {
                     .unwrap()
             );
             assert_eq!(reader.toolbar, ToolbarMode::Expanded);
+        }
+
+        #[test]
+        fn toolbar_uses_three_row_layout_with_full_height_page_controls() {
+            let epub_bytes = test_epub::make_epub();
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui_font =
+                UiFont::from_bytes(font_bytes.clone(), PathBuf::from("fixture.ttf")).unwrap();
+            let reader = ReaderWindow::new(session, None, ui_font).unwrap();
+
+            let bar = reader.toolbar_rect();
+            let previous = reader.toolbar_button_rect(0);
+            let toc = reader.toolbar_button_rect(1);
+            let smaller = reader.toolbar_button_rect(2);
+            let larger = reader.toolbar_button_rect(3);
+            let next = reader.toolbar_button_rect(4);
+            let toggle = reader.toolbar_button_rect(5);
+            assert_eq!(toggle.x, bar.x);
+            assert_eq!(toggle.width, bar.width);
+            assert_eq!(previous.y, next.y);
+            assert_eq!(previous.height, next.height);
+            assert!(previous.height > toc.height * 2);
+            assert!(toc.y < smaller.y);
+            assert_eq!(smaller.y, larger.y);
+            assert!(smaller.x + smaller.width as i32 <= larger.x);
+            assert!(previous.x + (previous.width as i32) < smaller.x);
+            assert!(larger.x + (larger.width as i32) < next.x);
         }
 
         #[test]
