@@ -1,6 +1,8 @@
 mod cli;
 mod native;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+mod progress;
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod session;
 mod text_page;
 
