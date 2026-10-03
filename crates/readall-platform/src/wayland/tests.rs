@@ -44,10 +44,13 @@ fn string(value: &str) -> Vec<u8> {
     }
     bytes
 }
-fn event(stream: &mut UnixStream, object: u32, opcode: u16, body: &[u8]) {
+fn event_bytes(object: u32, opcode: u16, body: &[u8]) -> Vec<u8> {
     let mut bytes = words(&[object, ((body.len() as u32 + 8) << 16) | u32::from(opcode)]);
     bytes.extend_from_slice(body);
-    stream.write_all(&bytes).unwrap();
+    bytes
+}
+fn event(stream: &mut UnixStream, object: u32, opcode: u16, body: &[u8]) {
+    stream.write_all(&event_bytes(object, opcode, body)).unwrap();
 }
 #[derive(Clone, Copy, Debug)]
 enum Kind {
@@ -128,8 +131,12 @@ fn serve(listener: UnixListener, scripted: bool) -> Observed {
             }
             (Kind::Display, 0) => {
                 let id = word(&body, 0);
-                event(&mut stream, id, 0, &words(&[1]));
-                event(&mut stream, 1, 1, &words(&[id]));
+                // The client may disconnect immediately after callback.done. Send the
+                // paired delete_id in the same write so test teardown cannot race the
+                // second protocol event and masquerade as a client failure.
+                let mut response = event_bytes(id, 0, &words(&[1]));
+                response.extend(event_bytes(1, 1, &words(&[id])));
+                stream.write_all(&response).unwrap();
             }
             (Kind::Registry, 0) => {
                 let name = word(&body, 0);
