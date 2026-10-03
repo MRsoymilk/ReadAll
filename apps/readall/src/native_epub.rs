@@ -15,7 +15,7 @@ mod enabled {
         epub_session::{Action as ReaderAction, EpubSession, Start},
         progress::EpubProgressStore,
         text_page::Options,
-        ui::{display_ascii, draw_text, text_width},
+        ui::{UiFont, UiPainter},
     };
     use readall_core::read_bounded;
     use readall_epub::{EpubBook, EpubLimits, EpubLocator};
@@ -31,6 +31,7 @@ mod enabled {
         session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
         progress: Option<EpubProgressStore>,
         surface: Surface,
+        ui_font: UiFont,
         close_requested: bool,
     }
 
@@ -38,12 +39,14 @@ mod enabled {
         fn new(
             session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
             progress: Option<EpubProgressStore>,
+            ui_font: UiFont,
         ) -> WindowResult<Self> {
             let surface = session.frame().surface.clone();
             let mut reader = ReaderWindow {
                 session,
                 progress,
                 surface,
+                ui_font,
                 close_requested: false,
             };
             reader.refresh_surface()?;
@@ -77,24 +80,21 @@ mod enabled {
                     color: border,
                 },
             ])?;
-            let title = display_ascii(self.session.book_title(), 34);
-            draw_text(&mut self.surface, 16, 11, 1, &title, ink)?;
             let (chapter, chapters) = self.session.chapter_position();
             let (page, pages) = self.session.page_position();
             let status = format!(
-                "CH {chapter}/{chapters}  PAGE {page}/{pages}  {}PX",
+                "第 {chapter}/{chapters} 章 · 第 {page}/{pages} 页 · {} px",
                 self.session.font_size()
             );
-            let status_x = width.saturating_sub(text_width(1, &status).saturating_add(16)) as i32;
-            draw_text(&mut self.surface, status_x, 11, 1, &status, muted)?;
-            draw_text(
-                &mut self.surface,
-                16,
-                height.saturating_sub(21) as i32,
-                1,
-                "BACKSPACE LIBRARY   CLICK SIDES TURN PAGE   +/- SIZE",
-                muted,
-            )?;
+            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
+            let title = text.fit(14, self.session.book_title(), width.saturating_sub(320))?;
+            text.draw(16, 8, 14, &title, ink)?;
+            let status_width = text.measure(12, &status)?;
+            let status_x = width.saturating_sub(status_width.saturating_add(16)) as i32;
+            text.draw(status_x, 9, 12, &status, muted)?;
+            let hint = "Backspace 返回书库 · 点击左右翻页 · +/- 调整字号";
+            let hint = text.fit(12, hint, width.saturating_sub(32))?;
+            text.draw(16, height.saturating_sub(23) as i32, 12, &hint, muted)?;
             let track_x = 16_u32;
             let track_w = width.saturating_sub(32);
             let track_y = height.saturating_sub(7) as i32;
@@ -338,6 +338,8 @@ mod enabled {
             &mut LocalFileSource::open(&options.font)?,
             font_limits.max_file_bytes,
         )?;
+        let ui_font =
+            UiFont::from_bytes_face(font_bytes.clone(), options.font.clone(), options.face)?;
         let font = Font::parse(&font_bytes, options.face, font_limits)?;
 
         let start = if let Some(locator) = locator {
@@ -348,7 +350,7 @@ mod enabled {
             Start::Beginning
         };
         let session = EpubSession::new(&book, &font, options, start)?;
-        let mut reader = ReaderWindow::new(session, progress)?;
+        let mut reader = ReaderWindow::new(session, progress, ui_font)?;
 
         writeln!(
             output,

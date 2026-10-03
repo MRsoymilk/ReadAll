@@ -35,7 +35,7 @@ fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
-fn discover() {
+fn discover(cjk_only: bool) {
     let mut pending: Vec<(PathBuf, usize)> = [
         "/usr/share/fonts",
         "/usr/local/share/fonts",
@@ -48,7 +48,7 @@ fn discover() {
     let (mut visited, mut found) = (0, 0);
     while let Some((directory, depth)) = pending.pop() {
         visited += 1;
-        if visited > 1024 || found >= 80 {
+        if visited > 2048 || found >= 512 {
             break;
         }
         let Ok(entries) = fs::read_dir(directory) else {
@@ -62,6 +62,33 @@ fn discover() {
             if kind.is_dir() && depth < 8 {
                 pending.push((path, depth + 1));
             } else if kind.is_file()
+                && (!cjk_only
+                    || path.to_string_lossy().to_ascii_lowercase().contains("cjk")
+                    || path.to_string_lossy().to_ascii_lowercase().contains("wqy")
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("wenquanyi")
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("sarasa")
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("sourcehan")
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("source-han")
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("notosanssc")
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("notoserifsc"))
                 && path.extension().is_some_and(|ext| {
                     ext.eq_ignore_ascii_case("ttf")
                         || ext.eq_ignore_ascii_case("ttc")
@@ -70,7 +97,7 @@ fn discover() {
             {
                 println!("{}", path.display());
                 found += 1;
-                if found >= 80 {
+                if found >= 512 {
                     break;
                 }
             }
@@ -81,10 +108,10 @@ fn discover() {
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() != 1 {
-        return Err("usage: cargo run -p readall-font --example inspect --offline -- <font.ttf | --discover>".into());
+        return Err("usage: cargo run -p readall-font --example inspect --offline -- <font.ttf | --discover | --discover-cjk>".into());
     }
-    if args[0] == "--discover" {
-        discover();
+    if args[0] == "--discover" || args[0] == "--discover-cjk" {
+        discover(args[0] == "--discover-cjk");
         Ok(())
     } else {
         inspect(Path::new(&args[0]))

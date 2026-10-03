@@ -12,6 +12,12 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub(crate) fn find_for_text(text: &str) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("READALL_UI_FONT").map(PathBuf::from) {
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err("READALL_UI_FONT does not point to a regular font file".into());
+    }
     let mut required = Vec::new();
     let mut seen = HashSet::new();
     for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
@@ -31,6 +37,10 @@ pub(crate) fn find_for_text(text: &str) -> Result<PathBuf> {
     for path in [
         "/usr/share/fonts/wenquanyi/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/sarasa-gothic/SarasaGothicSC-Regular.ttf",
+        "/usr/share/fonts/sarasa/SarasaGothicSC-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/liberation-fonts/LiberationSans-Regular.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -47,10 +57,16 @@ pub(crate) fn find_for_text(text: &str) -> Result<PathBuf> {
         roots.push(home.join(".fonts"));
     }
     discover_fonts(roots, &mut candidates, &mut paths_seen);
+    candidates.sort_by(|a, b| {
+        font_priority(a)
+            .cmp(&font_priority(b))
+            .then_with(|| a.cmp(b))
+    });
 
+    let requires_han = required.iter().copied().any(is_han);
     let limits = FontLimits::default();
-    let mut best: Option<(usize, PathBuf)> = None;
-    for path in candidates.into_iter().take(192) {
+    let mut best: Option<(usize, usize, PathBuf)> = None;
+    for path in candidates.into_iter().take(384) {
         let mut source = match LocalFileSource::open(&path) {
             Ok(source) => source,
             Err(_) => continue,
@@ -63,23 +79,39 @@ pub(crate) fn find_for_text(text: &str) -> Result<PathBuf> {
             Ok(font) => font,
             Err(_) => continue,
         };
-        let mut score = 0_usize;
+        let (mut score, mut matched, mut han_matched) = (0_usize, 0_usize, 0_usize);
         for &ch in &required {
             if font.glyph_index(ch).is_ok_and(|glyph| glyph != 0) {
-                score += 1;
+                matched += 1;
+                if is_han(ch) {
+                    han_matched += 1;
+                    score += 10_000;
+                } else if ch.is_ascii() {
+                    score += 1;
+                } else {
+                    score += 100;
+                }
             }
         }
-        if score > best.as_ref().map_or(0, |(score, _)| *score) {
-            let complete = score == required.len();
-            best = Some((score, path));
+        if requires_han && han_matched == 0 {
+            continue;
+        }
+        if score > best.as_ref().map_or(0, |(score, _, _)| *score) {
+            let complete = matched == required.len();
+            best = Some((score, matched, path));
             if complete {
                 break;
             }
         }
     }
 
-    best.map(|(_, path)| path).ok_or_else(|| {
-        "no supported TrueType/TTC system font was found; install a static TrueType font".into()
+    best.map(|(_, _, path)| path).ok_or_else(|| {
+        if requires_han {
+            "no supported system TrueType/TTC font contains Chinese glyphs; install a Chinese TrueType font such as WenQuanYi Zen Hei or Sarasa Gothic, or set READALL_UI_FONT"
+                .into()
+        } else {
+            "no supported TrueType/TTC system font was found; install a static TrueType font".into()
+        }
     })
 }
 
@@ -94,7 +126,7 @@ fn discover_fonts(roots: Vec<PathBuf>, out: &mut Vec<PathBuf>, seen: &mut HashSe
     let mut visited = 0_usize;
     while let Some((directory, depth)) = pending.pop() {
         visited += 1;
-        if visited > 1024 || out.len() >= 192 {
+        if visited > 2048 || out.len() >= 1024 {
             break;
         }
         let Ok(entries) = fs::read_dir(directory) else {
@@ -111,7 +143,7 @@ fn discover_fonts(roots: Vec<PathBuf>, out: &mut Vec<PathBuf>, seen: &mut HashSe
             }
             if kind.is_file() && supported_extension(&path) {
                 push_candidate(path, out, seen);
-                if out.len() >= 192 {
+                if out.len() >= 1024 {
                     return;
                 }
             }
@@ -125,6 +157,46 @@ fn supported_extension(path: &Path) -> bool {
     })
 }
 
+fn is_han(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2EBEF
+            | 0x30000..=0x323AF
+    )
+}
+
+fn font_priority(path: &Path) -> u8 {
+    let name = path.to_string_lossy().to_ascii_lowercase();
+    if [
+        "cjk",
+        "sourcehan",
+        "source-han",
+        "wenquanyi",
+        "wqy",
+        "sarasa",
+        "lxgw",
+        "droidsansfallback",
+        "uming",
+        "ukai",
+        "hanazono",
+        "unifont",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+    {
+        0
+    } else if name.contains("noto") {
+        1
+    } else if name.contains("dejavu") || name.contains("liberation") {
+        2
+    } else {
+        3
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +207,17 @@ mod tests {
         assert!(supported_extension(Path::new("a.TTC")));
         assert!(!supported_extension(Path::new("a.otf")));
         assert!(!supported_extension(Path::new("a.woff2")));
+        assert!(
+            font_priority(Path::new("/fonts/SarasaGothicSC-Regular.ttf"))
+                < font_priority(Path::new("/fonts/DejaVuSans.ttf"))
+        );
+        assert!(
+            font_priority(Path::new("/fonts/NotoSansCJK.ttc"))
+                < font_priority(Path::new("/fonts/Plain.ttf"))
+        );
+        assert!(is_han('中'));
+        assert!(is_han('阅'));
+        assert!(!is_han('A'));
+        assert!(!is_han('あ'));
     }
 }

@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击 `OPEN EPUB` 或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部 `BACK` 返回上级。当前 GUI 使用启动级位图字体，因此非 ASCII 文件名暂以 `?` 显示；进入图书后正文仍使用自研 TrueType 引擎。`--features wayland` 是 Cargo 编译参数，不是运行参数。
+Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击“打开图书”或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部“返回”回到上级。GUI 已移除 5×7 像素字库，书库、文件名、路径、状态栏和阅读栏统一使用项目自己的 TrueType 轮廓解析与抗锯齿光栅化，因此中文文件名不再替换成 `?`。`--features wayland` 是 Cargo 编译参数，不是运行参数。
 
 `read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
 
@@ -80,7 +80,7 @@ cargo run -p readall-font --example inspect --offline -- --discover
 cargo run -p readall-font --example inspect --offline -- /usr/share/fonts/dejavu/DejaVuSans.ttf
 ```
 
-上面的实际字体路径取决于系统安装情况；缺字显示 `MISSING`，不把 .notdef 当作该字符已受支持。
+上面的实际字体路径取决于系统安装情况；缺字显示 `MISSING`，不把 .notdef 当作该字符已受支持。GUI 和自动 EPUB 字体选择会把汉字覆盖作为硬条件：如果需要中文却找不到当前引擎可解析的中文 TTF/TTC，会明确报错，而不是错误选择符号字体。可用 `READALL_UI_FONT=/绝对路径/字体.ttf` 显式指定字体。开发诊断可用 `--discover-cjk` 查找常见 CJK 字体命名。
 
 ## 真实字体 TXT 页面导出
 
@@ -105,7 +105,7 @@ cargo run -p readall --features wayland --offline -- open tests/fixtures/sample_
 cargo run -p readall --features wayland --offline -- open-epub /path/to/book.epub --font /path/to/font.ttf
 ```
 
-默认 GUI 打开 EPUB 时会对若干线性章节采样字符，在系统字体目录中有界扫描当前自研引擎可解析的 TTF/TTC，并优先选择字形覆盖更完整的字体；仍缺失的字符显式使用 `.notdef`。阅读页顶部显示书名、章节/页码和字号，底部显示操作提示与整书进度条。左右半区点击、竖向滚轮、PageUp/PageDown/方向键/Space 翻页，`+/-` 调字号，Backspace 返回书库。命令行 `open-epub` 仍支持显式 `--font`、`--spine` 和 `--at epub-v1:...`。
+默认 GUI 打开 EPUB 时会对若干线性章节采样字符，在系统字体目录中有界扫描当前自研引擎可解析的 TTF/TTC；若文本包含汉字，候选字体必须实际提供汉字 glyph，并优先选择覆盖更完整的字体。阅读页顶部使用真实字体显示书名、章节/页码和字号，底部显示中文操作提示与整书进度条。左右半区点击、竖向滚轮、PageUp/PageDown/方向键/Space 翻页，`+/-` 调字号，Backspace 返回书库。命令行 `open-epub` 仍支持显式 `--font`、`--spine` 和 `--at epub-v1:...`。
 
 窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 与 EPUB 原生阅读都默认使用 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时使用 `$HOME/.local/state/readall/progress-v1`；TXT 保存 `TextLocator`，EPUB 保存绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator。成功翻页及正常关闭时用同目录临时文件 + rename 更新状态；显式 `--page`/`--spine`/`--at` 优先于自动恢复。两种窗口都可用 `--progress off` 禁用或 `--state-dir DIR` 指定状态目录。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
 

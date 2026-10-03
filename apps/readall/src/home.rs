@@ -1,4 +1,4 @@
-//! Native ReadAll home screen and dependency-free EPUB file browser.
+//! Native ReadAll library and EPUB file browser.
 use std::io::Write;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -11,7 +11,7 @@ pub(crate) fn run(_: &mut impl Write) -> Result<()> {
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
     use super::*;
-    use crate::ui::{display_ascii, draw_text};
+    use crate::ui::{UiFont, UiPainter};
     use readall_platform::window::{
         self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult,
     };
@@ -22,16 +22,18 @@ mod enabled {
     };
 
     const BG: Color = Color::rgba(244, 246, 249, 255);
-    const SIDEBAR: Color = Color::rgba(27, 32, 40, 255);
+    const SIDEBAR: Color = Color::rgba(26, 31, 39, 255);
     const PANEL: Color = Color::rgba(255, 255, 255, 255);
     const INK: Color = Color::rgba(34, 40, 49, 255);
-    const MUTED: Color = Color::rgba(107, 117, 130, 255);
-    const ACCENT: Color = Color::rgba(55, 104, 190, 255);
-    const ACCENT_SOFT: Color = Color::rgba(229, 237, 252, 255);
-    const SIDEBAR_TEXT: Color = Color::rgba(238, 242, 247, 255);
-    const ROW_HEIGHT: i32 = 42;
-    const LIST_TOP: i32 = 142;
-    const LIST_BOTTOM_MARGIN: i32 = 72;
+    const MUTED: Color = Color::rgba(105, 115, 128, 255);
+    const ACCENT: Color = Color::rgba(52, 103, 190, 255);
+    const ACCENT_SOFT: Color = Color::rgba(231, 238, 251, 255);
+    const BORDER: Color = Color::rgba(224, 229, 236, 255);
+    const SIDEBAR_TEXT: Color = Color::rgba(239, 243, 248, 255);
+    const SIDEBAR_MUTED: Color = Color::rgba(152, 164, 181, 255);
+    const ROW_HEIGHT: i32 = 48;
+    const LIST_TOP: i32 = 150;
+    const LIST_BOTTOM_MARGIN: i32 = 70;
 
     #[derive(Debug, Clone)]
     struct FileEntry {
@@ -137,26 +139,28 @@ mod enabled {
     }
 
     enum Mode {
-        Home,
+        Library,
         Browser(Browser),
     }
 
-    struct Home {
+    struct Home<'font> {
         surface: Surface,
+        ui_font: &'font UiFont,
         mode: Mode,
         selected_book: Option<PathBuf>,
         close_requested: bool,
         status: String,
     }
 
-    impl Home {
-        fn new(width: u32, height: u32) -> WindowResult<Self> {
+    impl<'font> Home<'font> {
+        fn new(width: u32, height: u32, ui_font: &'font UiFont) -> WindowResult<Self> {
             let mut home = Self {
                 surface: Surface::new(width, height, RenderLimits::default())?,
-                mode: Mode::Home,
+                ui_font,
+                mode: Mode::Library,
                 selected_book: None,
                 close_requested: false,
-                status: "EPUB TEXT READING IS READY".into(),
+                status: "已支持 EPUB 文本阅读，点击“打开图书”开始".into(),
             };
             home.paint()?;
             Ok(home)
@@ -171,9 +175,8 @@ mod enabled {
         }
 
         fn open_browser(&mut self) -> WindowResult<bool> {
-            let browser = Browser::load(Self::default_directory())?;
-            self.mode = Mode::Browser(browser);
-            self.status = "SELECT AN EPUB FILE".into();
+            self.mode = Mode::Browser(Browser::load(Self::default_directory())?);
+            self.status = "选择一个 EPUB 文件".into();
             self.paint()?;
             Ok(true)
         }
@@ -186,16 +189,16 @@ mod enabled {
         fn activate_browser(&mut self) -> WindowResult<bool> {
             let selected = match &self.mode {
                 Mode::Browser(browser) => browser.selected().cloned(),
-                Mode::Home => None,
+                Mode::Library => None,
             };
             let Some(selected) = selected else {
-                self.status = "NO EPUB FILES IN THIS FOLDER".into();
+                self.status = "当前目录没有可打开的 EPUB 文件".into();
                 self.paint()?;
                 return Ok(true);
             };
             if selected.directory {
                 self.mode = Mode::Browser(Browser::load(selected.path)?);
-                self.status = "SELECT AN EPUB FILE".into();
+                self.status = "选择一个 EPUB 文件".into();
                 self.paint()?;
                 return Ok(true);
             }
@@ -207,16 +210,16 @@ mod enabled {
         fn back(&mut self) -> WindowResult<bool> {
             let parent = match &self.mode {
                 Mode::Browser(browser) => browser.directory.parent().map(Path::to_path_buf),
-                Mode::Home => None,
+                Mode::Library => None,
             };
             match parent {
                 Some(parent) => {
                     self.mode = Mode::Browser(Browser::load(parent)?);
-                    self.status = "SELECT AN EPUB FILE".into();
+                    self.status = "选择一个 EPUB 文件".into();
                 }
                 None => {
-                    self.mode = Mode::Home;
-                    self.status = "EPUB TEXT READING IS READY".into();
+                    self.mode = Mode::Library;
+                    self.status = "已支持 EPUB 文本阅读，点击“打开图书”开始".into();
                 }
             }
             self.paint()?;
@@ -229,7 +232,7 @@ mod enabled {
                 color: BG,
             }])?;
             match &self.mode {
-                Mode::Home => self.paint_home(),
+                Mode::Library => self.paint_library(),
                 Mode::Browser(browser) => {
                     let browser = browser.clone();
                     self.paint_browser(&browser)
@@ -239,136 +242,105 @@ mod enabled {
 
         fn paint_shell(&mut self, section: &str) -> WindowResult<()> {
             let h = self.surface.height();
+            let w = self.surface.width();
             self.surface.draw(&[
                 DrawCommand::FillRect {
-                    rect: Rect::new(0, 0, 214, h),
+                    rect: Rect::new(0, 0, 218, h),
                     color: SIDEBAR,
                 },
                 DrawCommand::FillRect {
-                    rect: Rect::new(214, 0, self.surface.width().saturating_sub(214), 82),
+                    rect: Rect::new(218, 0, w.saturating_sub(218), 86),
                     color: PANEL,
                 },
+                DrawCommand::FillRect {
+                    rect: Rect::new(218, 85, w.saturating_sub(218), 1),
+                    color: BORDER,
+                },
             ])?;
-            draw_text(&mut self.surface, 28, 28, 4, "READALL", SIDEBAR_TEXT)?;
-            draw_text(
-                &mut self.surface,
-                28,
-                72,
-                2,
-                "RUST READER",
-                Color::rgba(157, 169, 185, 255),
-            )?;
-            draw_text(
-                &mut self.surface,
-                30,
-                138,
-                2,
-                "LIBRARY",
-                Color::rgba(126, 174, 244, 255),
-            )?;
-            draw_text(&mut self.surface, 30, 176, 2, "OPEN EPUB", SIDEBAR_TEXT)?;
-            draw_text(&mut self.surface, 246, 30, 3, section, INK)?;
+
+            let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
+            text.draw(28, 24, 28, "ReadAll", SIDEBAR_TEXT)?;
+            text.draw(30, 62, 13, "原生 Rust 阅读器", SIDEBAR_MUTED)?;
+            text.draw(30, 126, 14, "书库", Color::rgba(126, 174, 244, 255))?;
+            text.draw(30, 166, 15, "打开图书", SIDEBAR_TEXT)?;
+            text.draw(30, 206, 15, "最近阅读", SIDEBAR_MUTED)?;
+            text.draw(250, 28, 24, section, INK)?;
             Ok(())
         }
 
-        fn paint_home(&mut self) -> WindowResult<()> {
-            self.paint_shell("LIBRARY")?;
-            let w = self.surface.width();
-            let content_w = w.saturating_sub(270);
-            let card = Rect::new(246, 116, content_w.min(620), 164);
+        fn paint_library(&mut self) -> WindowResult<()> {
+            self.paint_shell("书库")?;
+            let content_w = self.surface.width().saturating_sub(280);
+            let card = Rect::new(250, 120, content_w.min(650), 174);
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: card,
                     color: ACCENT,
                 },
                 DrawCommand::FillRect {
-                    rect: Rect::new(card.x + 4, card.y + 4, card.width - 8, card.height - 8),
+                    rect: Rect::new(card.x + 3, card.y + 3, card.width - 6, card.height - 6),
                     color: PANEL,
                 },
                 DrawCommand::FillRect {
-                    rect: Rect::new(card.x + 4, card.y + 4, 10, card.height - 8),
+                    rect: Rect::new(card.x + 3, card.y + 3, 8, card.height - 6),
                     color: ACCENT,
                 },
             ])?;
-            draw_text(&mut self.surface, 276, 144, 3, "OPEN EPUB", INK)?;
-            draw_text(
-                &mut self.surface,
-                276,
-                194,
-                2,
-                "BROWSE FOLDERS AND START READING",
-                MUTED,
-            )?;
-            draw_text(
-                &mut self.surface,
-                276,
-                232,
-                2,
-                "CLICK THIS CARD OR PRESS ENTER",
-                ACCENT,
-            )?;
 
-            let info_y = 326;
+            let info_y = 328;
             self.surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(246, info_y, content_w.min(620), 150),
+                rect: Rect::new(250, info_y, content_w.min(650), 158),
                 color: PANEL,
             }])?;
-            draw_text(
-                &mut self.surface,
-                276,
-                info_y + 24,
-                2,
-                "CURRENT EPUB SUPPORT",
-                INK,
-            )?;
-            draw_text(
-                &mut self.surface,
-                276,
-                info_y + 60,
-                2,
-                "XHTML TEXT  MULTI CHAPTER  PROGRESS",
-                MUTED,
-            )?;
-            draw_text(
-                &mut self.surface,
-                276,
-                info_y + 94,
-                2,
-                "CSS AND IMAGES ARE NEXT",
-                MUTED,
-            )?;
 
-            let footer_y = self.surface.height() as i32 - 38;
-            draw_text(
-                &mut self.surface,
-                246,
-                footer_y,
-                2,
-                &display_ascii(&self.status, 58),
+            let footer_y = self.surface.height() as i32 - 42;
+            let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
+            text.draw(282, 148, 24, "打开 EPUB 图书", INK)?;
+            text.draw(
+                282,
+                190,
+                15,
+                "浏览本地目录，选择 EPUB 后直接进入阅读",
                 MUTED,
             )?;
+            text.draw(282, 230, 14, "点击卡片或按 Enter", ACCENT)?;
+            text.draw(282, info_y + 24, 17, "当前阅读能力", INK)?;
+            text.draw(
+                282,
+                info_y + 62,
+                14,
+                "XHTML 文本 · 跨章节翻页 · 阅读进度保存",
+                MUTED,
+            )?;
+            text.draw(
+                282,
+                info_y + 98,
+                14,
+                "CSS、图片和目录导航仍在继续完善",
+                MUTED,
+            )?;
+            let status = text.fit(14, &self.status, content_w.saturating_sub(24))?;
+            text.draw(250, footer_y, 14, &status, MUTED)?;
             Ok(())
         }
 
         fn paint_browser(&mut self, browser: &Browser) -> WindowResult<()> {
-            self.paint_shell("OPEN EPUB")?;
+            self.paint_shell("打开 EPUB")?;
+            let top_w = self.surface.width().saturating_sub(278);
             self.surface.draw(&[
                 DrawCommand::FillRect {
-                    rect: Rect::new(238, 96, self.surface.width().saturating_sub(264), 38),
+                    rect: Rect::new(242, 102, top_w, 40),
                     color: PANEL,
                 },
                 DrawCommand::FillRect {
-                    rect: Rect::new(246, 103, 74, 24),
+                    rect: Rect::new(250, 108, 76, 28),
                     color: ACCENT_SOFT,
                 },
             ])?;
-            draw_text(&mut self.surface, 256, 108, 2, "< BACK", ACCENT)?;
-            let path = display_ascii(&browser.directory.display().to_string(), 55);
-            draw_text(&mut self.surface, 340, 108, 2, &path, MUTED)?;
 
             let visible = self.visible_rows();
-            let width = self.surface.width().saturating_sub(276);
-            for (row, entry) in browser
+            let row_width = self.surface.width().saturating_sub(286);
+            for (row, _entry) in browser
                 .entries
                 .iter()
                 .skip(browser.scroll)
@@ -378,51 +350,59 @@ mod enabled {
                 let index = browser.scroll + row;
                 let y = LIST_TOP + row as i32 * ROW_HEIGHT;
                 let selected = index == browser.selected;
-                self.surface.draw(&[DrawCommand::FillRect {
-                    rect: Rect::new(246, y, width, (ROW_HEIGHT - 4) as u32),
-                    color: if selected { ACCENT_SOFT } else { PANEL },
-                }])?;
-                if selected {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: Rect::new(246, y, 5, (ROW_HEIGHT - 4) as u32),
-                        color: ACCENT,
-                    }])?;
-                }
-                draw_text(
-                    &mut self.surface,
-                    264,
-                    y + 10,
-                    2,
-                    if entry.directory { "DIR" } else { "EPUB" },
+                self.surface.draw(&[
+                    DrawCommand::FillRect {
+                        rect: Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
+                        color: if selected { ACCENT_SOFT } else { PANEL },
+                    },
+                    DrawCommand::FillRect {
+                        rect: Rect::new(
+                            250,
+                            y,
+                            if selected { 5 } else { 1 },
+                            (ROW_HEIGHT - 5) as u32,
+                        ),
+                        color: if selected { ACCENT } else { BORDER },
+                    },
+                ])?;
+            }
+
+            let footer_y = self.surface.height() as i32 - 42;
+            let path_width = self.surface.width().saturating_sub(360);
+            let footer_width = self.surface.width().saturating_sub(280);
+            let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
+            text.draw(260, 114, 14, "‹ 返回", ACCENT)?;
+            let path = text.fit(13, &browser.directory.display().to_string(), path_width)?;
+            text.draw(350, 115, 13, &path, MUTED)?;
+
+            for (row, entry) in browser
+                .entries
+                .iter()
+                .skip(browser.scroll)
+                .take(visible)
+                .enumerate()
+            {
+                let y = LIST_TOP + row as i32 * ROW_HEIGHT;
+                text.draw(
+                    270,
+                    y + 13,
+                    13,
+                    if entry.directory { "文件夹" } else { "EPUB" },
                     if entry.directory { MUTED } else { ACCENT },
                 )?;
-                let name = display_ascii(&entry.name, 52);
-                draw_text(&mut self.surface, 330, y + 10, 2, &name, INK)?;
+                let name = text.fit(15, &entry.name, row_width.saturating_sub(120))?;
+                text.draw(350, y + 11, 15, &name, INK)?;
             }
 
             if browser.entries.is_empty() {
-                draw_text(
-                    &mut self.surface,
-                    266,
-                    LIST_TOP + 28,
-                    2,
-                    "NO EPUB FILES OR FOLDERS HERE",
-                    MUTED,
-                )?;
+                text.draw(272, LIST_TOP + 30, 15, "当前目录没有 EPUB 文件", MUTED)?;
             }
             let footer = format!(
-                "{} ITEMS  ENTER OPEN  BACKSPACE UP  ESC EXIT",
+                "{} 项 · Enter 打开 · Backspace 上一级 · Esc 退出",
                 browser.entries.len()
             );
-            let footer_y = self.surface.height() as i32 - 38;
-            draw_text(
-                &mut self.surface,
-                246,
-                footer_y,
-                2,
-                &display_ascii(&footer, 62),
-                MUTED,
-            )?;
+            let footer = text.fit(13, &footer, footer_width)?;
+            text.draw(250, footer_y, 13, &footer, MUTED)?;
             Ok(())
         }
 
@@ -460,14 +440,14 @@ mod enabled {
                 Action::Activate => self.activate_browser(),
                 Action::Back => self.back(),
                 Action::Click { x, y } => {
-                    if (246..=320).contains(&x) && (96..=134).contains(&y) {
+                    if (250..=326).contains(&x) && (102..=142).contains(&y) {
                         return self.back();
                     }
                     if y >= LIST_TOP {
                         let row = ((y - LIST_TOP) / ROW_HEIGHT) as usize;
                         let target = match &self.mode {
                             Mode::Browser(browser) => browser.scroll + row,
-                            Mode::Home => return Ok(false),
+                            Mode::Library => return Ok(false),
                         };
                         if let Mode::Browser(browser) = &mut self.mode {
                             if target < browser.entries.len() {
@@ -487,13 +467,13 @@ mod enabled {
         }
     }
 
-    impl WindowHandler for Home {
+    impl WindowHandler for Home<'_> {
         fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool> {
             if (width, height) == (self.surface.width(), self.surface.height()) {
                 return Ok(false);
             }
-            if width < 640 || height < 420 {
-                return Err("ReadAll main window requires at least 640x420".into());
+            if width < 680 || height < 460 {
+                return Err("ReadAll main window requires at least 680x460".into());
             }
             self.surface = Surface::new(width, height, RenderLimits::default())?;
             self.paint()?;
@@ -506,7 +486,7 @@ mod enabled {
             }
             match action {
                 Action::Activate => self.open_browser(),
-                Action::Click { x, y } if (246..=866).contains(&x) && (116..=280).contains(&y) => {
+                Action::Click { x, y } if (250..=900).contains(&x) && (120..=294).contains(&y) => {
                     self.open_browser()
                 }
                 Action::Back => Ok(false),
@@ -527,11 +507,10 @@ mod enabled {
 
         fn title(&self) -> String {
             match &self.mode {
-                Mode::Home => "ReadAll — Library".into(),
-                Mode::Browser(browser) => format!(
-                    "ReadAll — Open EPUB — {}",
-                    display_ascii(&browser.directory.display().to_string(), 48)
-                ),
+                Mode::Library => "ReadAll — 书库".into(),
+                Mode::Browser(browser) => {
+                    format!("ReadAll — 打开 EPUB — {}", browser.directory.display())
+                }
             }
         }
 
@@ -543,24 +522,26 @@ mod enabled {
     pub(super) fn start(output: &mut impl Write) -> Result<()> {
         writeln!(
             output,
-            "Starting ReadAll GUI. Use --help for command-line tools."
+            "正在启动 ReadAll 图形界面。命令行帮助请使用 --help。"
         )?;
         output.flush()?;
+        let ui_font = UiFont::system()?;
+        writeln!(output, "GUI 字体: {:?}", ui_font.path())?;
         loop {
-            let mut home = Home::new(1000, 680)?;
+            let mut home = Home::new(1040, 700, &ui_font)?;
             let report: WindowReport = window::run(&mut home, WindowOptions::default())?;
             let Some(book) = home.selected_book.take() else {
                 writeln!(
                     output,
-                    "ReadAll GUI closed. Buffer commits: {}; last size: {}x{}",
+                    "ReadAll GUI 已关闭。提交帧: {}; 最后尺寸: {}x{}",
                     report.committed_frames, report.width, report.height
                 )?;
                 return Ok(());
             };
-            writeln!(output, "Opening EPUB: {:?}", book)?;
+            writeln!(output, "正在打开 EPUB: {:?}", book)?;
             output.flush()?;
             if let Err(error) = crate::native_epub::open_path(&book, output) {
-                writeln!(output, "Could not open EPUB: {error}")?;
+                writeln!(output, "无法打开 EPUB: {error}")?;
                 output.flush()?;
             }
         }
@@ -569,6 +550,7 @@ mod enabled {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::{test_font, ui::UiFont};
         use std::{
             sync::atomic::{AtomicU64, Ordering},
             time::{SystemTime, UNIX_EPOCH},
@@ -597,11 +579,15 @@ mod enabled {
             }
         }
 
+        fn font() -> UiFont {
+            UiFont::from_bytes(test_font::make_font(), PathBuf::from("fixture.ttf")).unwrap()
+        }
+
         #[test]
         fn browser_filters_and_sorts_directories_before_epubs() {
             let temp = Temp::new();
-            fs::create_dir(temp.0.join("Folder")).unwrap();
-            fs::write(temp.0.join("b.epub"), b"x").unwrap();
+            fs::create_dir(temp.0.join("中文目录")).unwrap();
+            fs::write(temp.0.join("中文图书.epub"), b"x").unwrap();
             fs::write(temp.0.join("a.txt"), b"x").unwrap();
             fs::write(temp.0.join("A.EPUB"), b"x").unwrap();
             let browser = Browser::load(temp.0.clone()).unwrap();
@@ -610,7 +596,7 @@ mod enabled {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, ["Folder", "A.EPUB", "b.epub"]);
+            assert_eq!(names, ["中文目录", "A.EPUB", "中文图书.epub"]);
         }
 
         #[test]
@@ -618,7 +604,8 @@ mod enabled {
             let temp = Temp::new();
             let book = temp.0.join("book.epub");
             fs::write(&book, b"x").unwrap();
-            let mut home = Home::new(1000, 680).unwrap();
+            let ui_font = font();
+            let mut home = Home::new(1040, 700, &ui_font).unwrap();
             home.mode = Mode::Browser(Browser::load(temp.0.clone()).unwrap());
             assert!(!home.action(Action::Activate).unwrap());
             assert!(home.close_requested());
@@ -626,8 +613,9 @@ mod enabled {
         }
 
         #[test]
-        fn home_draws_and_click_enters_browser() {
-            let mut home = Home::new(1000, 680).unwrap();
+        fn home_draws_with_true_type_font_and_click_enters_browser() {
+            let ui_font = font();
+            let mut home = Home::new(1040, 700, &ui_font).unwrap();
             let initial = home.surface.pixels().to_vec();
             assert!(home.action(Action::Click { x: 300, y: 180 }).unwrap());
             assert!(matches!(home.mode, Mode::Browser(_)));
