@@ -18,8 +18,6 @@ fn push32(bytes: &mut Vec<u8>, value: u32) {
 }
 
 pub fn make_epub() -> Vec<u8> {
-    const CONTAINER: &[u8] = br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
-    const PACKAGE: &[u8] = br#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>ReadAll Test</dc:title></metadata><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>"#;
     let chapter_one = format!(
         "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
         "AAAA WWWW ".repeat(80)
@@ -28,13 +26,93 @@ pub fn make_epub() -> Vec<u8> {
         "<html><body><h1>WWWW</h1><p>{}</p></body></html>",
         "WWWW AAAA ".repeat(80)
     );
-    let entries: Vec<(&str, Vec<u8>)> = vec![
-        ("mimetype", b"application/epub+zip".to_vec()),
-        ("META-INF/container.xml", CONTAINER.to_vec()),
-        ("OEBPS/package.opf", PACKAGE.to_vec()),
-        ("OEBPS/one.xhtml", chapter_one.into_bytes()),
-        ("OEBPS/two.xhtml", chapter_two.into_bytes()),
+    build_epub(vec![
+        (
+            "one",
+            "one.xhtml",
+            "application/xhtml+xml",
+            chapter_one.into_bytes(),
+        ),
+        (
+            "two",
+            "two.xhtml",
+            "application/xhtml+xml",
+            chapter_two.into_bytes(),
+        ),
+    ])
+}
+
+#[allow(dead_code)]
+pub fn make_epub_with_empty_spines() -> Vec<u8> {
+    let chapter_one = format!(
+        "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
+        "AAAA WWWW ".repeat(80)
+    );
+    let chapter_two = format!(
+        "<html><body><h1>WWWW</h1><p>{}</p></body></html>",
+        "WWWW AAAA ".repeat(80)
+    );
+    build_epub(vec![
+        (
+            "cover",
+            "cover.svg",
+            "image/svg+xml",
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="cover.jpg"/></svg>"#.to_vec(),
+        ),
+        (
+            "one",
+            "one.xhtml",
+            "application/xhtml+xml",
+            chapter_one.into_bytes(),
+        ),
+        (
+            "blank",
+            "blank.xhtml",
+            "application/xhtml+xml",
+            b"<html><body> 
+	 </body></html>".to_vec(),
+        ),
+        (
+            "two",
+            "two.xhtml",
+            "application/xhtml+xml",
+            chapter_two.into_bytes(),
+        ),
+        (
+            "end",
+            "end.xhtml",
+            "application/xhtml+xml",
+            br#"<html><body><svg xmlns="http://www.w3.org/2000/svg"><image href="end.jpg"/></svg></body></html>"#
+                .to_vec(),
+        ),
+    ])
+}
+
+fn build_epub(spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Vec<u8> {
+    const CONTAINER: &[u8] = br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+
+    let mut package = String::from(
+        r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>ReadAll Test</dc:title></metadata><manifest>"#,
+    );
+    for (id, href, media_type, _) in &spines {
+        package.push_str(&format!(
+            r#"<item id="{id}" href="{href}" media-type="{media_type}"/>"#
+        ));
+    }
+    package.push_str("</manifest><spine>");
+    for (id, _, _, _) in &spines {
+        package.push_str(&format!(r#"<itemref idref="{id}"/>"#));
+    }
+    package.push_str("</spine></package>");
+
+    let mut entries: Vec<(String, Vec<u8>)> = vec![
+        ("mimetype".into(), b"application/epub+zip".to_vec()),
+        ("META-INF/container.xml".into(), CONTAINER.to_vec()),
+        ("OEBPS/package.opf".into(), package.into_bytes()),
     ];
+    for (_, href, _, data) in spines {
+        entries.push((format!("OEBPS/{href}"), data));
+    }
 
     let mut bytes = Vec::new();
     let mut records = Vec::new();
@@ -54,7 +132,7 @@ pub fn make_epub() -> Vec<u8> {
         push16(&mut bytes, 0);
         bytes.extend_from_slice(name.as_bytes());
         bytes.extend_from_slice(data);
-        records.push((*name, data.len() as u32, offset, crc));
+        records.push((name.clone(), data.len() as u32, offset, crc));
     }
 
     let central_offset = bytes.len() as u32;

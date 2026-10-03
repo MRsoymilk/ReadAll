@@ -1,7 +1,7 @@
 //! Transactional EPUB reading state over the current XHTML text subset.
 use crate::text_page::{Options, PageRenderer, RenderedPage};
 use readall_core::{Limits, TextDocument};
-use readall_epub::{EpubBook, EpubLocator};
+use readall_epub::{EpubBook, EpubError, EpubLocator};
 use readall_font::Font;
 use std::error::Error;
 
@@ -45,27 +45,30 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         if options.at.is_some() {
             return Err("EPUB session requires EpubLocator rather than TextLocator".into());
         }
-        let (spine, offset) = match start {
-            Start::Beginning => (
-                first_linear(book).ok_or("EPUB has no linear spine items")?,
-                None,
-            ),
+        let (spine, chapter, offset) = match start {
+            Start::Beginning => {
+                let (spine, chapter) = first_readable(book)?
+                    .ok_or("EPUB has no readable text chapters in the current XHTML subset")?;
+                (spine, chapter, None)
+            }
             Start::Spine(spine) => {
                 if book.spine_item(spine).is_none() {
                     return Err("EPUB spine index is outside this book".into());
                 }
-                (spine, None)
+                (spine, chapter_document(book, spine)?, None)
             }
             Start::Locator(locator) => {
                 if options.page.is_some() {
                     return Err("EPUB locator cannot be combined with a page number".into());
                 }
                 let (spine, offset) = book.restore(&locator)?;
-                (spine, Some((offset, locator)))
+                (
+                    spine,
+                    chapter_document(book, spine)?,
+                    Some((offset, locator)),
+                )
             }
         };
-
-        let chapter = chapter_document(book, spine)?;
         let exact_anchor = if let Some((offset, locator)) = offset {
             options.page = None;
             options.at = Some(chapter.locator(offset)?);
@@ -200,36 +203,38 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         if self.frame.page + 1 < self.frame.pages {
             return self.render_current_page(self.frame.page + 1);
         }
-        let Some(spine) = next_linear(self.book, self.spine) else {
+        let Some((spine, chapter)) = next_readable(self.book, self.spine)? else {
             return Ok(false);
         };
-        self.switch_spine(spine, PageTarget::First)
+        self.switch_chapter(spine, chapter, PageTarget::First)
     }
 
     fn previous(&mut self) -> Result<bool> {
         if self.frame.page > 0 {
             return self.render_current_page(self.frame.page - 1);
         }
-        let Some(spine) = previous_linear(self.book, self.spine) else {
+        let Some((spine, chapter)) = previous_readable(self.book, self.spine)? else {
             return Ok(false);
         };
-        self.switch_spine(spine, PageTarget::Last)
+        self.switch_chapter(spine, chapter, PageTarget::Last)
     }
 
     fn first(&mut self) -> Result<bool> {
-        let spine = first_linear(self.book).ok_or("EPUB has no linear spine items")?;
+        let (spine, chapter) = first_readable(self.book)?
+            .ok_or("EPUB has no readable text chapters in the current XHTML subset")?;
         if spine == self.spine && self.frame.page == 0 {
             return Ok(false);
         }
-        self.switch_spine(spine, PageTarget::First)
+        self.switch_chapter(spine, chapter, PageTarget::First)
     }
 
     fn last(&mut self) -> Result<bool> {
-        let spine = last_linear(self.book).ok_or("EPUB has no linear spine items")?;
+        let (spine, chapter) = last_readable(self.book)?
+            .ok_or("EPUB has no readable text chapters in the current XHTML subset")?;
         if spine == self.spine && self.frame.page + 1 == self.frame.pages {
             return Ok(false);
         }
-        self.switch_spine(spine, PageTarget::Last)
+        self.switch_chapter(spine, chapter, PageTarget::Last)
     }
 
     fn render_current_page(&mut self, page: usize) -> Result<bool> {
@@ -244,8 +249,12 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         Ok(true)
     }
 
-    fn switch_spine(&mut self, spine: usize, target: PageTarget) -> Result<bool> {
-        let chapter = chapter_document(self.book, spine)?;
+    fn switch_chapter(
+        &mut self,
+        spine: usize,
+        chapter: TextDocument,
+        target: PageTarget,
+    ) -> Result<bool> {
         let mut options = self.options.clone();
         options.at = None;
         options.page = Some(0);
@@ -273,13 +282,34 @@ enum PageTarget {
 
 fn chapter_document(book: &EpubBook<'_>, spine: usize) -> Result<TextDocument> {
     let text = book.read_spine_text(spine)?;
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return Err("EPUB spine contains no readable text in the current XHTML subset".into());
     }
     Ok(TextDocument::from_bytes(
         text.as_bytes(),
         Limits::default(),
     )?)
+}
+
+fn readable_chapter(book: &EpubBook<'_>, spine: usize) -> Result<Option<TextDocument>> {
+    let Some(spine_item) = book.spine().get(spine) else {
+        return Ok(None);
+    };
+    if !spine_item.linear() {
+        return Ok(None);
+    }
+    let text = match book.read_spine_text(spine) {
+        Ok(text) => text,
+        Err(EpubError::Unsupported(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(TextDocument::from_bytes(
+        text.as_bytes(),
+        Limits::default(),
+    )?))
 }
 
 fn page_anchor(
@@ -292,29 +322,40 @@ fn page_anchor(
     Ok(book.locator(spine, offset)?)
 }
 
-fn first_linear(book: &EpubBook<'_>) -> Option<usize> {
-    book.spine().iter().position(|item| item.linear())
+fn first_readable(book: &EpubBook<'_>) -> Result<Option<(usize, TextDocument)>> {
+    for index in 0..book.spine().len() {
+        if let Some(chapter) = readable_chapter(book, index)? {
+            return Ok(Some((index, chapter)));
+        }
+    }
+    Ok(None)
 }
 
-fn last_linear(book: &EpubBook<'_>) -> Option<usize> {
-    book.spine().iter().rposition(|item| item.linear())
+fn last_readable(book: &EpubBook<'_>) -> Result<Option<(usize, TextDocument)>> {
+    for index in (0..book.spine().len()).rev() {
+        if let Some(chapter) = readable_chapter(book, index)? {
+            return Ok(Some((index, chapter)));
+        }
+    }
+    Ok(None)
 }
 
-fn next_linear(book: &EpubBook<'_>, current: usize) -> Option<usize> {
-    book.spine()
-        .iter()
-        .enumerate()
-        .skip(current.saturating_add(1))
-        .find_map(|(index, item)| item.linear().then_some(index))
+fn next_readable(book: &EpubBook<'_>, current: usize) -> Result<Option<(usize, TextDocument)>> {
+    for index in current.saturating_add(1)..book.spine().len() {
+        if let Some(chapter) = readable_chapter(book, index)? {
+            return Ok(Some((index, chapter)));
+        }
+    }
+    Ok(None)
 }
 
-fn previous_linear(book: &EpubBook<'_>, current: usize) -> Option<usize> {
-    book.spine()
-        .iter()
-        .enumerate()
-        .take(current)
-        .rev()
-        .find_map(|(index, item)| item.linear().then_some(index))
+fn previous_readable(book: &EpubBook<'_>, current: usize) -> Result<Option<(usize, TextDocument)>> {
+    for index in (0..current.min(book.spine().len())).rev() {
+        if let Some(chapter) = readable_chapter(book, index)? {
+            return Ok(Some((index, chapter)));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -390,6 +431,43 @@ mod tests {
         assert!(session.action(Action::Last).unwrap());
         assert_eq!(session.spine, 1);
         assert_eq!(session.frame().page + 1, session.frame().pages);
+    }
+
+    #[test]
+    fn empty_cover_and_non_text_spines_are_skipped_during_navigation() {
+        let epub_bytes = test_epub::make_epub_with_empty_spines();
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+
+        // spine 0 is SVG cover, so reading begins at the first text chapter.
+        assert_eq!(session.spine, 1);
+
+        // Advance until the next readable chapter. spine 2 is blank and must be skipped.
+        for _ in 0..100 {
+            if session.spine == 3 {
+                break;
+            }
+            assert!(session.action(Action::Next).unwrap());
+        }
+        assert_eq!(session.spine, 3);
+        assert_eq!(session.frame().page, 0);
+
+        // Going back crosses over the blank spine and returns to chapter one.
+        assert!(session.action(Action::Previous).unwrap());
+        assert_eq!(session.spine, 1);
+        assert_eq!(session.frame().page + 1, session.frame().pages);
+
+        // First/Last ignore the non-readable cover and trailing image-only page.
+        assert!(session.action(Action::Last).unwrap());
+        assert_eq!(session.spine, 3);
+        assert_eq!(session.frame().page + 1, session.frame().pages);
+        assert!(!session.action(Action::Next).unwrap());
+        assert!(session.action(Action::First).unwrap());
+        assert_eq!(session.spine, 1);
+        assert_eq!(session.frame().page, 0);
+        assert!(!session.action(Action::Previous).unwrap());
     }
 
     #[test]
