@@ -27,6 +27,7 @@ mod enabled {
     struct ReaderWindow<'doc, 'font, 'bytes> {
         session: Session<'doc, 'font, 'bytes>,
         progress: Option<ProgressStore>,
+        close_requested: bool,
     }
 
     impl ReaderWindow<'_, '_, '_> {
@@ -53,6 +54,18 @@ mod enabled {
                 Action::Last => ReaderAction::Last,
                 Action::Larger => ReaderAction::Larger,
                 Action::Smaller => ReaderAction::Smaller,
+                Action::Click { x, .. } => {
+                    if x < self.session.frame().surface.width() as i32 / 2 {
+                        ReaderAction::Previous
+                    } else {
+                        ReaderAction::Next
+                    }
+                }
+                Action::Back => {
+                    self.close_requested = true;
+                    return Ok(false);
+                }
+                Action::Activate => return Ok(false),
                 Action::Close => return Ok(false),
             };
             match Session::action(&mut self.session, action) {
@@ -75,6 +88,10 @@ mod enabled {
 
         fn title(&self) -> String {
             Session::title(&self.session)
+        }
+
+        fn close_requested(&self) -> bool {
+            self.close_requested
         }
     }
 
@@ -182,7 +199,11 @@ mod enabled {
         )?;
         let font = Font::parse(&bytes, options.face, limits)?;
         let session = Session::new(&document, &font, options)?;
-        let mut reader = ReaderWindow { session, progress };
+        let mut reader = ReaderWindow {
+            session,
+            progress,
+            close_requested: false,
+        };
 
         writeln!(
             output,

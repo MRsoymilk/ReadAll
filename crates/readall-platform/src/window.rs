@@ -15,6 +15,9 @@ pub enum Action {
     Last,
     Larger,
     Smaller,
+    Activate,
+    Back,
+    Click { x: i32, y: i32 },
     Close,
 }
 #[derive(Debug, Clone, Default)]
@@ -35,6 +38,9 @@ pub trait WindowHandler {
     fn action(&mut self, action: Action) -> WindowResult<bool>;
     fn surface(&self) -> &Surface;
     fn title(&self) -> String;
+    fn close_requested(&self) -> bool {
+        false
+    }
 }
 pub fn run(handler: &mut impl WindowHandler, options: WindowOptions) -> WindowResult<WindowReport> {
     if options.close_after_frames == Some(0) {
@@ -72,6 +78,8 @@ pub(crate) fn write_xrgb(surface: &Surface, output: &mut impl Write) -> io::Resu
 pub(crate) fn physical_key(code: u32) -> Option<Action> {
     Some(match code {
         1 => Action::Close,
+        28 => Action::Activate,
+        14 => Action::Back,
         57 | 106 | 108 | 109 => Action::Next,
         103..=105 => Action::Previous,
         102 => Action::First,
@@ -106,6 +114,8 @@ mod tests {
         assert_eq!(physical_key(109), Some(Action::Next));
         assert_eq!(physical_key(104), Some(Action::Previous));
         assert_eq!(physical_key(13), Some(Action::Larger));
+        assert_eq!(physical_key(28), Some(Action::Activate));
+        assert_eq!(physical_key(14), Some(Action::Back));
         assert_eq!(physical_key(1), Some(Action::Close));
         assert_eq!(physical_key(30), None);
         assert_eq!(physical_key(u32::MAX), None);

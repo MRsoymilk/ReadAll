@@ -101,6 +101,28 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         &self.anchor
     }
 
+    pub(crate) fn book_title(&self) -> &str {
+        self.book.title().unwrap_or("(untitled)")
+    }
+
+    pub(crate) fn chapter_position(&self) -> (usize, usize) {
+        (self.spine + 1, self.book.spine().len())
+    }
+
+    pub(crate) fn page_position(&self) -> (usize, usize) {
+        (self.frame.page + 1, self.frame.pages)
+    }
+
+    pub(crate) fn font_size(&self) -> u32 {
+        self.options.size
+    }
+
+    pub(crate) fn overall_progress(&self) -> f32 {
+        let chapters = self.book.spine().len().max(1) as f32;
+        let chapter_fraction = (self.frame.page + 1) as f32 / self.frame.pages.max(1) as f32;
+        ((self.spine as f32 + chapter_fraction) / chapters).clamp(0.0, 1.0)
+    }
+
     pub(crate) fn title(&self) -> String {
         format!(
             "ReadAll — {} — chapter {}/{} — page {}/{} — {} px{}",

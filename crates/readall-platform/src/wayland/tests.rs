@@ -356,6 +356,26 @@ fn absent_display_is_an_error_not_a_headless_success() {
     );
 }
 #[test]
+fn pointer_click_preserves_surface_coordinates() {
+    let mut state = State::new(320, 300);
+    state.pointer_focus = true;
+    state.pointer_x = 123 * 256;
+    state.pointer_y = 77 * 256;
+    // SAFETY: event argument shape matches wl_pointer.button v5.
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 1 }, Arg { u: 0 }, Arg { u: 272 }, Arg { u: 1 }].as_mut_ptr(),
+        );
+    }
+    assert_eq!(state.action_count, 1);
+    assert_eq!(state.actions[0], Some(Action::Click { x: 123, y: 77 }));
+}
+
+#[test]
 fn discrete_and_continuous_wheel_events_do_not_turn_twice() {
     let mut state = State::new(320, 300);
     state.pointer_focus = true;

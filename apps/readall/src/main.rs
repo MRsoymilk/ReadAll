@@ -2,6 +2,8 @@ mod cli;
 mod epub_page;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod epub_session;
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+mod font_select;
 mod home;
 mod native;
 mod native_epub;
@@ -16,6 +18,8 @@ mod test_epub;
 #[path = "../tests/support/font.rs"]
 mod test_font;
 mod text_page;
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+mod ui;
 
 use std::{io, process::ExitCode};
 

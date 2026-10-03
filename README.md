@@ -4,7 +4,7 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 ## 当前状态
 
-项目处于基础引擎阶段，**Linux Wayland 构建下零参数启动已默认进入原生 ReadAll 主窗口，同时保留命令行、真实字体 TXT/EPUB 文本页面渲染，以及原生 TXT 和 EPUB 阅读窗口**。窗口已通过编译、本地模拟合成器协议测试和无显示环境的真实 CLI 错误路径测试，尚未完成真实桌面目视验收；EPUB 当前只支持自研 XHTML 文本子集，CSS/图片等仍未渲染，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
+项目处于基础引擎阶段，**Linux Wayland 下零参数启动进入原生 ReadAll 书库界面，可在 GUI 内浏览目录、选择 `.epub` 并直接进入阅读，同时保留命令行、TXT/EPUB 页面渲染和原生阅读窗口**。窗口已通过编译、本地模拟合成器协议测试和无显示环境的真实 CLI 错误路径测试，尚未完成真实桌面目视验收；EPUB 当前只支持自研 XHTML 文本子集，CSS/图片等仍未渲染，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘主窗口，只有 `readall --help` / `-h` 才打印命令行帮助。`--features wayland` 是 Cargo 的编译参数，不是 `readall` 的运行参数。当前主窗口包含 EPUB/TXT 入口卡片和选择状态，系统文件选择器尚未接入，因此卡片暂时用于主界面导航展示，具体书籍仍可通过 `open` / `open-epub` 子命令打开。
+Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击 `OPEN EPUB` 或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部 `BACK` 返回上级。当前 GUI 使用启动级位图字体，因此非 ASCII 文件名暂以 `?` 显示；进入图书后正文仍使用自研 TrueType 引擎。`--features wayland` 是 Cargo 编译参数，不是运行参数。
 
 `read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
 
@@ -67,7 +67,7 @@ cargo run -p readall --offline -- epub-text /path/to/book.epub --spine 1
 cargo run -p readall --offline -- render-epub /path/to/book.epub target/epub-page.ppm --spine 1 --font /path/to/font.ttf
 ```
 
-`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。`render-epub` 已能把单个 XHTML spine 的正文送入现有 TrueType 字体、真实字宽分页和 CPU 字形渲染管线，输出 PPM 页面；它仍是诊断路径，不是完整 EPUB 阅读模式。EPUB 现在使用独立的 `epub-v1:<整书SHA-256>:<零基spine>:<规范化UTF-8偏移>` locator；`render-epub --at '<locator>'` 可在页面尺寸变化后恢复到对应 spine 和内容位置，并拒绝其他 EPUB 修订版的 locator。下一步在此基础上实现跨 spine 连续翻页和原生窗口。
+`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。`render-epub` 是无窗口诊断导出，而默认 GUI 已可选择 EPUB、跨 `linear=yes` spine 连续翻页并自动保存进度。EPUB 使用独立的 `epub-v1:<整书SHA-256>:<零基spine>:<规范化UTF-8偏移>` locator；页面尺寸或字号变化后仍按内容位置恢复，并拒绝其他 EPUB 修订版的 locator。
 
 ## 字体引擎
 
@@ -105,7 +105,7 @@ cargo run -p readall --features wayland --offline -- open tests/fixtures/sample_
 cargo run -p readall --features wayland --offline -- open-epub /path/to/book.epub --font /path/to/font.ttf
 ```
 
-`open` 复用 `render-text` 的字体、尺寸、页边距、`--page`/`--at` 和缺字策略参数，但不需要图片输出路径。`open-epub` 使用同一套自研字体/页面渲染，支持 `--spine N` 或 `--at epub-v1:...` 作为起点；页内翻到边界后会按 OPF 的 `linear=yes` 阅读顺序进入相邻 spine，Home/End 跨整本书跳到首末线性章节。两种窗口都支持 PageUp/左/上、PageDown/右/下/Space、加减号、Esc、左右半区点击和竖向滚轮。目前快捷键按 Linux 物理键码处理，不实现文字输入、键盘布局转换或长按自动重复。
+默认 GUI 打开 EPUB 时会对若干线性章节采样字符，在系统字体目录中有界扫描当前自研引擎可解析的 TTF/TTC，并优先选择字形覆盖更完整的字体；仍缺失的字符显式使用 `.notdef`。阅读页顶部显示书名、章节/页码和字号，底部显示操作提示与整书进度条。左右半区点击、竖向滚轮、PageUp/PageDown/方向键/Space 翻页，`+/-` 调字号，Backspace 返回书库。命令行 `open-epub` 仍支持显式 `--font`、`--spine` 和 `--at epub-v1:...`。
 
 窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 与 EPUB 原生阅读都默认使用 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时使用 `$HOME/.local/state/readall/progress-v1`；TXT 保存 `TextLocator`，EPUB 保存绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator。成功翻页及正常关闭时用同目录临时文件 + rename 更新状态；显式 `--page`/`--spine`/`--at` 优先于自动恢复。两种窗口都可用 `--progress off` 禁用或 `--state-dir DIR` 指定状态目录。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
 
@@ -121,13 +121,13 @@ cargo run -p readall-platform --example probe --offline
 
 当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
 
-这一版尚无工具栏/书库、自绘窗口装饰、文字选择、字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次；同一字号与窗口几何下翻页复用整本文本的测量布局，并跨页保留已经光栅化的字形蒙版。窗口尺寸变化只重建布局，字号变化建立新的字号专属字形缓存。仍未缓存完整页面像素，大文档首次排版性能需要继续优化。Windows/Android 窗口尚未实现。
+这一版已有基础书库/文件浏览和阅读状态栏，但尚无封面墙、EPUB 元数据书架、目录侧栏、文字选择、真正多字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次；同一字号与窗口几何下翻页复用整本文本的测量布局，并跨页保留已经光栅化的字形蒙版。窗口尺寸变化只重建布局，字号变化建立新的字号专属字形缓存。仍未缓存完整页面像素，大文档首次排版性能需要继续优化。Windows/Android 窗口尚未实现。
 
 ## 后续顺序
 
-1. 真实 Wayland 桌面验收，补足 HiDPI、原生界面与 Windows/Android 平台入口。
-2. TXT 阅读：字体回退、字素/单词断行和文字选择；继续优化首次排版并完善进度数据的跨平台存储策略。
-3. EPUB：在已完成的 ZIP/OPF、XHTML 文本、稳定 locator、跨 spine 原生翻页和自动进度基础上，加入导航目录、CSS 子集、图片和更完整的自研排版。
+1. 优先继续 UI：最近阅读/封面书架、EPUB 元数据展示、目录侧栏、设置页、阅读主题和更完整的鼠标交互。
+2. EPUB：在已完成的 GUI 打开、XHTML 文本、稳定 locator、跨 spine 翻页和自动进度基础上，加入 navigation/TOC、CSS 子集、图片和更完整的自研排版。
+3. 文本与字体：真正字体回退、字素/单词断行、文字选择，并优化首次排版和大书缓存。
 4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
 5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。
 

@@ -1,160 +1,489 @@
-//! Minimal native application home screen. It deliberately does not depend on an external font.
-//! ASCII labels are rendered with a tiny built-in 5x7 bitmap so zero-argument startup is self-contained.
+//! Native ReadAll home screen and dependency-free EPUB file browser.
 use std::io::Write;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[cfg(not(all(target_os = "linux", feature = "wayland")))]
 pub(crate) fn run(_: &mut impl Write) -> Result<()> {
-    Err("ReadAll GUI is unavailable in this build: on Linux rebuild with --features wayland; Windows/Android GUI backends are not implemented yet".into())
+    Err("ReadAll GUI is unavailable in this build; use --no-default-features only for headless CLI builds".into())
 }
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
     use super::*;
+    use crate::ui::{display_ascii, draw_text};
     use readall_platform::window::{
         self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult,
     };
     use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
-    const BG: Color = Color::rgba(238, 241, 245, 255);
+    const BG: Color = Color::rgba(244, 246, 249, 255);
+    const SIDEBAR: Color = Color::rgba(27, 32, 40, 255);
     const PANEL: Color = Color::rgba(255, 255, 255, 255);
-    const INK: Color = Color::rgba(32, 38, 46, 255);
-    const MUTED: Color = Color::rgba(100, 110, 124, 255);
-    const ACCENT: Color = Color::rgba(53, 105, 190, 255);
-    const BORDER: Color = Color::rgba(204, 211, 220, 255);
+    const INK: Color = Color::rgba(34, 40, 49, 255);
+    const MUTED: Color = Color::rgba(107, 117, 130, 255);
+    const ACCENT: Color = Color::rgba(55, 104, 190, 255);
+    const ACCENT_SOFT: Color = Color::rgba(229, 237, 252, 255);
+    const SIDEBAR_TEXT: Color = Color::rgba(238, 242, 247, 255);
+    const ROW_HEIGHT: i32 = 42;
+    const LIST_TOP: i32 = 142;
+    const LIST_BOTTOM_MARGIN: i32 = 72;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Choice {
-        Epub,
-        Text,
+    #[derive(Debug, Clone)]
+    struct FileEntry {
+        name: String,
+        path: PathBuf,
+        directory: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Browser {
+        directory: PathBuf,
+        entries: Vec<FileEntry>,
+        selected: usize,
+        scroll: usize,
+    }
+
+    impl Browser {
+        fn load(directory: PathBuf) -> WindowResult<Self> {
+            let mut entries = Vec::new();
+            for item in fs::read_dir(&directory)? {
+                if entries.len() >= 512 {
+                    break;
+                }
+                let item = match item {
+                    Ok(item) => item,
+                    Err(_) => continue,
+                };
+                let name = item.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let kind = match item.file_type() {
+                    Ok(kind) => kind,
+                    Err(_) => continue,
+                };
+                let directory = kind.is_dir();
+                let epub = kind.is_file()
+                    && item
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
+                if directory || epub {
+                    entries.push(FileEntry {
+                        name,
+                        path: item.path(),
+                        directory,
+                    });
+                }
+            }
+            entries.sort_by(|a, b| {
+                b.directory
+                    .cmp(&a.directory)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+            Ok(Self {
+                directory,
+                entries,
+                selected: 0,
+                scroll: 0,
+            })
+        }
+
+        fn selected(&self) -> Option<&FileEntry> {
+            self.entries.get(self.selected)
+        }
+
+        fn move_by(&mut self, delta: isize, visible: usize) {
+            if self.entries.is_empty() {
+                return;
+            }
+            self.selected = if delta < 0 {
+                self.selected.saturating_sub(delta.unsigned_abs())
+            } else {
+                self.selected
+                    .saturating_add(delta as usize)
+                    .min(self.entries.len() - 1)
+            };
+            self.keep_visible(visible);
+        }
+
+        fn first(&mut self) {
+            self.selected = 0;
+            self.scroll = 0;
+        }
+
+        fn last(&mut self, visible: usize) {
+            if self.entries.is_empty() {
+                return;
+            }
+            self.selected = self.entries.len() - 1;
+            self.keep_visible(visible);
+        }
+
+        fn keep_visible(&mut self, visible: usize) {
+            let visible = visible.max(1);
+            if self.selected < self.scroll {
+                self.scroll = self.selected;
+            } else if self.selected >= self.scroll.saturating_add(visible) {
+                self.scroll = self.selected + 1 - visible;
+            }
+        }
+    }
+
+    enum Mode {
+        Home,
+        Browser(Browser),
     }
 
     struct Home {
         surface: Surface,
-        choice: Choice,
+        mode: Mode,
+        selected_book: Option<PathBuf>,
+        close_requested: bool,
+        status: String,
     }
 
     impl Home {
         fn new(width: u32, height: u32) -> WindowResult<Self> {
             let mut home = Self {
                 surface: Surface::new(width, height, RenderLimits::default())?,
-                choice: Choice::Epub,
+                mode: Mode::Home,
+                selected_book: None,
+                close_requested: false,
+                status: "EPUB TEXT READING IS READY".into(),
             };
             home.paint()?;
             Ok(home)
         }
 
+        fn default_directory() -> PathBuf {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute() && path.is_dir())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("/"))
+        }
+
+        fn open_browser(&mut self) -> WindowResult<bool> {
+            let browser = Browser::load(Self::default_directory())?;
+            self.mode = Mode::Browser(browser);
+            self.status = "SELECT AN EPUB FILE".into();
+            self.paint()?;
+            Ok(true)
+        }
+
+        fn visible_rows(&self) -> usize {
+            ((self.surface.height() as i32 - LIST_TOP - LIST_BOTTOM_MARGIN) / ROW_HEIGHT).max(1)
+                as usize
+        }
+
+        fn activate_browser(&mut self) -> WindowResult<bool> {
+            let selected = match &self.mode {
+                Mode::Browser(browser) => browser.selected().cloned(),
+                Mode::Home => None,
+            };
+            let Some(selected) = selected else {
+                self.status = "NO EPUB FILES IN THIS FOLDER".into();
+                self.paint()?;
+                return Ok(true);
+            };
+            if selected.directory {
+                self.mode = Mode::Browser(Browser::load(selected.path)?);
+                self.status = "SELECT AN EPUB FILE".into();
+                self.paint()?;
+                return Ok(true);
+            }
+            self.selected_book = Some(selected.path);
+            self.close_requested = true;
+            Ok(false)
+        }
+
+        fn back(&mut self) -> WindowResult<bool> {
+            let parent = match &self.mode {
+                Mode::Browser(browser) => browser.directory.parent().map(Path::to_path_buf),
+                Mode::Home => None,
+            };
+            match parent {
+                Some(parent) => {
+                    self.mode = Mode::Browser(Browser::load(parent)?);
+                    self.status = "SELECT AN EPUB FILE".into();
+                }
+                None => {
+                    self.mode = Mode::Home;
+                    self.status = "EPUB TEXT READING IS READY".into();
+                }
+            }
+            self.paint()?;
+            Ok(true)
+        }
+
         fn paint(&mut self) -> WindowResult<()> {
-            let w = self.surface.width();
-            let h = self.surface.height();
-            let mut commands = vec![DrawCommand::FillRect {
-                rect: Rect::new(0, 0, w, h),
+            self.surface.draw(&[DrawCommand::FillRect {
+                rect: Rect::new(0, 0, self.surface.width(), self.surface.height()),
                 color: BG,
-            }];
-            let panel_w = w.saturating_sub(80).min(960);
-            let panel_h = h.saturating_sub(80).min(620);
-            let px = ((w - panel_w) / 2) as i32;
-            let py = ((h - panel_h) / 2) as i32;
-            commands.push(DrawCommand::FillRect {
-                rect: Rect::new(px, py, panel_w, panel_h),
+            }])?;
+            match &self.mode {
+                Mode::Home => self.paint_home(),
+                Mode::Browser(browser) => {
+                    let browser = browser.clone();
+                    self.paint_browser(&browser)
+                }
+            }
+        }
+
+        fn paint_shell(&mut self, section: &str) -> WindowResult<()> {
+            let h = self.surface.height();
+            self.surface.draw(&[
+                DrawCommand::FillRect {
+                    rect: Rect::new(0, 0, 214, h),
+                    color: SIDEBAR,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(214, 0, self.surface.width().saturating_sub(214), 82),
+                    color: PANEL,
+                },
+            ])?;
+            draw_text(&mut self.surface, 28, 28, 4, "READALL", SIDEBAR_TEXT)?;
+            draw_text(
+                &mut self.surface,
+                28,
+                72,
+                2,
+                "RUST READER",
+                Color::rgba(157, 169, 185, 255),
+            )?;
+            draw_text(
+                &mut self.surface,
+                30,
+                138,
+                2,
+                "LIBRARY",
+                Color::rgba(126, 174, 244, 255),
+            )?;
+            draw_text(&mut self.surface, 30, 176, 2, "OPEN EPUB", SIDEBAR_TEXT)?;
+            draw_text(&mut self.surface, 246, 30, 3, section, INK)?;
+            Ok(())
+        }
+
+        fn paint_home(&mut self) -> WindowResult<()> {
+            self.paint_shell("LIBRARY")?;
+            let w = self.surface.width();
+            let content_w = w.saturating_sub(270);
+            let card = Rect::new(246, 116, content_w.min(620), 164);
+            self.surface.draw(&[
+                DrawCommand::FillRect {
+                    rect: card,
+                    color: ACCENT,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(card.x + 4, card.y + 4, card.width - 8, card.height - 8),
+                    color: PANEL,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(card.x + 4, card.y + 4, 10, card.height - 8),
+                    color: ACCENT,
+                },
+            ])?;
+            draw_text(&mut self.surface, 276, 144, 3, "OPEN EPUB", INK)?;
+            draw_text(
+                &mut self.surface,
+                276,
+                194,
+                2,
+                "BROWSE FOLDERS AND START READING",
+                MUTED,
+            )?;
+            draw_text(
+                &mut self.surface,
+                276,
+                232,
+                2,
+                "CLICK THIS CARD OR PRESS ENTER",
+                ACCENT,
+            )?;
+
+            let info_y = 326;
+            self.surface.draw(&[DrawCommand::FillRect {
+                rect: Rect::new(246, info_y, content_w.min(620), 150),
                 color: PANEL,
-            });
-
-            let card_gap = 24_u32;
-            let card_w = panel_w.saturating_sub(72 + card_gap) / 2;
-            let card_h = 180_u32.min(panel_h.saturating_sub(210));
-            let card_y = py + 120;
-            let left_x = px + 24;
-            let right_x = left_x + card_w as i32 + card_gap as i32;
-            draw_card(
-                &mut commands,
-                Rect::new(left_x, card_y, card_w, card_h),
-                self.choice == Choice::Epub,
-            );
-            draw_card(
-                &mut commands,
-                Rect::new(right_x, card_y, card_w, card_h),
-                self.choice == Choice::Text,
-            );
-            self.surface.draw(&commands)?;
-
-            draw_text(&mut self.surface, px + 28, py + 28, 4, "READALL", INK)?;
+            }])?;
             draw_text(
                 &mut self.surface,
-                px + 30,
-                py + 72,
+                276,
+                info_y + 24,
                 2,
-                "NATIVE RUST READER",
-                MUTED,
-            )?;
-            draw_text(
-                &mut self.surface,
-                left_x + 22,
-                card_y + 28,
-                3,
-                "OPEN EPUB",
+                "CURRENT EPUB SUPPORT",
                 INK,
             )?;
             draw_text(
                 &mut self.surface,
-                left_x + 22,
-                card_y + 82,
+                276,
+                info_y + 60,
                 2,
-                "EPUB XHTML TEXT READER",
+                "XHTML TEXT  MULTI CHAPTER  PROGRESS",
                 MUTED,
             )?;
             draw_text(
                 &mut self.surface,
-                right_x + 22,
-                card_y + 28,
-                3,
-                "OPEN TXT",
-                INK,
-            )?;
-            draw_text(
-                &mut self.surface,
-                right_x + 22,
-                card_y + 82,
+                276,
+                info_y + 94,
                 2,
-                "PLAIN TEXT READER",
+                "CSS AND IMAGES ARE NEXT",
                 MUTED,
             )?;
-            let hint_y = card_y + card_h as i32 + 36;
+
+            let footer_y = self.surface.height() as i32 - 38;
             draw_text(
                 &mut self.surface,
-                px + 30,
-                hint_y,
+                246,
+                footer_y,
                 2,
-                "LEFT RIGHT OR CLICK TO SELECT",
-                MUTED,
-            )?;
-            draw_text(
-                &mut self.surface,
-                px + 30,
-                hint_y + 32,
-                2,
-                "FILE PICKER IS THE NEXT GUI STEP",
-                MUTED,
-            )?;
-            draw_text(
-                &mut self.surface,
-                px + 30,
-                hint_y + 64,
-                2,
-                "ESC CLOSES THE WINDOW",
+                &display_ascii(&self.status, 58),
                 MUTED,
             )?;
             Ok(())
         }
 
-        fn select(&mut self, choice: Choice) -> WindowResult<bool> {
-            if self.choice == choice {
-                return Ok(false);
+        fn paint_browser(&mut self, browser: &Browser) -> WindowResult<()> {
+            self.paint_shell("OPEN EPUB")?;
+            self.surface.draw(&[
+                DrawCommand::FillRect {
+                    rect: Rect::new(238, 96, self.surface.width().saturating_sub(264), 38),
+                    color: PANEL,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(246, 103, 74, 24),
+                    color: ACCENT_SOFT,
+                },
+            ])?;
+            draw_text(&mut self.surface, 256, 108, 2, "< BACK", ACCENT)?;
+            let path = display_ascii(&browser.directory.display().to_string(), 55);
+            draw_text(&mut self.surface, 340, 108, 2, &path, MUTED)?;
+
+            let visible = self.visible_rows();
+            let width = self.surface.width().saturating_sub(276);
+            for (row, entry) in browser
+                .entries
+                .iter()
+                .skip(browser.scroll)
+                .take(visible)
+                .enumerate()
+            {
+                let index = browser.scroll + row;
+                let y = LIST_TOP + row as i32 * ROW_HEIGHT;
+                let selected = index == browser.selected;
+                self.surface.draw(&[DrawCommand::FillRect {
+                    rect: Rect::new(246, y, width, (ROW_HEIGHT - 4) as u32),
+                    color: if selected { ACCENT_SOFT } else { PANEL },
+                }])?;
+                if selected {
+                    self.surface.draw(&[DrawCommand::FillRect {
+                        rect: Rect::new(246, y, 5, (ROW_HEIGHT - 4) as u32),
+                        color: ACCENT,
+                    }])?;
+                }
+                draw_text(
+                    &mut self.surface,
+                    264,
+                    y + 10,
+                    2,
+                    if entry.directory { "DIR" } else { "EPUB" },
+                    if entry.directory { MUTED } else { ACCENT },
+                )?;
+                let name = display_ascii(&entry.name, 52);
+                draw_text(&mut self.surface, 330, y + 10, 2, &name, INK)?;
             }
-            self.choice = choice;
-            self.paint()?;
-            Ok(true)
+
+            if browser.entries.is_empty() {
+                draw_text(
+                    &mut self.surface,
+                    266,
+                    LIST_TOP + 28,
+                    2,
+                    "NO EPUB FILES OR FOLDERS HERE",
+                    MUTED,
+                )?;
+            }
+            let footer = format!(
+                "{} ITEMS  ENTER OPEN  BACKSPACE UP  ESC EXIT",
+                browser.entries.len()
+            );
+            let footer_y = self.surface.height() as i32 - 38;
+            draw_text(
+                &mut self.surface,
+                246,
+                footer_y,
+                2,
+                &display_ascii(&footer, 62),
+                MUTED,
+            )?;
+            Ok(())
+        }
+
+        fn browser_action(&mut self, action: Action) -> WindowResult<bool> {
+            let visible = self.visible_rows();
+            match action {
+                Action::Previous | Action::Smaller => {
+                    if let Mode::Browser(browser) = &mut self.mode {
+                        browser.move_by(-1, visible);
+                    }
+                    self.paint()?;
+                    Ok(true)
+                }
+                Action::Next | Action::Larger => {
+                    if let Mode::Browser(browser) = &mut self.mode {
+                        browser.move_by(1, visible);
+                    }
+                    self.paint()?;
+                    Ok(true)
+                }
+                Action::First => {
+                    if let Mode::Browser(browser) = &mut self.mode {
+                        browser.first();
+                    }
+                    self.paint()?;
+                    Ok(true)
+                }
+                Action::Last => {
+                    if let Mode::Browser(browser) = &mut self.mode {
+                        browser.last(visible);
+                    }
+                    self.paint()?;
+                    Ok(true)
+                }
+                Action::Activate => self.activate_browser(),
+                Action::Back => self.back(),
+                Action::Click { x, y } => {
+                    if (246..=320).contains(&x) && (96..=134).contains(&y) {
+                        return self.back();
+                    }
+                    if y >= LIST_TOP {
+                        let row = ((y - LIST_TOP) / ROW_HEIGHT) as usize;
+                        let target = match &self.mode {
+                            Mode::Browser(browser) => browser.scroll + row,
+                            Mode::Home => return Ok(false),
+                        };
+                        if let Mode::Browser(browser) = &mut self.mode {
+                            if target < browser.entries.len() {
+                                browser.selected = target;
+                                browser.keep_visible(visible);
+                            } else {
+                                return Ok(false);
+                            }
+                        }
+                        self.paint()?;
+                        return self.activate_browser();
+                    }
+                    Ok(false)
+                }
+                Action::Close => Ok(false),
+            }
         }
     }
 
@@ -163,8 +492,8 @@ mod enabled {
             if (width, height) == (self.surface.width(), self.surface.height()) {
                 return Ok(false);
             }
-            if width < 420 || height < 320 {
-                return Err("ReadAll home window requires at least 420x320".into());
+            if width < 640 || height < 420 {
+                return Err("ReadAll main window requires at least 640x420".into());
             }
             self.surface = Surface::new(width, height, RenderLimits::default())?;
             self.paint()?;
@@ -172,10 +501,23 @@ mod enabled {
         }
 
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if matches!(self.mode, Mode::Browser(_)) {
+                return self.browser_action(action);
+            }
             match action {
-                Action::Previous | Action::First | Action::Smaller => self.select(Choice::Epub),
-                Action::Next | Action::Last | Action::Larger => self.select(Choice::Text),
-                Action::Close => Ok(false),
+                Action::Activate => self.open_browser(),
+                Action::Click { x, y } if (246..=866).contains(&x) && (116..=280).contains(&y) => {
+                    self.open_browser()
+                }
+                Action::Back => Ok(false),
+                Action::Previous
+                | Action::Next
+                | Action::First
+                | Action::Last
+                | Action::Larger
+                | Action::Smaller
+                | Action::Click { .. }
+                | Action::Close => Ok(false),
             }
         }
 
@@ -184,112 +526,18 @@ mod enabled {
         }
 
         fn title(&self) -> String {
-            "ReadAll".into()
-        }
-    }
-
-    fn draw_card(commands: &mut Vec<DrawCommand>, rect: Rect, selected: bool) {
-        let border = if selected { ACCENT } else { BORDER };
-        commands.push(DrawCommand::FillRect {
-            rect,
-            color: border,
-        });
-        let inner = Rect::new(
-            rect.x + 3,
-            rect.y + 3,
-            rect.width.saturating_sub(6),
-            rect.height.saturating_sub(6),
-        );
-        commands.push(DrawCommand::FillRect {
-            rect: inner,
-            color: PANEL,
-        });
-        if selected {
-            commands.push(DrawCommand::FillRect {
-                rect: Rect::new(inner.x, inner.y, 7, inner.height),
-                color: ACCENT,
-            });
-        }
-    }
-
-    fn draw_text(
-        surface: &mut Surface,
-        x: i32,
-        y: i32,
-        scale: u32,
-        text: &str,
-        color: Color,
-    ) -> WindowResult<()> {
-        let mut commands = Vec::new();
-        let mut cursor = x;
-        for ch in text.chars() {
-            if ch == ' ' {
-                cursor += (6 * scale) as i32;
-                continue;
+            match &self.mode {
+                Mode::Home => "ReadAll — Library".into(),
+                Mode::Browser(browser) => format!(
+                    "ReadAll — Open EPUB — {}",
+                    display_ascii(&browser.directory.display().to_string(), 48)
+                ),
             }
-            let glyph = glyph(ch).unwrap_or([0; 7]);
-            for (row, bits) in glyph.into_iter().enumerate() {
-                for col in 0..5 {
-                    if bits & (1 << (4 - col)) != 0 {
-                        commands.push(DrawCommand::FillRect {
-                            rect: Rect::new(
-                                cursor + (col * scale) as i32,
-                                y + (row as u32 * scale) as i32,
-                                scale,
-                                scale,
-                            ),
-                            color,
-                        });
-                    }
-                }
-            }
-            cursor += (6 * scale) as i32;
         }
-        surface.draw(&commands)?;
-        Ok(())
-    }
 
-    fn glyph(ch: char) -> Option<[u8; 7]> {
-        Some(match ch.to_ascii_uppercase() {
-            'A' => [14, 17, 17, 31, 17, 17, 17],
-            'B' => [30, 17, 17, 30, 17, 17, 30],
-            'C' => [14, 17, 16, 16, 16, 17, 14],
-            'D' => [30, 17, 17, 17, 17, 17, 30],
-            'E' => [31, 16, 16, 30, 16, 16, 31],
-            'F' => [31, 16, 16, 30, 16, 16, 16],
-            'G' => [14, 17, 16, 23, 17, 17, 15],
-            'H' => [17, 17, 17, 31, 17, 17, 17],
-            'I' => [31, 4, 4, 4, 4, 4, 31],
-            'J' => [7, 2, 2, 2, 18, 18, 12],
-            'K' => [17, 18, 20, 24, 20, 18, 17],
-            'L' => [16, 16, 16, 16, 16, 16, 31],
-            'M' => [17, 27, 21, 21, 17, 17, 17],
-            'N' => [17, 25, 21, 19, 17, 17, 17],
-            'O' => [14, 17, 17, 17, 17, 17, 14],
-            'P' => [30, 17, 17, 30, 16, 16, 16],
-            'Q' => [14, 17, 17, 17, 21, 18, 13],
-            'R' => [30, 17, 17, 30, 20, 18, 17],
-            'S' => [15, 16, 16, 14, 1, 1, 30],
-            'T' => [31, 4, 4, 4, 4, 4, 4],
-            'U' => [17, 17, 17, 17, 17, 17, 14],
-            'V' => [17, 17, 17, 17, 17, 10, 4],
-            'W' => [17, 17, 17, 21, 21, 21, 10],
-            'X' => [17, 17, 10, 4, 10, 17, 17],
-            'Y' => [17, 17, 10, 4, 4, 4, 4],
-            'Z' => [31, 1, 2, 4, 8, 16, 31],
-            '0' => [14, 17, 19, 21, 25, 17, 14],
-            '1' => [4, 12, 4, 4, 4, 4, 14],
-            '2' => [14, 17, 1, 2, 4, 8, 31],
-            '3' => [30, 1, 1, 14, 1, 1, 30],
-            '4' => [2, 6, 10, 18, 31, 2, 2],
-            '5' => [31, 16, 16, 30, 1, 1, 30],
-            '6' => [14, 16, 16, 30, 17, 17, 14],
-            '7' => [31, 1, 2, 4, 8, 8, 8],
-            '8' => [14, 17, 17, 14, 17, 17, 14],
-            '9' => [14, 17, 17, 15, 1, 1, 14],
-            '-' => [0, 0, 0, 31, 0, 0, 0],
-            _ => return None,
-        })
+        fn close_requested(&self) -> bool {
+            self.close_requested
+        }
     }
 
     pub(super) fn start(output: &mut impl Write) -> Result<()> {
@@ -298,37 +546,92 @@ mod enabled {
             "Starting ReadAll GUI. Use --help for command-line tools."
         )?;
         output.flush()?;
-        let mut home = Home::new(900, 600)?;
-        let report: WindowReport = window::run(&mut home, WindowOptions::default())?;
-        writeln!(
-            output,
-            "ReadAll GUI closed. Buffer commits: {}; last size: {}x{}",
-            report.committed_frames, report.width, report.height
-        )?;
-        Ok(())
+        loop {
+            let mut home = Home::new(1000, 680)?;
+            let report: WindowReport = window::run(&mut home, WindowOptions::default())?;
+            let Some(book) = home.selected_book.take() else {
+                writeln!(
+                    output,
+                    "ReadAll GUI closed. Buffer commits: {}; last size: {}x{}",
+                    report.committed_frames, report.width, report.height
+                )?;
+                return Ok(());
+            };
+            writeln!(output, "Opening EPUB: {:?}", book)?;
+            output.flush()?;
+            if let Err(error) = crate::native_epub::open_path(&book, output) {
+                writeln!(output, "Could not open EPUB: {error}")?;
+                output.flush()?;
+            }
+        }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::{
+            sync::atomic::{AtomicU64, Ordering},
+            time::{SystemTime, UNIX_EPOCH},
+        };
 
-        #[test]
-        fn home_draws_nonempty_ui_and_reacts_to_selection() {
-            let mut home = Home::new(900, 600).unwrap();
-            let initial = home.surface.pixels().to_vec();
-            assert!(home.action(Action::Next).unwrap());
-            assert_ne!(home.surface.pixels(), initial);
-            assert!(!home.action(Action::Next).unwrap());
-            assert!(home.action(Action::Previous).unwrap());
+        struct Temp(PathBuf);
+        impl Temp {
+            fn new() -> Self {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let root = std::env::temp_dir().join(format!(
+                    "readall-home-test-{}-{}-{}",
+                    std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                fs::create_dir(&root).unwrap();
+                Self(root)
+            }
+        }
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
         }
 
         #[test]
-        fn bitmap_font_covers_all_home_labels() {
-            for ch in "READALLNATIVE RUST READEROPEN EPUBXHTML TEXTPLAINFILE PICKER IS THE NEXT GUI STEPESC CLOSES WINDOWLEFT RIGHT OR CLICK TO SELECT".chars() {
-                if ch != ' ' {
-                    assert!(glyph(ch).is_some(), "missing {ch}");
-                }
-            }
+        fn browser_filters_and_sorts_directories_before_epubs() {
+            let temp = Temp::new();
+            fs::create_dir(temp.0.join("Folder")).unwrap();
+            fs::write(temp.0.join("b.epub"), b"x").unwrap();
+            fs::write(temp.0.join("a.txt"), b"x").unwrap();
+            fs::write(temp.0.join("A.EPUB"), b"x").unwrap();
+            let browser = Browser::load(temp.0.clone()).unwrap();
+            let names: Vec<_> = browser
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, ["Folder", "A.EPUB", "b.epub"]);
+        }
+
+        #[test]
+        fn activating_epub_requests_window_close_with_selected_path() {
+            let temp = Temp::new();
+            let book = temp.0.join("book.epub");
+            fs::write(&book, b"x").unwrap();
+            let mut home = Home::new(1000, 680).unwrap();
+            home.mode = Mode::Browser(Browser::load(temp.0.clone()).unwrap());
+            assert!(!home.action(Action::Activate).unwrap());
+            assert!(home.close_requested());
+            assert_eq!(home.selected_book.as_deref(), Some(book.as_path()));
+        }
+
+        #[test]
+        fn home_draws_and_click_enters_browser() {
+            let mut home = Home::new(1000, 680).unwrap();
+            let initial = home.surface.pixels().to_vec();
+            assert!(home.action(Action::Click { x: 300, y: 180 }).unwrap());
+            assert!(matches!(home.mode, Mode::Browser(_)));
+            assert_ne!(home.surface.pixels(), initial);
         }
     }
 }

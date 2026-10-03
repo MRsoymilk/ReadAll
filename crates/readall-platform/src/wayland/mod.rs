@@ -64,6 +64,7 @@ struct State {
     keyboard_focus: bool,
     pointer_focus: bool,
     pointer_x: i32,
+    pointer_y: i32,
     scroll: i32,
     discrete: i32,
     actions: [Option<Action>; 64],
@@ -99,6 +100,7 @@ impl State {
             keyboard_focus: false,
             pointer_focus: false,
             pointer_x: 0,
+            pointer_y: 0,
             scroll: 0,
             discrete: 0,
             actions: [None; 64],
@@ -260,18 +262,21 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
             (POINTER, 0) => {
                 s.pointer_focus = (*args.add(1)).o == s.surface;
                 s.pointer_x = (*args.add(2)).i;
+                s.pointer_y = (*args.add(3)).i;
             }
             (POINTER, 1) => {
                 s.pointer_focus = false;
                 s.scroll = 0;
                 s.discrete = 0;
             }
-            (POINTER, 2) => s.pointer_x = (*args.add(1)).i,
+            (POINTER, 2) => {
+                s.pointer_x = (*args.add(1)).i;
+                s.pointer_y = (*args.add(2)).i;
+            }
             (POINTER, 3) if s.pointer_focus && (*args.add(2)).u == 272 && (*args.add(3)).u == 1 => {
-                s.action(if s.pointer_x < (s.width as i32 * 128) {
-                    Action::Previous
-                } else {
-                    Action::Next
+                s.action(Action::Click {
+                    x: s.pointer_x / 256,
+                    y: s.pointer_y / 256,
                 });
             }
             (POINTER, 4) if s.pointer_focus && (*args.add(1)).u == 0 => {
@@ -755,6 +760,9 @@ pub(super) fn run(
             let mut changed = resized;
             for action in actions.into_iter().take(count).flatten() {
                 changed |= handler.action(action)?;
+                if handler.close_requested() {
+                    return Ok(report);
+                }
             }
             unsafe {
                 (*connection.state).dirty |= changed;

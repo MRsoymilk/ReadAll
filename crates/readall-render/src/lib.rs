@@ -146,7 +146,7 @@ impl From<io::Error> for RenderError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Surface {
     width: u32,
     height: u32,

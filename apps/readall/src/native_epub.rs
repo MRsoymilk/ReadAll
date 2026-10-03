@@ -15,6 +15,7 @@ mod enabled {
         epub_session::{Action as ReaderAction, EpubSession, Start},
         progress::EpubProgressStore,
         text_page::Options,
+        ui::{display_ascii, draw_text, text_width},
     };
     use readall_core::read_bounded;
     use readall_epub::{EpubBook, EpubLimits, EpubLocator};
@@ -23,15 +24,94 @@ mod enabled {
         LocalFileSource,
         window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
     };
-    use readall_render::Surface;
-    use std::path::PathBuf;
+    use readall_render::{Color, DrawCommand, Rect, Surface};
+    use std::path::{Path, PathBuf};
 
     struct ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
         session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
         progress: Option<EpubProgressStore>,
+        surface: Surface,
+        close_requested: bool,
     }
 
-    impl ReaderWindow<'_, '_, '_, '_> {
+    impl<'book, 'archive, 'font, 'font_bytes> ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
+        fn new(
+            session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
+            progress: Option<EpubProgressStore>,
+        ) -> WindowResult<Self> {
+            let surface = session.frame().surface.clone();
+            let mut reader = ReaderWindow {
+                session,
+                progress,
+                surface,
+                close_requested: false,
+            };
+            reader.refresh_surface()?;
+            Ok(reader)
+        }
+
+        fn refresh_surface(&mut self) -> WindowResult<()> {
+            self.surface = self.session.frame().surface.clone();
+            let width = self.surface.width();
+            let height = self.surface.height();
+            let header = Color::rgba(248, 249, 251, 245);
+            let border = Color::rgba(224, 228, 234, 255);
+            let ink = Color::rgba(48, 54, 64, 255);
+            let muted = Color::rgba(112, 121, 133, 255);
+            let accent = Color::rgba(55, 104, 190, 255);
+            self.surface.draw(&[
+                DrawCommand::FillRect {
+                    rect: Rect::new(0, 0, width, 32),
+                    color: header,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(0, 31, width, 1),
+                    color: border,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(0, height.saturating_sub(30) as i32, width, 30),
+                    color: header,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(0, height.saturating_sub(30) as i32, width, 1),
+                    color: border,
+                },
+            ])?;
+            let title = display_ascii(self.session.book_title(), 34);
+            draw_text(&mut self.surface, 16, 11, 1, &title, ink)?;
+            let (chapter, chapters) = self.session.chapter_position();
+            let (page, pages) = self.session.page_position();
+            let status = format!(
+                "CH {chapter}/{chapters}  PAGE {page}/{pages}  {}PX",
+                self.session.font_size()
+            );
+            let status_x = width.saturating_sub(text_width(1, &status).saturating_add(16)) as i32;
+            draw_text(&mut self.surface, status_x, 11, 1, &status, muted)?;
+            draw_text(
+                &mut self.surface,
+                16,
+                height.saturating_sub(21) as i32,
+                1,
+                "BACKSPACE LIBRARY   CLICK SIDES TURN PAGE   +/- SIZE",
+                muted,
+            )?;
+            let track_x = 16_u32;
+            let track_w = width.saturating_sub(32);
+            let track_y = height.saturating_sub(7) as i32;
+            let filled = (track_w as f32 * self.session.overall_progress()).round() as u32;
+            self.surface.draw(&[
+                DrawCommand::FillRect {
+                    rect: Rect::new(track_x as i32, track_y, track_w, 3),
+                    color: border,
+                },
+                DrawCommand::FillRect {
+                    rect: Rect::new(track_x as i32, track_y, filled.min(track_w), 3),
+                    color: accent,
+                },
+            ])?;
+            Ok(())
+        }
+
         fn save_progress(&self) {
             let Some(store) = &self.progress else {
                 return;
@@ -44,7 +124,11 @@ mod enabled {
 
     impl WindowHandler for ReaderWindow<'_, '_, '_, '_> {
         fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool> {
-            EpubSession::resize(&mut self.session, width, height)
+            let changed = EpubSession::resize(&mut self.session, width, height)?;
+            if changed {
+                self.refresh_surface()?;
+            }
+            Ok(changed)
         }
 
         fn action(&mut self, action: Action) -> WindowResult<bool> {
@@ -55,12 +139,25 @@ mod enabled {
                 Action::Last => ReaderAction::Last,
                 Action::Larger => ReaderAction::Larger,
                 Action::Smaller => ReaderAction::Smaller,
+                Action::Click { x, .. } => {
+                    if x < self.session.frame().surface.width() as i32 / 2 {
+                        ReaderAction::Previous
+                    } else {
+                        ReaderAction::Next
+                    }
+                }
+                Action::Back => {
+                    self.close_requested = true;
+                    return Ok(false);
+                }
+                Action::Activate => return Ok(false),
                 Action::Close => return Ok(false),
             };
             match EpubSession::action(&mut self.session, action) {
                 Ok(changed) => {
                     if changed {
                         self.save_progress();
+                        self.refresh_surface()?;
                     }
                     Ok(changed)
                 }
@@ -72,12 +169,46 @@ mod enabled {
         }
 
         fn surface(&self) -> &Surface {
-            &self.session.frame().surface
+            &self.surface
         }
 
         fn title(&self) -> String {
             self.session.title()
         }
+
+        fn close_requested(&self) -> bool {
+            self.close_requested
+        }
+    }
+
+    pub(super) fn open_path(path: &Path, output: &mut impl Write) -> Result<()> {
+        let epub_limits = EpubLimits::default();
+        let epub_bytes = read_bounded(
+            &mut LocalFileSource::open(path)?,
+            epub_limits.zip.max_archive_bytes,
+        )?;
+        let book = EpubBook::parse(&epub_bytes, epub_limits)?;
+        let mut sample = String::new();
+        for (index, spine) in book.spine().iter().enumerate() {
+            if !spine.linear() || sample.chars().count() >= 4096 {
+                continue;
+            }
+            if let Ok(text) = book.read_spine_text(index) {
+                for ch in text.chars().take(4096 - sample.chars().count()) {
+                    sample.push(ch);
+                }
+            }
+        }
+        let font = crate::font_select::find_for_text(&sample)?;
+        writeln!(output, "Selected GUI font: {:?}", font)?;
+        let args = vec![
+            path.as_os_str().to_owned(),
+            OsString::from("--font"),
+            font.into_os_string(),
+            OsString::from("--missing"),
+            OsString::from("replacement"),
+        ];
+        start(&args, output)
     }
 
     pub(super) fn start(args: &[OsString], output: &mut impl Write) -> Result<()> {
@@ -217,7 +348,7 @@ mod enabled {
             Start::Beginning
         };
         let session = EpubSession::new(&book, &font, options, start)?;
-        let mut reader = ReaderWindow { session, progress };
+        let mut reader = ReaderWindow::new(session, progress)?;
 
         writeln!(
             output,
@@ -250,4 +381,9 @@ mod enabled {
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
     enabled::start(args, output)
+}
+
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub(crate) fn open_path(path: &std::path::Path, output: &mut impl Write) -> Result<()> {
+    enabled::open_path(path, output)
 }
