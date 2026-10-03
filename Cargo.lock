@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "readall-core",
  "readall-platform",
+ "readall-render",
 ]
 
 [[package]]
@@ -20,3 +21,7 @@ version = "0.1.0"
 dependencies = [
  "readall-core",
 ]
+
+[[package]]
+name = "readall-render"
+version = "0.1.0"

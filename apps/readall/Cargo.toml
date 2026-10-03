@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 readall-core.workspace = true
+readall-render.workspace = true
 readall-platform.workspace = true
 
 [lints]

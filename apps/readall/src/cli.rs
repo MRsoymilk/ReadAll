@@ -1,0 +1,279 @@
+use std::{
+    error::Error,
+    ffi::{OsStr, OsString},
+    fs::OpenOptions,
+    io::{BufWriter, Write},
+    path::PathBuf,
+};
+
+use readall_core::{
+    Limits, TextDocument, TextLocator,
+    preview::{PreviewConfig, PreviewLayout, diagnostic_cell_width},
+};
+use readall_platform::LocalFileSource;
+use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
+    if args.is_empty() || matches!(args[0].to_str(), Some("--help" | "-h")) {
+        writeln!(
+            output,
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nDiagnostic CLI only. Native GUI, font shaping, PDF and EPUB reading are not implemented yet.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            env!("CARGO_PKG_VERSION")
+        )?;
+        return Ok(());
+    }
+    let command = args[0].to_str().ok_or("command must be UTF-8")?;
+    if !matches!(command, "inspect" | "read" | "render-demo") {
+        return Err("unknown command; use --help".into());
+    }
+    if args.len() < 2 {
+        return Err("missing input/output path; use --help".into());
+    }
+    let path = PathBuf::from(&args[1]);
+    if command == "render-demo" {
+        if args.len() != 2 {
+            return Err("render-demo expects exactly one output path".into());
+        }
+        render_demo(path, output)?;
+        return Ok(());
+    }
+    if command == "inspect" && args.len() != 2 {
+        return Err("inspect expects exactly one document path".into());
+    }
+    // Validate options before opening an input file.
+    let options = if command == "read" {
+        Some(ReadOptions::parse(&args[2..])?)
+    } else {
+        None
+    };
+    let mut source = LocalFileSource::open(path)?;
+    let document = TextDocument::open(&mut source, Limits::default())?;
+    if let Some(options) = options {
+        read_page(&document, options, output)?;
+    } else {
+        writeln!(
+            output,
+            "Format: TXT\nEncoding: {:?}\nDocument: {}\nUTF-8 bytes: {}\nUnicode scalars: {}\nStart locator: {}",
+            document.encoding(),
+            document.id(),
+            document.text().len(),
+            document.text().chars().count(),
+            document.locator(0)?
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ReadOptions {
+    config: PreviewConfig,
+    page: Option<usize>,
+    at: Option<TextLocator>,
+}
+
+impl ReadOptions {
+    fn parse(args: &[OsString]) -> Result<Self> {
+        if args.len() % 2 != 0 {
+            return Err("each reading option requires a value".into());
+        }
+        let (mut columns, mut rows, mut page, mut at) = (None, None, None, None);
+        for pair in args.chunks_exact(2) {
+            match pair[0].to_str() {
+                Some("--columns") if columns.is_none() => columns = Some(number(&pair[1])?),
+                Some("--rows") if rows.is_none() => rows = Some(number(&pair[1])?),
+                Some("--page") if page.is_none() => {
+                    page = Some(
+                        number(&pair[1])?
+                            .checked_sub(1)
+                            .ok_or("page must be at least 1")?,
+                    )
+                }
+                Some("--at") if at.is_none() => {
+                    at = Some(pair[1].to_str().ok_or("locator must be UTF-8")?.parse()?)
+                }
+                _ => return Err("unknown or duplicate reading option".into()),
+            }
+        }
+        if page.is_some() && at.is_some() {
+            return Err("--page and --at cannot be used together".into());
+        }
+        let defaults = PreviewConfig::default();
+        let config = PreviewConfig {
+            columns: columns.unwrap_or(defaults.columns),
+            rows: rows.unwrap_or(defaults.rows),
+            ..defaults
+        };
+        if !(4..=4096).contains(&config.columns) || !(1..=1024).contains(&config.rows) {
+            return Err("columns must be 4..4096 and rows 1..1024".into());
+        }
+        Ok(Self { config, page, at })
+    }
+}
+
+fn number(value: &OsStr) -> Result<usize> {
+    let text = value.to_str().ok_or("expected an unsigned integer")?;
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("expected an unsigned integer".into());
+    }
+    Ok(text.parse()?)
+}
+
+fn read_page(document: &TextDocument, options: ReadOptions, output: &mut impl Write) -> Result<()> {
+    let layout = PreviewLayout::build(document, options.config)?;
+    let page = if let Some(locator) = options.at {
+        layout.page_for_locator(document, &locator)?
+    } else {
+        options.page.unwrap_or(0)
+    };
+    let lines = layout.page(page).ok_or("page is outside this document")?;
+    writeln!(
+        output,
+        "Diagnostic preview (approximate cell widths; no font shaping)\nPage: {}/{}\nStart locator: {}\n",
+        page + 1,
+        layout.page_count(),
+        document.locator(lines[0].text_range.start)?
+    )?;
+    for line in lines {
+        let mut column = 0;
+        for ch in document.text()[line.text_range.clone()].chars() {
+            let advance = diagnostic_cell_width(ch, column);
+            if ch == '\t' {
+                for _ in 0..advance {
+                    output.write_all(b" ")?;
+                }
+            } else {
+                write!(output, "{ch}")?;
+            }
+            column += advance;
+        }
+        writeln!(output)?;
+    }
+    Ok(())
+}
+
+fn render_demo(path: PathBuf, output: &mut impl Write) -> Result<()> {
+    let mut image = Surface::new(640, 360, RenderLimits::default())?;
+    let fill = |rect, color| DrawCommand::FillRect { rect, color };
+    image.draw(&[
+        fill(Rect::new(0, 0, 640, 360), Color::rgba(238, 238, 238, 255)),
+        fill(Rect::new(24, 24, 280, 312), Color::WHITE),
+        DrawCommand::PushClip(Rect::new(40, 40, 248, 280)),
+        fill(Rect::new(-20, 64, 330, 80), Color::rgba(28, 76, 120, 255)),
+        fill(Rect::new(80, 100, 240, 160), Color::rgba(240, 130, 40, 160)),
+        DrawCommand::PopClip,
+        fill(Rect::new(336, 24, 280, 312), Color::WHITE),
+        fill(Rect::new(356, 64, 160, 160), Color::rgba(220, 40, 40, 180)),
+        fill(Rect::new(416, 120, 160, 160), Color::rgba(40, 80, 220, 150)),
+    ])?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let mut writer = BufWriter::new(file);
+    image.write_ppm(&mut writer)?;
+    writer.flush()?;
+    writeln!(
+        output,
+        "Wrote {}x{} graphics calibration image: {:?}",
+        image.width(),
+        image.height(),
+        path
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn help_does_not_claim_gui_or_pdf_support() {
+        let mut output = Vec::new();
+        run(vec![], &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("inspect"));
+        assert!(text.contains("not implemented"));
+    }
+
+    #[test]
+    fn invalid_arguments_and_unknown_commands_are_rejected() {
+        assert!(run(args(&["inspect"]), &mut Vec::new()).is_err());
+        assert!(run(args(&["unknown", "book.txt"]), &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn reading_options_reject_duplicates_missing_values_and_overflows() {
+        for values in [
+            vec!["--page", "0"],
+            vec!["--page", "1", "--page", "2"],
+            vec!["--rows"],
+            vec!["--rows", "-1"],
+            vec!["--rows", "0"],
+            vec!["--columns", "3"],
+            vec!["--columns", "18446744073709551616"],
+            vec!["--unknown", "2"],
+        ] {
+            assert!(ReadOptions::parse(&args(&values)).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn page_and_locator_are_mutually_exclusive() {
+        let document = TextDocument::from_bytes(b"abc", Limits::default()).unwrap();
+        assert!(
+            ReadOptions::parse(&args(&[
+                "--page",
+                "1",
+                "--at",
+                &document.locator(0).unwrap().to_string()
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reading_emits_text_and_a_restorable_locator() {
+        let document = TextDocument::from_bytes(b"abcdefgh", Limits::default()).unwrap();
+        let mut output = Vec::new();
+        read_page(
+            &document,
+            ReadOptions::parse(&args(&["--columns", "4", "--rows", "1", "--page", "2"])).unwrap(),
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Page: 2/2"));
+        assert!(text.ends_with("efgh\n"));
+        let locator = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Start locator: "))
+            .unwrap();
+        assert_eq!(document.restore(&locator.parse().unwrap()).unwrap(), 4);
+        let mut wide = Vec::new();
+        read_page(
+            &document,
+            ReadOptions::parse(&args(&["--columns", "8", "--rows", "1", "--at", locator])).unwrap(),
+            &mut wide,
+        )
+        .unwrap();
+        assert!(String::from_utf8(wide).unwrap().ends_with("abcdefgh\n"));
+    }
+
+    #[test]
+    fn out_of_range_pages_fail_instead_of_silently_clamping() {
+        let document = TextDocument::from_bytes(b"abc", Limits::default()).unwrap();
+        assert!(
+            read_page(
+                &document,
+                ReadOptions::parse(&args(&["--page", "99"])).unwrap(),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
+    }
+}

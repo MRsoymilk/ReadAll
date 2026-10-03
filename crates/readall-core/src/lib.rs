@@ -2,6 +2,7 @@
 //! No windowing, filesystem paths, or third-party dependencies belong here.
 
 mod digest;
+pub mod preview;
 pub mod source;
 pub mod text;
 
@@ -57,6 +58,7 @@ pub enum Error {
     InvalidEncoding(&'static str),
     InvalidText(char),
     InvalidLocator(&'static str),
+    InvalidLayout(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -86,6 +88,7 @@ impl fmt::Display for Error {
                 write!(f, "unsupported control character U+{:04X}", u32::from(*ch))
             }
             Self::InvalidLocator(reason) => write!(f, "invalid text locator: {reason}"),
+            Self::InvalidLayout(reason) => write!(f, "invalid diagnostic layout: {reason}"),
         }
     }
 }
