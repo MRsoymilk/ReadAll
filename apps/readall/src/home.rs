@@ -28,6 +28,8 @@ mod enabled {
     const MUTED: Color = Color::rgba(105, 115, 128, 255);
     const ACCENT: Color = Color::rgba(52, 103, 190, 255);
     const ACCENT_SOFT: Color = Color::rgba(231, 238, 251, 255);
+    const HOVER_SOFT: Color = Color::rgba(220, 232, 249, 255);
+    const HOVER_STRONG: Color = Color::rgba(210, 226, 248, 255);
     const BORDER: Color = Color::rgba(224, 229, 236, 255);
     const SIDEBAR_TEXT: Color = Color::rgba(239, 243, 248, 255);
     const SIDEBAR_MUTED: Color = Color::rgba(152, 164, 181, 255);
@@ -143,12 +145,30 @@ mod enabled {
         Browser(Browser),
     }
 
+    fn point_in(rect: Rect, x: i32, y: i32) -> bool {
+        let right = i64::from(rect.x) + i64::from(rect.width);
+        let bottom = i64::from(rect.y) + i64::from(rect.height);
+        i64::from(x) >= i64::from(rect.x)
+            && i64::from(x) < right
+            && i64::from(y) >= i64::from(rect.y)
+            && i64::from(y) < bottom
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HoverTarget {
+        None,
+        OpenCard,
+        BrowserBack,
+        BrowserRow(usize),
+    }
+
     struct Home<'font> {
         surface: Surface,
         ui_font: &'font UiFont,
         mode: Mode,
         selected_book: Option<PathBuf>,
         close_requested: bool,
+        pointer: Option<(i32, i32)>,
         status: String,
     }
 
@@ -160,6 +180,7 @@ mod enabled {
                 mode: Mode::Library,
                 selected_book: None,
                 close_requested: false,
+                pointer: None,
                 status: "已支持 EPUB 文本阅读，点击“打开图书”开始".into(),
             };
             home.paint()?;
@@ -184,6 +205,62 @@ mod enabled {
         fn visible_rows(&self) -> usize {
             ((self.surface.height() as i32 - LIST_TOP - LIST_BOTTOM_MARGIN) / ROW_HEIGHT).max(1)
                 as usize
+        }
+
+        fn open_card_rect(&self) -> Rect {
+            Rect::new(
+                250,
+                120,
+                self.surface.width().saturating_sub(280).min(650),
+                174,
+            )
+        }
+
+        fn hover_target(&self) -> HoverTarget {
+            let Some((x, y)) = self.pointer else {
+                return HoverTarget::None;
+            };
+            match &self.mode {
+                Mode::Library => {
+                    let card = self.open_card_rect();
+                    if point_in(card, x, y) {
+                        HoverTarget::OpenCard
+                    } else {
+                        HoverTarget::None
+                    }
+                }
+                Mode::Browser(browser) => {
+                    if (250..=326).contains(&x) && (102..=142).contains(&y) {
+                        return HoverTarget::BrowserBack;
+                    }
+                    let row_width = self.surface.width().saturating_sub(286);
+                    let right = 250_i32.saturating_add(row_width as i32);
+                    if x < 250 || x >= right || y < LIST_TOP {
+                        return HoverTarget::None;
+                    }
+                    let row = ((y - LIST_TOP) / ROW_HEIGHT) as usize;
+                    if row >= self.visible_rows() {
+                        return HoverTarget::None;
+                    }
+                    let index = browser.scroll.saturating_add(row);
+                    if index < browser.entries.len() {
+                        HoverTarget::BrowserRow(index)
+                    } else {
+                        HoverTarget::None
+                    }
+                }
+            }
+        }
+
+        fn pointer_changed(&mut self, pointer: Option<(i32, i32)>) -> WindowResult<bool> {
+            let before = self.hover_target();
+            self.pointer = pointer;
+            let after = self.hover_target();
+            if before == after {
+                return Ok(false);
+            }
+            self.paint()?;
+            Ok(true)
         }
 
         fn activate_browser(&mut self) -> WindowResult<bool> {
@@ -271,7 +348,8 @@ mod enabled {
         fn paint_library(&mut self) -> WindowResult<()> {
             self.paint_shell("书库")?;
             let content_w = self.surface.width().saturating_sub(280);
-            let card = Rect::new(250, 120, content_w.min(650), 174);
+            let card = self.open_card_rect();
+            let hovered = self.hover_target() == HoverTarget::OpenCard;
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: card,
@@ -279,7 +357,7 @@ mod enabled {
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(card.x + 3, card.y + 3, card.width - 6, card.height - 6),
-                    color: PANEL,
+                    color: if hovered { HOVER_SOFT } else { PANEL },
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(card.x + 3, card.y + 3, 8, card.height - 6),
@@ -327,6 +405,7 @@ mod enabled {
         fn paint_browser(&mut self, browser: &Browser) -> WindowResult<()> {
             self.paint_shell("打开 EPUB")?;
             let top_w = self.surface.width().saturating_sub(278);
+            let hover = self.hover_target();
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(242, 102, top_w, 40),
@@ -334,7 +413,11 @@ mod enabled {
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(250, 108, 76, 28),
-                    color: ACCENT_SOFT,
+                    color: if hover == HoverTarget::BrowserBack {
+                        HOVER_STRONG
+                    } else {
+                        PANEL
+                    },
                 },
             ])?;
 
@@ -350,19 +433,32 @@ mod enabled {
                 let index = browser.scroll + row;
                 let y = LIST_TOP + row as i32 * ROW_HEIGHT;
                 let selected = index == browser.selected;
+                let hovered = hover == HoverTarget::BrowserRow(index);
+                let row_color = match (selected, hovered) {
+                    (true, true) => HOVER_STRONG,
+                    (false, true) => HOVER_SOFT,
+                    (true, false) => ACCENT_SOFT,
+                    (false, false) => PANEL,
+                };
                 self.surface.draw(&[
                     DrawCommand::FillRect {
                         rect: Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
-                        color: if selected { ACCENT_SOFT } else { PANEL },
+                        color: row_color,
                     },
                     DrawCommand::FillRect {
                         rect: Rect::new(
                             250,
                             y,
-                            if selected { 5 } else { 1 },
+                            if selected {
+                                5
+                            } else if hovered {
+                                3
+                            } else {
+                                1
+                            },
                             (ROW_HEIGHT - 5) as u32,
                         ),
-                        color: if selected { ACCENT } else { BORDER },
+                        color: if selected || hovered { ACCENT } else { BORDER },
                     },
                 ])?;
             }
@@ -439,6 +535,8 @@ mod enabled {
                 }
                 Action::Activate => self.activate_browser(),
                 Action::Back => self.back(),
+                Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
+                Action::PointerLeave => self.pointer_changed(None),
                 Action::Click { x, y } => {
                     if (250..=326).contains(&x) && (102..=142).contains(&y) {
                         return self.back();
@@ -490,6 +588,8 @@ mod enabled {
                     self.open_browser()
                 }
                 Action::Back => Ok(false),
+                Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
+                Action::PointerLeave => self.pointer_changed(None),
                 Action::Previous
                 | Action::Next
                 | Action::First
@@ -610,6 +710,48 @@ mod enabled {
             assert!(!home.action(Action::Activate).unwrap());
             assert!(home.close_requested());
             assert_eq!(home.selected_book.as_deref(), Some(book.as_path()));
+        }
+
+        #[test]
+        fn hover_changes_library_card_before_click_and_leave_restores_it() {
+            let ui_font = font();
+            let mut home = Home::new(1040, 700, &ui_font).unwrap();
+            let initial = home.surface.pixels().to_vec();
+            assert!(home.action(Action::PointerMove { x: 300, y: 180 }).unwrap());
+            assert_eq!(home.hover_target(), HoverTarget::OpenCard);
+            assert_ne!(home.surface.pixels(), initial);
+            assert!(!home.action(Action::PointerMove { x: 320, y: 200 }).unwrap());
+            assert!(home.action(Action::PointerLeave).unwrap());
+            assert_eq!(home.hover_target(), HoverTarget::None);
+            assert_eq!(home.surface.pixels(), initial);
+        }
+
+        #[test]
+        fn browser_hover_does_not_replace_keyboard_selection() {
+            let temp = Temp::new();
+            fs::create_dir(temp.0.join("Folder")).unwrap();
+            fs::write(temp.0.join("book.epub"), b"x").unwrap();
+            let ui_font = font();
+            let mut home = Home::new(1040, 700, &ui_font).unwrap();
+            home.mode = Mode::Browser(Browser::load(temp.0.clone()).unwrap());
+            home.paint().unwrap();
+            let selected = match &home.mode {
+                Mode::Browser(browser) => browser.selected,
+                Mode::Library => unreachable!(),
+            };
+            assert!(
+                home.action(Action::PointerMove {
+                    x: 400,
+                    y: LIST_TOP + ROW_HEIGHT + 10,
+                })
+                .unwrap()
+            );
+            assert_eq!(home.hover_target(), HoverTarget::BrowserRow(1));
+            let still_selected = match &home.mode {
+                Mode::Browser(browser) => browser.selected,
+                Mode::Library => unreachable!(),
+            };
+            assert_eq!(still_selected, selected);
         }
 
         #[test]

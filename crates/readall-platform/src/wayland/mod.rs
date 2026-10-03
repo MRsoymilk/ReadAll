@@ -113,6 +113,16 @@ impl State {
             self.closed = true;
             return;
         }
+        if matches!(action, Action::PointerMove { .. })
+            && self.action_count > 0
+            && matches!(
+                self.actions[self.action_count - 1],
+                Some(Action::PointerMove { .. })
+            )
+        {
+            self.actions[self.action_count - 1] = Some(action);
+            return;
+        }
         if self.action_count == self.actions.len() {
             self.fault = Some("native input queue budget exceeded");
             return;
@@ -263,8 +273,17 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                 s.pointer_focus = (*args.add(1)).o == s.surface;
                 s.pointer_x = (*args.add(2)).i;
                 s.pointer_y = (*args.add(3)).i;
+                if s.pointer_focus {
+                    s.action(Action::PointerMove {
+                        x: s.pointer_x / 256,
+                        y: s.pointer_y / 256,
+                    });
+                }
             }
             (POINTER, 1) => {
+                if s.pointer_focus {
+                    s.action(Action::PointerLeave);
+                }
                 s.pointer_focus = false;
                 s.scroll = 0;
                 s.discrete = 0;
@@ -272,6 +291,12 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
             (POINTER, 2) => {
                 s.pointer_x = (*args.add(1)).i;
                 s.pointer_y = (*args.add(2)).i;
+                if s.pointer_focus {
+                    s.action(Action::PointerMove {
+                        x: s.pointer_x / 256,
+                        y: s.pointer_y / 256,
+                    });
+                }
             }
             (POINTER, 3) if s.pointer_focus && (*args.add(2)).u == 272 && (*args.add(3)).u == 1 => {
                 s.action(Action::Click {

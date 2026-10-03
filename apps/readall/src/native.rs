@@ -65,7 +65,9 @@ mod enabled {
                     self.close_requested = true;
                     return Ok(false);
                 }
-                Action::Activate => return Ok(false),
+                Action::Activate | Action::PointerMove { .. } | Action::PointerLeave => {
+                    return Ok(false);
+                }
                 Action::Close => return Ok(false),
             };
             match Session::action(&mut self.session, action) {

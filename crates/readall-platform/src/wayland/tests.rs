@@ -376,6 +376,38 @@ fn pointer_click_preserves_surface_coordinates() {
 }
 
 #[test]
+fn pointer_motion_is_coalesced_and_leave_is_delivered() {
+    let mut state = State::new(320, 300);
+    state.pointer_focus = true;
+    // SAFETY: event argument shapes match wl_pointer.motion/leave v5.
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            2,
+            [Arg { u: 1 }, Arg { i: 12 * 256 }, Arg { i: 20 * 256 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            2,
+            [Arg { u: 2 }, Arg { i: 18 * 256 }, Arg { i: 25 * 256 }].as_mut_ptr(),
+        );
+    }
+    assert_eq!(state.action_count, 1);
+    assert_eq!(state.actions[0], Some(Action::PointerMove { x: 18, y: 25 }));
+    // SAFETY: leave branch does not dereference the event arguments.
+    unsafe {
+        dispatch(&mut state, POINTER, null_mut(), 1, null_mut());
+    }
+    assert_eq!(state.action_count, 2);
+    assert_eq!(state.actions[1], Some(Action::PointerLeave));
+    assert!(!state.pointer_focus);
+}
+
+#[test]
 fn discrete_and_continuous_wheel_events_do_not_turn_twice() {
     let mut state = State::new(320, 300);
     state.pointer_focus = true;

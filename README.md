@@ -26,7 +26,7 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击“打开图书”或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部“返回”回到上级。GUI 已移除 5×7 像素字库，书库、中文文件名、路径、状态栏、阅读栏和默认 EPUB 正文统一使用**内置中文 TrueType 字体**与项目自己的抗锯齿光栅化；最终用户不需要安装或下载字体。`READALL_UI_FONT=/path/font.ttf` 仅保留为开发覆盖项。
+Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击“打开图书”或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部“返回”回到上级。鼠标进入“打开图书”卡片、返回按钮或文件列表行时会立即显示悬浮背景/强调色，不需要先点击；鼠标离开后恢复，键盘 selected 状态与 hover 独立。GUI 已移除 5×7 像素字库，书库、中文文件名、路径、状态栏、阅读栏和默认 EPUB 正文统一使用**内置中文 TrueType 字体**与项目自己的抗锯齿光栅化；最终用户不需要安装或下载字体。`READALL_UI_FONT=/path/font.ttf` 仅保留为开发覆盖项。
 
 `read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
 
@@ -122,7 +122,7 @@ cargo run -p readall-platform --example probe --offline
 
 从源码进行**第一次干净 GUI 构建**时，`apps/readall/build.rs` 会自动获取固定提交的字体 TTF；这属于构建资源获取，发布后的 `readall` 二进制已包含字体，运行时不联网。源码打包器或完全离线构建可预先准备同一字体，并通过 `READALL_BUILTIN_FONT_SOURCE=/path/LXGWWenKaiLite-Regular.ttf` 指定本地来源。字体已经存在于 Cargo 的构建输出后，后续构建不会重复获取；因此首次推荐 `cargo build --release`，完全缓存后再使用 Cargo `--offline`。
 
-当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
+当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、鼠标 enter/motion/leave、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。窗口接口中的 `PointerMove` / `PointerLeave` 是平台无关事件，未来 Windows 原生窗口后端可直接复用相同 hover UI；当前 Windows 后端本身仍未实现。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
 
 这一版已有基础书库/文件浏览和阅读状态栏，但尚无封面墙、EPUB 元数据书架、目录侧栏、文字选择、真正多字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次；同一字号与窗口几何下翻页复用整本文本的测量布局，并跨页保留已经光栅化的字形蒙版。窗口尺寸变化只重建布局，字号变化建立新的字号专属字形缓存。仍未缓存完整页面像素，大文档首次排版性能需要继续优化。Windows/Android 窗口尚未实现。
 

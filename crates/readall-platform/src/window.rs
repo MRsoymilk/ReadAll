@@ -17,6 +17,8 @@ pub enum Action {
     Smaller,
     Activate,
     Back,
+    PointerMove { x: i32, y: i32 },
+    PointerLeave,
     Click { x: i32, y: i32 },
     Close,
 }
