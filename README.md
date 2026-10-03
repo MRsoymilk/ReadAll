@@ -41,6 +41,7 @@ ReadAll 当前自己处理：
 - 正式目录标题、嵌套层级与 `href#fragment` 目标解析
 - XHTML 可见正文提取
 - 常见 HTML / XHTML DOCTYPE
+- 常见 legacy XHTML 命名实体（如 `&nbsp;`、`&mdash;`、`&hellip;`、`&copy;`），固定映射且不加载外部 DTD
 - 跨 spine 连续阅读
 - 自动跳过 SVG 封面、纯图片页、空 XHTML 和当前不可读 spine
 - 稳定内容定位：
@@ -56,7 +57,7 @@ ReadAll 当前自己处理：
 - DRM / 加密 EPUB
 - Fixed-layout EPUB
 
-目录面板优先使用 EPUB 3 Navigation Document；没有 EPUB 3 nav 时会尝试 EPUB 2 NCX，再没有可用目录资源时才回退为从可读 spine 正文首行推断标题。两种正式目录都会保留嵌套层级；`href/src#fragment` 会解析到目标 XHTML 元素的 `id/xml:id`，再映射到规范化正文 UTF-8 offset，因此同一 XHTML 内的子目录也可以精确跳转，并继续复用 `epub-v1` locator 保持重排后的内容位置。fragment 缺失或无法解析时回退到目标 spine 开头。
+目录面板优先使用 EPUB 3 Navigation Document；没有 EPUB 3 nav 时会尝试 EPUB 2 NCX，再没有可用目录资源时才回退为从可读 spine 正文首行推断标题。两种正式目录都会保留嵌套层级；`href/src#fragment` 会解析到目标 XHTML 元素的 `id/xml:id`，再映射到规范化正文 UTF-8 offset，因此同一 XHTML 内的子目录也可以精确跳转，并继续复用 `epub-v1` locator 保持重排后的内容位置。fragment 缺失或无法解析时回退到目标 spine 开头。为兼容旧 XHTML，ReadAll 内置少量固定的常见命名字符实体；未知自定义实体、内部 DTD 子集和外部实体仍然拒绝，不会下载或展开外部 DTD。
 
 ### TXT / 字体 / 渲染
 

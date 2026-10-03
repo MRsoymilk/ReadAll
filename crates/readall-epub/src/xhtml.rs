@@ -187,7 +187,7 @@ fn append_collapsed(
     limit: usize,
 ) -> Result<()> {
     for ch in text.chars() {
-        if ch.is_whitespace() {
+        if is_collapsible_whitespace(ch) {
             *pending_space = !output.is_empty() && !output.ends_with('\n');
             continue;
         }
@@ -198,6 +198,10 @@ fn append_collapsed(
         push(output, ch, limit)?;
     }
     Ok(())
+}
+
+fn is_collapsible_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r')
 }
 
 fn block_break(output: &mut String, limit: usize) -> Result<()> {
@@ -287,6 +291,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn legacy_named_entities_preserve_non_breaking_space_in_reader_text() {
+        let text = extract(
+            b"<!DOCTYPE html><html><body><p>A&nbsp;B&mdash;C&hellip;</p></body></html>",
+            1024,
+        )
+        .unwrap();
+        assert_eq!(text, "A\u{00a0}B—C…");
     }
 
     #[test]

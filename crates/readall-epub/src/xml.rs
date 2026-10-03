@@ -464,13 +464,84 @@ fn decode_entities(raw: &str) -> Result<String> {
             "quot" => '"',
             _ if entity.starts_with("#x") => numeric_entity(&entity[2..], 16)?,
             _ if entity.starts_with('#') => numeric_entity(&entity[1..], 10)?,
-            _ => return Err(XmlError::Invalid("unknown XML entity")),
+            _ => legacy_xhtml_entity(entity).ok_or(XmlError::Invalid("unknown XML entity"))?,
         };
         output.push(character);
         rest = &rest[end + 1..];
     }
     output.push_str(rest);
     Ok(output)
+}
+
+fn legacy_xhtml_entity(name: &str) -> Option<char> {
+    // A deliberately small compatibility subset of the fixed XHTML entity
+    // sets. These are decoded locally as single Unicode scalars; ReadAll never
+    // loads an external DTD and never accepts user-defined ENTITY declarations.
+    Some(match name {
+        "nbsp" => '\u{00a0}',
+        "iexcl" => '\u{00a1}',
+        "cent" => '\u{00a2}',
+        "pound" => '\u{00a3}',
+        "curren" => '\u{00a4}',
+        "yen" => '\u{00a5}',
+        "brvbar" => '\u{00a6}',
+        "sect" => '\u{00a7}',
+        "uml" => '\u{00a8}',
+        "copy" => '\u{00a9}',
+        "ordf" => '\u{00aa}',
+        "laquo" => '\u{00ab}',
+        "not" => '\u{00ac}',
+        "shy" => '\u{00ad}',
+        "reg" => '\u{00ae}',
+        "macr" => '\u{00af}',
+        "deg" => '\u{00b0}',
+        "plusmn" => '\u{00b1}',
+        "sup2" => '\u{00b2}',
+        "sup3" => '\u{00b3}',
+        "acute" => '\u{00b4}',
+        "micro" => '\u{00b5}',
+        "para" => '\u{00b6}',
+        "middot" => '\u{00b7}',
+        "cedil" => '\u{00b8}',
+        "sup1" => '\u{00b9}',
+        "ordm" => '\u{00ba}',
+        "raquo" => '\u{00bb}',
+        "frac14" => '\u{00bc}',
+        "frac12" => '\u{00bd}',
+        "frac34" => '\u{00be}',
+        "iquest" => '\u{00bf}',
+        "times" => '\u{00d7}',
+        "divide" => '\u{00f7}',
+        "ensp" => '\u{2002}',
+        "emsp" => '\u{2003}',
+        "thinsp" => '\u{2009}',
+        "zwnj" => '\u{200c}',
+        "zwj" => '\u{200d}',
+        "lrm" => '\u{200e}',
+        "rlm" => '\u{200f}',
+        "ndash" => '\u{2013}',
+        "mdash" => '\u{2014}',
+        "lsquo" => '\u{2018}',
+        "rsquo" => '\u{2019}',
+        "sbquo" => '\u{201a}',
+        "ldquo" => '\u{201c}',
+        "rdquo" => '\u{201d}',
+        "bdquo" => '\u{201e}',
+        "dagger" => '\u{2020}',
+        "Dagger" => '\u{2021}',
+        "bull" => '\u{2022}',
+        "hellip" => '\u{2026}',
+        "permil" => '\u{2030}',
+        "prime" => '\u{2032}',
+        "Prime" => '\u{2033}',
+        "lsaquo" => '\u{2039}',
+        "rsaquo" => '\u{203a}',
+        "oline" => '\u{203e}',
+        "frasl" => '\u{2044}',
+        "euro" => '\u{20ac}',
+        "trade" => '\u{2122}',
+        _ => return None,
+    })
 }
 
 fn numeric_entity(value: &str, radix: u32) -> Result<char> {
@@ -515,6 +586,27 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "text <raw>");
+    }
+
+    #[test]
+    fn common_legacy_xhtml_entities_decode_without_loading_a_dtd() {
+        let events = parse(
+            br#"<!DOCTYPE html><html title="A&nbsp;B"><body>&copy;&nbsp;&mdash;&hellip;&trade;&euro;</body></html>"#,
+            XmlLimits::default(),
+        )
+        .unwrap();
+        let html = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Start(element) if local_name(&element.name) == "html" => Some(element),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(html.attribute("title"), Some("A\u{00a0}B"));
+        assert!(events.iter().any(|event| {
+            matches!(event, Event::Text(text) if text == "©\u{00a0}—…™€")
+        }));
+        assert!(parse(b"<a>&custom;</a>", XmlLimits::default()).is_err());
     }
 
     #[test]
