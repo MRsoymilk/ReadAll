@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/readall-core", "crates/readall-platform", "apps/readall"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+readall-core = { path = "crates/readall-core" }
+readall-platform = { path = "crates/readall-platform" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

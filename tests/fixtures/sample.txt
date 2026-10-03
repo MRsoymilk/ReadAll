@@ -1,0 +1,13 @@
+ReadAll 原生 Rust 阅读器
+
+第一章：从文字开始
+这是一份原创测试文本，用于验证中文、English、数字 123 和 Unicode 😀。
+当前先打通文件读取、文本解码、阅读定位和基础绘制，不把诊断输出当作完整阅读界面。
+
+第二章：跨平台边界
+Linux、Windows、Android 共用文档核心；窗口、文件入口和输入事件通过平台层适配。
+更改字号或窗口尺寸后，阅读位置应跟随内容，而不是旧的页码。
+
+Third chapter
+This fixture belongs to ReadAll and contains no external book content.
+A future layout engine will measure real glyph advances, shape text, and paginate it.

@@ -1,0 +1,11 @@
+[package]
+name = "readall-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+readall-core.workspace = true
+
+[lints]
+workspace = true
