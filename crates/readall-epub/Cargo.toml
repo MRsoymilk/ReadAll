@@ -1,0 +1,11 @@
+[package]
+name = "readall-epub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+readall-archive.workspace = true
+
+[lints]
+workspace = true

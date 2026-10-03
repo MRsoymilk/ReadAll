@@ -9,6 +9,7 @@ default = []
 wayland = ["readall-platform/wayland"]
 
 [dependencies]
+readall-epub.workspace = true
 readall-font.workspace = true
 readall-core.workspace = true
 readall-render.workspace = true

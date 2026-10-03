@@ -9,7 +9,9 @@ use std::{
 use readall_core::{
     Limits, TextDocument, TextLocator,
     preview::{PreviewConfig, PreviewLayout, diagnostic_cell_width},
+    read_bounded,
 };
+use readall_epub::{EpubBook, EpubLimits};
 use readall_platform::LocalFileSource;
 use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
 
@@ -19,7 +21,7 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if args.is_empty() || matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFont shaping, PDF and EPUB reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFont shaping, PDF and EPUB reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
         )?;
         return Ok(());
@@ -30,6 +32,9 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     }
     if command == "render-text" {
         return crate::text_page::run(&args[1..], output);
+    }
+    if command == "epub-info" {
+        return epub_info(&args[1..], output);
     }
     if !matches!(command, "inspect" | "read" | "render-demo") {
         return Err("unknown command; use --help".into());
@@ -155,6 +160,46 @@ fn read_page(document: &TextDocument, options: ReadOptions, output: &mut impl Wr
             column += advance;
         }
         writeln!(output)?;
+    }
+    Ok(())
+}
+
+fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
+    if args.len() != 1 {
+        return Err("epub-info expects exactly one EPUB path".into());
+    }
+    let limits = EpubLimits::default();
+    let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
+    let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
+    let book = EpubBook::parse(&bytes, limits)?;
+    writeln!(
+        output,
+        "Format: EPUB\nTitle: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
+        book.title().unwrap_or("(untitled)"),
+        book.package_path(),
+        book.manifest().len(),
+        book.spine().len()
+    )?;
+    for (index, spine) in book.spine().iter().take(32).enumerate() {
+        let item = book
+            .manifest()
+            .get(spine.manifest_index())
+            .ok_or("invalid resolved EPUB spine")?;
+        writeln!(
+            output,
+            "Spine {}: {} [{}]{}",
+            index + 1,
+            item.path(),
+            item.media_type(),
+            if spine.linear() { "" } else { " (non-linear)" }
+        )?;
+    }
+    if book.spine().len() > 32 {
+        writeln!(
+            output,
+            "... {} additional spine items omitted from diagnostic output",
+            book.spine().len() - 32
+        )?;
     }
     Ok(())
 }

@@ -4,7 +4,7 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 ## 当前状态
 
-项目处于基础引擎阶段，**已有命令行、真实字体 TXT 页面导出，以及可选的 Linux Wayland 原生 TXT 窗口和翻页交互**。窗口已通过编译与本地模拟合成器协议测试，尚未完成真实桌面目视验收；不能阅读 PDF/EPUB。不得把文件签名检测当作对应格式已经支持。
+项目处于基础引擎阶段，**已有命令行、真实字体 TXT 页面导出、可选的 Linux Wayland 原生 TXT 窗口，以及 EPUB 容器/包结构解析基础**。窗口已通过编译与本地模拟合成器协议测试，尚未完成真实桌面目视验收；EPUB 目前只能检查结构，尚不能排版阅读，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
@@ -31,6 +31,8 @@ Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成
 
 | 模块 | 职责 |
 | --- | --- |
+| `readall-archive` | 自研受限 ZIP 与 raw DEFLATE（Stored/Fixed/Dynamic Huffman）、CRC-32、路径和资源预算检查 |
+| `readall-epub` | EPUB mimetype、container.xml、OPF metadata/manifest/spine 和本地资源路径解析；尚无 XHTML/CSS 排版 |
 | `readall-core` | 文档输入约束、格式模型、文本解析、内容位置；不依赖文件路径或窗口对象 |
 | `readall-font` | 自研 TrueType/TTC 解析、Unicode 字形映射、真实字宽、简单及复合字形轮廓；不执行字体字节码 |
 | `readall-render` | 自研 RGBA 像素缓冲区、矩形裁剪与合成、二次曲线字形光栅化和灰度蒙版；无 GPU 或窗口呈现 |
@@ -44,6 +46,20 @@ Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成
 文本位置格式为 `txt-v1:<原始文件SHA-256>:<规范化UTF-8字节偏移>`。v1 去除编码 BOM，将 CRLF/CR 规范化为 LF；偏移不是 UTF-16 文件的原始字节位置，也不是字符序号或页码。原文件内容改变后，旧位置拒绝恢复。原生阅读默认按文档内容 SHA-256 保存该 locator，而不是保存易受重排影响的页码。
 
 UTF-16 必须带 BOM；GBK 等旧编码和 UTF-32 尚未支持。无效编码、NUL/终端控制字符会报错，而不是有损替换。`ZIP` 签名只说明可能为 EPUB，尚不验证 ZIP/EPUB 结构。
+
+## EPUB 容器与包结构
+
+当前 EPUB 阶段没有使用 `zip`、`flate2`、XML/HTML 等第三方 crate。新增 `readall-archive` 自行解析 ZIP 中央目录和本地文件头，支持 Store 与 raw DEFLATE 的 Stored/Fixed/Dynamic Huffman block，并验证 CRC-32、大小预算、重复条目、越界/重叠范围和危险路径。初期明确拒绝 ZIP64、多磁盘、加密以及未支持的压缩方法，不把未知特性静默降级。
+
+`readall-epub` 在此基础上校验 EPUB 的首个未压缩 `mimetype`、`META-INF/container.xml`、package OPF、manifest 与 spine，并解析标题和本地资源引用。自研受限 XML 解析器支持命名空间名、实体、注释和 CDATA，同时拒绝 DTD、自定义实体、过深结构和资源超限。当前为了边界清晰，`META-INF/encryption.xml`、远程资源 URI、多 package rootfile 都直接报告未支持。
+
+可以对真实 EPUB 做结构检查：
+
+```sh
+cargo run -p readall --offline -- epub-info /path/to/book.epub
+```
+
+该命令只输出标题、package 路径、manifest/spine 数量以及最多 32 个 spine 项，**不代表已经支持 EPUB 页面显示**。下一步需要解析 spine 中的 XHTML 阅读子集，并逐步接入 CSS、图片与已有文字排版管线。
 
 ## 字体引擎
 
@@ -102,7 +118,7 @@ cargo run -p readall-platform --example probe --offline
 
 1. 真实 Wayland 桌面验收，补足 HiDPI、原生界面与 Windows/Android 平台入口。
 2. TXT 阅读：字体回退、字素/单词断行和文字选择；继续优化首次排版并完善进度数据的跨平台存储策略。
-3. EPUB：受限 ZIP、包结构、目录、XHTML/CSS 阅读子集、自研排版。
+3. EPUB：在已完成的受限 ZIP、container/OPF/manifest/spine 基础上，实现 XHTML 阅读子集、导航目录、CSS 子集、图片与自研排版。
 4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
 5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。
 

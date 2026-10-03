@@ -7,14 +7,26 @@ name = "readall"
 version = "0.1.0"
 dependencies = [
  "readall-core",
+ "readall-epub",
  "readall-font",
  "readall-platform",
  "readall-render",
 ]
 
 [[package]]
+name = "readall-archive"
+version = "0.1.0"
+
+[[package]]
 name = "readall-core"
 version = "0.1.0"
+
+[[package]]
+name = "readall-epub"
+version = "0.1.0"
+dependencies = [
+ "readall-archive",
+]
 
 [[package]]
 name = "readall-font"

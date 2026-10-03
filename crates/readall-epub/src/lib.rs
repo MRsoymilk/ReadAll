@@ -1,0 +1,742 @@
+//! Dependency-free EPUB container/package foundation.
+//! This validates an intentionally small, explicit subset; XHTML/CSS layout is not implemented here.
+mod xml;
+
+use readall_archive::{ArchiveError, ZipArchive, ZipLimits};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
+
+use xml::{Event, XmlError, XmlLimits, local_name};
+
+type Result<T> = std::result::Result<T, EpubError>;
+
+#[derive(Debug, Clone)]
+pub enum EpubError {
+    Archive(ArchiveError),
+    Invalid(&'static str),
+    Unsupported(&'static str),
+    LimitExceeded(&'static str),
+    AllocationFailed,
+}
+
+impl fmt::Display for EpubError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Archive(error) => error.fmt(f),
+            Self::Invalid(reason) => write!(f, "invalid EPUB: {reason}"),
+            Self::Unsupported(reason) => write!(f, "unsupported EPUB feature: {reason}"),
+            Self::LimitExceeded(what) => write!(f, "EPUB budget exceeded: {what}"),
+            Self::AllocationFailed => f.write_str("cannot allocate EPUB data"),
+        }
+    }
+}
+impl std::error::Error for EpubError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Archive(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<ArchiveError> for EpubError {
+    fn from(value: ArchiveError) -> Self {
+        Self::Archive(value)
+    }
+}
+impl From<XmlError> for EpubError {
+    fn from(value: XmlError) -> Self {
+        match value {
+            XmlError::Invalid(reason) => Self::Invalid(reason),
+            XmlError::LimitExceeded(what) => Self::LimitExceeded(what),
+            XmlError::AllocationFailed => Self::AllocationFailed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EpubLimits {
+    pub zip: ZipLimits,
+    pub max_xml_bytes: usize,
+    pub max_manifest_items: usize,
+    pub max_spine_items: usize,
+}
+
+impl Default for EpubLimits {
+    fn default() -> Self {
+        Self {
+            zip: ZipLimits::default(),
+            max_xml_bytes: 4 * 1024 * 1024,
+            max_manifest_items: 16_384,
+            max_spine_items: 16_384,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ManifestItem {
+    id: String,
+    path: String,
+    media_type: String,
+    properties: String,
+}
+
+impl ManifestItem {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+    pub fn properties(&self) -> &str {
+        &self.properties
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpineItem {
+    manifest_index: usize,
+    linear: bool,
+}
+
+impl SpineItem {
+    pub fn manifest_index(&self) -> usize {
+        self.manifest_index
+    }
+    pub fn linear(&self) -> bool {
+        self.linear
+    }
+}
+
+#[derive(Debug)]
+pub struct EpubBook<'a> {
+    archive: ZipArchive<'a>,
+    package_path: String,
+    title: Option<String>,
+    manifest: Vec<ManifestItem>,
+    spine: Vec<SpineItem>,
+}
+
+impl<'a> EpubBook<'a> {
+    pub fn parse(bytes: &'a [u8], limits: EpubLimits) -> Result<Self> {
+        validate_limits(limits)?;
+        let archive = ZipArchive::parse(bytes, limits.zip)?;
+        validate_mimetype(&archive)?;
+
+        if archive.entry("META-INF/encryption.xml").is_some() {
+            return Err(EpubError::Unsupported(
+                "encrypted or obfuscated resources are not handled yet",
+            ));
+        }
+
+        let container = archive
+            .read("META-INF/container.xml")
+            .map_err(|_| EpubError::Invalid("META-INF/container.xml is absent or unreadable"))?;
+        ensure_xml_size(&container, limits.max_xml_bytes)?;
+        let package_path = parse_container(&container, limits.max_xml_bytes)?;
+        if archive.entry(&package_path).is_none() {
+            return Err(EpubError::Invalid(
+                "package document is absent from the archive",
+            ));
+        }
+
+        let package = archive.read(&package_path)?;
+        ensure_xml_size(&package, limits.max_xml_bytes)?;
+        let parsed = parse_package(&package, &package_path, &archive, limits)?;
+
+        Ok(Self {
+            archive,
+            package_path,
+            title: parsed.title,
+            manifest: parsed.manifest,
+            spine: parsed.spine,
+        })
+    }
+
+    pub fn package_path(&self) -> &str {
+        &self.package_path
+    }
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+    pub fn manifest(&self) -> &[ManifestItem] {
+        &self.manifest
+    }
+    pub fn spine(&self) -> &[SpineItem] {
+        &self.spine
+    }
+    pub fn spine_item(&self, index: usize) -> Option<&ManifestItem> {
+        self.spine
+            .get(index)
+            .and_then(|item| self.manifest.get(item.manifest_index))
+    }
+    pub fn read_spine(&self, index: usize) -> Result<Vec<u8>> {
+        let item = self
+            .spine_item(index)
+            .ok_or(EpubError::Invalid("spine index is out of range"))?;
+        Ok(self.archive.read(item.path())?)
+    }
+    pub fn read_resource(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.archive.read(path)?)
+    }
+}
+
+struct ParsedPackage {
+    title: Option<String>,
+    manifest: Vec<ManifestItem>,
+    spine: Vec<SpineItem>,
+}
+
+struct SpineReference {
+    idref: String,
+    linear: bool,
+}
+
+fn validate_limits(limits: EpubLimits) -> Result<()> {
+    if limits.max_xml_bytes == 0
+        || limits.max_xml_bytes > 64 * 1024 * 1024
+        || limits.max_manifest_items == 0
+        || limits.max_manifest_items > 1_000_000
+        || limits.max_spine_items == 0
+        || limits.max_spine_items > 1_000_000
+    {
+        return Err(EpubError::Invalid("unsafe EPUB limit configuration"));
+    }
+    Ok(())
+}
+
+fn ensure_xml_size(bytes: &[u8], limit: usize) -> Result<()> {
+    if bytes.len() > limit {
+        Err(EpubError::LimitExceeded("XML document bytes"))
+    } else {
+        Ok(())
+    }
+}
+
+fn xml_limits(max_bytes: usize) -> XmlLimits {
+    XmlLimits {
+        max_bytes,
+        ..XmlLimits::default()
+    }
+}
+
+fn validate_mimetype(archive: &ZipArchive<'_>) -> Result<()> {
+    let entry = archive
+        .entry("mimetype")
+        .ok_or(EpubError::Invalid("mimetype entry is absent"))?;
+    // EPUB requires this exact first local entry, stored and without a local extra field.
+    if entry.local_offset() != 0
+        || entry.data_offset() != 38
+        || entry.method() != 0
+        || entry.compressed_size() != entry.uncompressed_size()
+    {
+        return Err(EpubError::Invalid(
+            "mimetype must be the first uncompressed entry without an extra field",
+        ));
+    }
+    if archive.read("mimetype")? != b"application/epub+zip" {
+        return Err(EpubError::Invalid("incorrect EPUB mimetype"));
+    }
+    Ok(())
+}
+
+fn parse_container(bytes: &[u8], max_xml_bytes: usize) -> Result<String> {
+    let events = xml::parse(bytes, xml_limits(max_xml_bytes))?;
+    let first = events.iter().find_map(|event| match event {
+        Event::Start(element) => Some(element),
+        _ => None,
+    });
+    if first.is_none_or(|element| local_name(&element.name) != "container") {
+        return Err(EpubError::Invalid("container.xml root element"));
+    }
+
+    let mut rootfile = None;
+    for event in &events {
+        let Event::Start(element) = event else {
+            continue;
+        };
+        if local_name(&element.name) != "rootfile" {
+            continue;
+        }
+        if element.attribute("media-type") != Some("application/oebps-package+xml") {
+            continue;
+        }
+        let path = element
+            .attribute("full-path")
+            .ok_or(EpubError::Invalid("rootfile is missing full-path"))?;
+        let path = resolve_path("", path)?;
+        if rootfile.replace(path).is_some() {
+            return Err(EpubError::Unsupported(
+                "multiple package documents are not supported yet",
+            ));
+        }
+    }
+    rootfile.ok_or(EpubError::Invalid("EPUB package rootfile is absent"))
+}
+
+fn parse_package(
+    bytes: &[u8],
+    package_path: &str,
+    archive: &ZipArchive<'_>,
+    limits: EpubLimits,
+) -> Result<ParsedPackage> {
+    let events = xml::parse(bytes, xml_limits(limits.max_xml_bytes))?;
+    let first = events.iter().find_map(|event| match event {
+        Event::Start(element) => Some(element),
+        _ => None,
+    });
+    if first.is_none_or(|element| local_name(&element.name) != "package") {
+        return Err(EpubError::Invalid("package document root element"));
+    }
+
+    let mut manifest = Vec::new();
+    manifest
+        .try_reserve(limits.max_manifest_items.min(256))
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let mut spine_refs = Vec::new();
+    spine_refs
+        .try_reserve(limits.max_spine_items.min(256))
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let mut ids = HashSet::new();
+    ids.try_reserve(limits.max_manifest_items.min(256))
+        .map_err(|_| EpubError::AllocationFailed)?;
+
+    let mut depth = 0_usize;
+    let mut manifest_depth = None;
+    let mut spine_depth = None;
+    let mut title_depth = None;
+    let mut title_text = String::new();
+    for event in &events {
+        match event {
+            Event::Start(element) => {
+                let element_depth = depth + 1;
+                let local = local_name(&element.name);
+                if local == "manifest" && manifest_depth.is_none() && !element.empty {
+                    manifest_depth = Some(element_depth);
+                } else if local == "spine" && spine_depth.is_none() && !element.empty {
+                    spine_depth = Some(element_depth);
+                } else if local == "title" && title_depth.is_none() && !element.empty {
+                    title_depth = Some(element_depth);
+                    title_text.clear();
+                }
+
+                if local == "item" && manifest_depth.is_some() {
+                    if manifest.len() >= limits.max_manifest_items {
+                        return Err(EpubError::LimitExceeded("manifest items"));
+                    }
+                    let id = required_attribute(element, "id", "manifest item id")?;
+                    let href = required_attribute(element, "href", "manifest item href")?;
+                    let media_type =
+                        required_attribute(element, "media-type", "manifest media-type")?;
+                    if !ids.insert(id.to_owned()) {
+                        return Err(EpubError::Invalid("duplicate manifest id"));
+                    }
+                    let path = resolve_path(package_path, href)?;
+                    if archive.entry(&path).is_none() {
+                        return Err(EpubError::Unsupported(
+                            "remote or absent manifest resources",
+                        ));
+                    }
+                    manifest
+                        .try_reserve(1)
+                        .map_err(|_| EpubError::AllocationFailed)?;
+                    manifest.push(ManifestItem {
+                        id: owned(id)?,
+                        path,
+                        media_type: owned(media_type)?,
+                        properties: owned(element.attribute("properties").unwrap_or(""))?,
+                    });
+                } else if local == "itemref" && spine_depth.is_some() {
+                    if spine_refs.len() >= limits.max_spine_items {
+                        return Err(EpubError::LimitExceeded("spine items"));
+                    }
+                    let idref = required_attribute(element, "idref", "spine idref")?;
+                    let linear = match element.attribute("linear") {
+                        None | Some("yes") => true,
+                        Some("no") => false,
+                        Some(_) => return Err(EpubError::Invalid("invalid spine linear value")),
+                    };
+                    spine_refs
+                        .try_reserve(1)
+                        .map_err(|_| EpubError::AllocationFailed)?;
+                    spine_refs.push(SpineReference {
+                        idref: owned(idref)?,
+                        linear,
+                    });
+                }
+                if !element.empty {
+                    depth = element_depth;
+                }
+            }
+            Event::Text(text) if title_depth.is_some() => title_text.push_str(text),
+            Event::Text(_) => {}
+            Event::End(name) => {
+                let local = local_name(name);
+                if title_depth == Some(depth) && local == "title" {
+                    title_depth = None;
+                }
+                if manifest_depth == Some(depth) && local == "manifest" {
+                    manifest_depth = None;
+                }
+                if spine_depth == Some(depth) && local == "spine" {
+                    spine_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+        }
+    }
+
+    if manifest.is_empty() {
+        return Err(EpubError::Invalid("package manifest is empty"));
+    }
+    if spine_refs.is_empty() {
+        return Err(EpubError::Invalid("package spine is empty"));
+    }
+
+    let mut by_id = HashMap::new();
+    by_id
+        .try_reserve(manifest.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    for (index, item) in manifest.iter().enumerate() {
+        by_id.insert(item.id.as_str(), index);
+    }
+    let mut spine = Vec::new();
+    spine
+        .try_reserve(spine_refs.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    for reference in spine_refs {
+        let manifest_index = *by_id
+            .get(reference.idref.as_str())
+            .ok_or(EpubError::Invalid("spine references an absent manifest id"))?;
+        spine.push(SpineItem {
+            manifest_index,
+            linear: reference.linear,
+        });
+    }
+
+    let title = {
+        let title = title_text.trim();
+        if title.is_empty() {
+            None
+        } else {
+            Some(owned(title)?)
+        }
+    };
+    Ok(ParsedPackage {
+        title,
+        manifest,
+        spine,
+    })
+}
+
+fn required_attribute<'a>(
+    element: &'a xml::Element,
+    name: &str,
+    description: &'static str,
+) -> Result<&'a str> {
+    element
+        .attribute(name)
+        .filter(|value| !value.is_empty())
+        .ok_or(EpubError::Invalid(description))
+}
+
+fn resolve_path(base_file: &str, reference: &str) -> Result<String> {
+    if reference.is_empty()
+        || reference.starts_with('/')
+        || reference.contains('\\')
+        || reference.contains('#')
+        || reference.contains('?')
+    {
+        return Err(EpubError::Unsupported("non-local resource reference"));
+    }
+    let first = reference.split('/').next().unwrap_or(reference);
+    if first.contains(':') {
+        return Err(EpubError::Unsupported("remote resource URI"));
+    }
+
+    let mut components: Vec<String> = if base_file.is_empty() {
+        Vec::new()
+    } else {
+        base_file
+            .split('/')
+            .take(base_file.split('/').count().saturating_sub(1))
+            .map(owned)
+            .collect::<Result<_>>()?
+    };
+    for raw in reference.split('/') {
+        let component = percent_decode_component(raw)?;
+        match component.as_str() {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(EpubError::Invalid("resource path escapes archive root"));
+                }
+            }
+            _ => {
+                components
+                    .try_reserve(1)
+                    .map_err(|_| EpubError::AllocationFailed)?;
+                components.push(component);
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(EpubError::Invalid("empty resolved resource path"));
+    }
+    Ok(components.join("/"))
+}
+
+fn percent_decode_component(raw: &str) -> Result<String> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve(raw.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let raw = raw.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%' {
+            if index + 2 >= raw.len() {
+                return Err(EpubError::Invalid("truncated percent escape"));
+            }
+            let high = hex(raw[index + 1])?;
+            let low = hex(raw[index + 2])?;
+            let byte = high << 4 | low;
+            if matches!(byte, 0 | b'/' | b'\\') {
+                return Err(EpubError::Invalid("unsafe percent-encoded path byte"));
+            }
+            bytes.push(byte);
+            index += 3;
+        } else {
+            bytes.push(raw[index]);
+            index += 1;
+        }
+    }
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| EpubError::Invalid("resource path is not UTF-8"))?;
+    owned(value)
+}
+
+fn hex(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(EpubError::Invalid("invalid percent escape")),
+    }
+}
+
+fn owned(value: &str) -> Result<String> {
+    let mut output = String::new();
+    output
+        .try_reserve_exact(value.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    output.push_str(value);
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use readall_archive::crc32;
+
+    struct Entry<'a> {
+        name: &'a str,
+        data: &'a [u8],
+    }
+    fn push16(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    fn push32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    fn epub(entries: &[Entry<'_>]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut records = Vec::new();
+        for entry in entries {
+            let offset = bytes.len() as u32;
+            let crc = crc32(entry.data);
+            push32(&mut bytes, 0x0403_4b50);
+            push16(&mut bytes, 20);
+            push16(&mut bytes, 0x0800);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push32(&mut bytes, crc);
+            push32(&mut bytes, entry.data.len() as u32);
+            push32(&mut bytes, entry.data.len() as u32);
+            push16(&mut bytes, entry.name.len() as u16);
+            push16(&mut bytes, 0);
+            bytes.extend_from_slice(entry.name.as_bytes());
+            bytes.extend_from_slice(entry.data);
+            records.push((entry, offset, crc));
+        }
+        let central_offset = bytes.len() as u32;
+        for (entry, offset, crc) in &records {
+            push32(&mut bytes, 0x0201_4b50);
+            push16(&mut bytes, 20);
+            push16(&mut bytes, 20);
+            push16(&mut bytes, 0x0800);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push32(&mut bytes, *crc);
+            push32(&mut bytes, entry.data.len() as u32);
+            push32(&mut bytes, entry.data.len() as u32);
+            push16(&mut bytes, entry.name.len() as u16);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push32(&mut bytes, 0);
+            push32(&mut bytes, *offset);
+            bytes.extend_from_slice(entry.name.as_bytes());
+        }
+        let size = bytes.len() as u32 - central_offset;
+        push32(&mut bytes, 0x0605_4b50);
+        push16(&mut bytes, 0);
+        push16(&mut bytes, 0);
+        push16(&mut bytes, entries.len() as u16);
+        push16(&mut bytes, entries.len() as u16);
+        push32(&mut bytes, size);
+        push32(&mut bytes, central_offset);
+        push16(&mut bytes, 0);
+        bytes
+    }
+
+    fn fixture() -> Vec<u8> {
+        const CONTAINER: &[u8] = br#"<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#;
+        const PACKAGE: &[u8] = br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata><dc:title>ReadAll &amp; Test</dc:title></metadata>
+  <manifest>
+    <item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/>
+    <item id="style" href="styles/main.css" media-type="text/css"/>
+  </manifest>
+  <spine><itemref idref="chapter"/></spine>
+</package>"#;
+        epub(&[
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: CONTAINER,
+            },
+            Entry {
+                name: "OEBPS/package.opf",
+                data: PACKAGE,
+            },
+            Entry {
+                name: "OEBPS/text/chapter.xhtml",
+                data: b"<html><body>Hello</body></html>",
+            },
+            Entry {
+                name: "OEBPS/styles/main.css",
+                data: b"body { margin: 0; }",
+            },
+        ])
+    }
+
+    #[test]
+    fn container_manifest_spine_and_title_are_parsed() {
+        let bytes = fixture();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        assert_eq!(book.package_path(), "OEBPS/package.opf");
+        assert_eq!(book.title(), Some("ReadAll & Test"));
+        assert_eq!(book.manifest().len(), 2);
+        assert_eq!(book.spine().len(), 1);
+        let chapter = book.spine_item(0).unwrap();
+        assert_eq!(chapter.id(), "chapter");
+        assert_eq!(chapter.path(), "OEBPS/text/chapter.xhtml");
+        assert_eq!(chapter.media_type(), "application/xhtml+xml");
+        assert_eq!(
+            book.read_spine(0).unwrap(),
+            b"<html><body>Hello</body></html>"
+        );
+    }
+
+    #[test]
+    fn path_resolution_is_bounded_to_the_archive_root() {
+        assert_eq!(
+            resolve_path("OEBPS/package.opf", "text/ch%61pter.xhtml").unwrap(),
+            "OEBPS/text/chapter.xhtml"
+        );
+        assert_eq!(
+            resolve_path("OEBPS/package.opf", "../shared/chapter.xhtml").unwrap(),
+            "shared/chapter.xhtml"
+        );
+        for reference in [
+            "../../escape.xhtml",
+            "/absolute.xhtml",
+            "https://example.test/a.xhtml",
+            "a%2fb.xhtml",
+            "a\\b.xhtml",
+            "a.xhtml#fragment",
+        ] {
+            assert!(resolve_path("OEBPS/package.opf", reference).is_err());
+        }
+    }
+
+    #[test]
+    fn mimetype_container_and_spine_invariants_are_enforced() {
+        let mut wrong = fixture();
+        let position = wrong
+            .windows(b"application/epub+zip".len())
+            .position(|window| window == b"application/epub+zip")
+            .unwrap();
+        wrong[position] = b'X';
+        assert!(EpubBook::parse(&wrong, EpubLimits::default()).is_err());
+
+        const CONTAINER: &[u8] = br#"<container><rootfiles><rootfile full-path="../escape.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        let unsafe_book = epub(&[
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: CONTAINER,
+            },
+        ]);
+        assert!(EpubBook::parse(&unsafe_book, EpubLimits::default()).is_err());
+    }
+
+    #[test]
+    fn encryption_marker_is_rejected_in_initial_subset() {
+        let mut entries = vec![
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: br#"<container><rootfiles><rootfile full-path="package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            },
+            Entry {
+                name: "package.opf",
+                data: br#"<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>"#,
+            },
+            Entry {
+                name: "a.xhtml",
+                data: b"<html/>",
+            },
+        ];
+        entries.push(Entry {
+            name: "META-INF/encryption.xml",
+            data: b"<encryption/>",
+        });
+        let bytes = epub(&entries);
+        assert!(matches!(
+            EpubBook::parse(&bytes, EpubLimits::default()),
+            Err(EpubError::Unsupported(_))
+        ));
+    }
+}
