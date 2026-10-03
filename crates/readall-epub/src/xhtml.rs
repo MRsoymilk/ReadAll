@@ -200,6 +200,16 @@ mod tests {
     }
 
     #[test]
+    fn common_xhtml_doctype_does_not_block_body_text_extraction() {
+        let text = extract(
+            br#"<?xml version="1.0"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Chapter text</p></body></html>"#,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(text, "Chapter text");
+    }
+
+    #[test]
     fn script_style_and_template_text_are_not_reader_content() {
         let text = extract(
             br#"<html><body>A<script>evil()</script><style>hidden</style><template>later</template>B</body></html>"#,

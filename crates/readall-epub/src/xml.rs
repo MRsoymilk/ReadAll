@@ -90,6 +90,7 @@ pub(crate) fn parse(bytes: &[u8], limits: XmlLimits) -> Result<Vec<Event>> {
         stack: Vec::new(),
         root_seen: false,
         root_closed: false,
+        doctype_seen: false,
     };
     parser.run()?;
     Ok(parser.events)
@@ -103,6 +104,7 @@ struct Parser<'a> {
     stack: Vec<String>,
     root_seen: bool,
     root_closed: bool,
+    doctype_seen: bool,
 }
 
 impl Parser<'_> {
@@ -123,9 +125,11 @@ impl Parser<'_> {
                 self.processing_instruction()?;
             } else if self.remaining().starts_with("</") {
                 self.end_tag()?;
+            } else if self.remaining().starts_with("<!DOCTYPE") {
+                self.doctype()?;
             } else if self.remaining().starts_with("<!") {
                 return Err(XmlError::Invalid(
-                    "DTD and declarations other than comments/CDATA are unsupported",
+                    "declarations other than safe DOCTYPE/comments/CDATA are unsupported",
                 ));
             } else if self.remaining().starts_with('<') {
                 self.start_tag()?;
@@ -214,6 +218,57 @@ impl Parser<'_> {
             .ok_or(XmlError::Invalid("unterminated processing instruction"))?;
         self.position += end + 2;
         Ok(())
+    }
+
+    fn doctype(&mut self) -> Result<()> {
+        if self.root_seen || self.doctype_seen {
+            return Err(XmlError::Invalid(
+                "DOCTYPE must appear once before the root element",
+            ));
+        }
+        self.position += "<!DOCTYPE".len();
+        if !self
+            .input
+            .as_bytes()
+            .get(self.position)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            return Err(XmlError::Invalid("DOCTYPE root name is absent"));
+        }
+        self.skip_whitespace();
+        let _root = self.name()?;
+
+        let mut quote = None;
+        while let Some(&byte) = self.input.as_bytes().get(self.position) {
+            if let Some(expected) = quote {
+                self.position += 1;
+                if byte == expected {
+                    quote = None;
+                }
+                continue;
+            }
+            match byte {
+                b'\'' | b'"' => {
+                    quote = Some(byte);
+                    self.position += 1;
+                }
+                b'[' | b']' => {
+                    return Err(XmlError::Invalid(
+                        "DOCTYPE internal subsets are unsupported",
+                    ));
+                }
+                b'<' => {
+                    return Err(XmlError::Invalid("nested declaration inside DOCTYPE"));
+                }
+                b'>' => {
+                    self.position += 1;
+                    self.doctype_seen = true;
+                    return Ok(());
+                }
+                _ => self.position += 1,
+            }
+        }
+        Err(XmlError::Invalid("unterminated DOCTYPE"))
     }
 
     fn cdata(&mut self) -> Result<()> {
@@ -463,12 +518,31 @@ mod tests {
     }
 
     #[test]
+    fn safe_html_and_xhtml_doctypes_are_ignored_without_loading_dtds() {
+        for xml in [
+            "<!DOCTYPE html><html><body>ok</body></html>",
+            r#"<?xml version="1.0"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><body>ok</body></html>"#,
+            r#"<!DOCTYPE html SYSTEM "about:legacy-compat"><html><body>ok</body></html>"#,
+        ] {
+            let events = parse(xml.as_bytes(), XmlLimits::default()).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::Text(text) if text == "ok"))
+            );
+        }
+    }
+
+    #[test]
     fn malformed_or_dangerous_xml_is_rejected() {
         for xml in [
             "<a>",
             "<a></b>",
             "<a><b/></a><c/>",
-            "<!DOCTYPE a><a/>",
+            "<!DOCTYPE a [<!ENTITY custom 'x'>]><a>&custom;</a>",
+            "<!ENTITY custom 'x'><a/>",
+            "<a/><!DOCTYPE a>",
+            "<!DOCTYPE a><!DOCTYPE a><a/>",
             "<a x='1' x='2'/>",
             "<a>&custom;</a>",
             "<a x='<bad'/>",
