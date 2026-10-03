@@ -21,7 +21,7 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if args.is_empty() || matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFont shaping, PDF and EPUB reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFont shaping, PDF and EPUB reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
         )?;
         return Ok(());
@@ -35,6 +35,9 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     }
     if command == "epub-info" {
         return epub_info(&args[1..], output);
+    }
+    if command == "epub-text" {
+        return epub_text(&args[1..], output);
     }
     if !matches!(command, "inspect" | "read" | "render-demo") {
         return Err("unknown command; use --help".into());
@@ -201,6 +204,39 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
             book.spine().len() - 32
         )?;
     }
+    Ok(())
+}
+
+fn epub_text(args: &[OsString], output: &mut impl Write) -> Result<()> {
+    if args.is_empty() || args.len() > 3 {
+        return Err("epub-text expects <book.epub> [--spine N]".into());
+    }
+    let spine = if args.len() == 1 {
+        0
+    } else if args.len() == 3 && args[1] == "--spine" {
+        number(&args[2])?
+            .checked_sub(1)
+            .ok_or("spine number must be at least 1")?
+    } else {
+        return Err("epub-text expects <book.epub> [--spine N]".into());
+    };
+    let limits = EpubLimits::default();
+    let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
+    let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
+    let book = EpubBook::parse(&bytes, limits)?;
+    let item = book
+        .spine_item(spine)
+        .ok_or("spine number is outside this EPUB")?;
+    let text = book.read_spine_text(spine)?;
+    writeln!(
+        output,
+        "EPUB spine text (XHTML subset; CSS/images not rendered)\nTitle: {}\nSpine: {}/{}\nResource: {}\n\n{}",
+        book.title().unwrap_or("(untitled)"),
+        spine + 1,
+        book.spine().len(),
+        item.path(),
+        text
+    )?;
     Ok(())
 }
 

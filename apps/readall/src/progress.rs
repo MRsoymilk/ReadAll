@@ -2,7 +2,6 @@
 //! Progress is keyed by document content identity and stores a content locator, never a page number.
 use readall_core::{DocumentId, TextDocument, TextLocator};
 use std::{
-    env,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -22,14 +21,15 @@ impl ProgressStore {
         Self { root }
     }
 
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     pub(crate) fn from_environment() -> io::Result<Self> {
-        if let Some(path) = env::var_os("XDG_STATE_HOME") {
+        if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
             let path = PathBuf::from(path);
             if path.is_absolute() {
                 return Ok(Self::new(path.join("readall/progress-v1")));
             }
         }
-        let home = env::var_os("HOME")
+        let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .ok_or_else(|| {
@@ -141,7 +141,7 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let path = env::temp_dir().join(format!(
+            let path = std::env::temp_dir().join(format!(
                 "readall-progress-test-{}-{}",
                 std::process::id(),
                 NEXT_TEMP.fetch_add(1, Ordering::Relaxed)

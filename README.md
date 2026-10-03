@@ -51,15 +51,16 @@ UTF-16 必须带 BOM；GBK 等旧编码和 UTF-32 尚未支持。无效编码、
 
 当前 EPUB 阶段没有使用 `zip`、`flate2`、XML/HTML 等第三方 crate。新增 `readall-archive` 自行解析 ZIP 中央目录和本地文件头，支持 Store 与 raw DEFLATE 的 Stored/Fixed/Dynamic Huffman block，并验证 CRC-32、大小预算、重复条目、越界/重叠范围和危险路径。初期明确拒绝 ZIP64、多磁盘、加密以及未支持的压缩方法，不把未知特性静默降级。
 
-`readall-epub` 在此基础上校验 EPUB 的首个未压缩 `mimetype`、`META-INF/container.xml`、package OPF、manifest 与 spine，并解析标题和本地资源引用。自研受限 XML 解析器支持命名空间名、实体、注释和 CDATA，同时拒绝 DTD、自定义实体、过深结构和资源超限。当前为了边界清晰，`META-INF/encryption.xml`、远程资源 URI、多 package rootfile 都直接报告未支持。
+`readall-epub` 在此基础上校验 EPUB 的首个未压缩 `mimetype`、`META-INF/container.xml`、package OPF、manifest 与 spine，并解析标题和本地资源引用。自研受限 XML 解析器支持命名空间名、实体、注释和 CDATA，同时拒绝 DTD、自定义实体、过深结构和资源超限。当前为了边界清晰，`META-INF/encryption.xml`、远程资源 URI、多 package rootfile 都直接报告未支持。现在也能读取 `application/xhtml+xml` spine 项的初始阅读子集：只提取 `body` 可见文本，保留常见块级/换行语义并规范化空白，忽略 `script/style/template` 内容；CSS、图片、SVG、MathML 尚未进入排版。
 
 可以对真实 EPUB 做结构检查：
 
 ```sh
 cargo run -p readall --offline -- epub-info /path/to/book.epub
+cargo run -p readall --offline -- epub-text /path/to/book.epub --spine 1
 ```
 
-该命令只输出标题、package 路径、manifest/spine 数量以及最多 32 个 spine 项，**不代表已经支持 EPUB 页面显示**。下一步需要解析 spine 中的 XHTML 阅读子集，并逐步接入 CSS、图片与已有文字排版管线。
+`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。两者都**不代表已经支持 EPUB 页面显示**。下一步是把抽取后的 XHTML 结构接入现有字体/分页管线，并逐步加入章节级 locator、CSS 子集与图片。
 
 ## 字体引擎
 

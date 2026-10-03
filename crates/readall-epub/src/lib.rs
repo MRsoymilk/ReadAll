@@ -1,5 +1,6 @@
 //! Dependency-free EPUB container/package foundation.
 //! This validates an intentionally small, explicit subset; XHTML/CSS layout is not implemented here.
+mod xhtml;
 mod xml;
 
 use readall_archive::{ArchiveError, ZipArchive, ZipLimits};
@@ -119,6 +120,7 @@ pub struct EpubBook<'a> {
     title: Option<String>,
     manifest: Vec<ManifestItem>,
     spine: Vec<SpineItem>,
+    limits: EpubLimits,
 }
 
 impl<'a> EpubBook<'a> {
@@ -154,6 +156,7 @@ impl<'a> EpubBook<'a> {
             title: parsed.title,
             manifest: parsed.manifest,
             spine: parsed.spine,
+            limits,
         })
     }
 
@@ -179,6 +182,21 @@ impl<'a> EpubBook<'a> {
             .spine_item(index)
             .ok_or(EpubError::Invalid("spine index is out of range"))?;
         Ok(self.archive.read(item.path())?)
+    }
+    /// Extracts the initial XHTML reading subset from one spine item.
+    /// CSS, images, SVG, MathML and scripting are intentionally not rendered here.
+    pub fn read_spine_text(&self, index: usize) -> Result<String> {
+        let item = self
+            .spine_item(index)
+            .ok_or(EpubError::Invalid("spine index is out of range"))?;
+        if item.media_type() != "application/xhtml+xml" {
+            return Err(EpubError::Unsupported(
+                "spine item is not application/xhtml+xml",
+            ));
+        }
+        let bytes = self.archive.read(item.path())?;
+        ensure_xml_size(&bytes, self.limits.max_xml_bytes)?;
+        xhtml::extract(&bytes, self.limits.max_xml_bytes)
     }
     pub fn read_resource(&self, path: &str) -> Result<Vec<u8>> {
         Ok(self.archive.read(path)?)
@@ -661,6 +679,7 @@ mod tests {
             book.read_spine(0).unwrap(),
             b"<html><body>Hello</body></html>"
         );
+        assert_eq!(book.read_spine_text(0).unwrap(), "Hello");
     }
 
     #[test]
