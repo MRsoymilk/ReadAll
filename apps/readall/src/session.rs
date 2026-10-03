@@ -126,11 +126,9 @@ impl<'doc, 'font, 'bytes> Session<'doc, 'font, 'bytes> {
 }
 
 #[cfg(test)]
-#[path = "../tests/support/font.rs"]
-mod test_font;
-#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_font;
     use readall_core::Limits;
     use readall_font::FontLimits;
     fn options() -> Options {

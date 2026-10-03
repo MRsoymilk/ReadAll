@@ -4,7 +4,7 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 ## 当前状态
 
-项目处于基础引擎阶段，**已有命令行、真实字体 TXT 页面导出、可选的 Linux Wayland 原生 TXT 窗口，以及 EPUB 容器/包结构解析基础**。窗口已通过编译与本地模拟合成器协议测试，尚未完成真实桌面目视验收；EPUB 目前只能检查结构，尚不能排版阅读，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
+项目处于基础引擎阶段，**已有命令行、真实字体 TXT/EPUB 文本页面渲染，以及可选的 Linux Wayland 原生 TXT 和 EPUB 阅读窗口**。窗口已通过编译、本地模拟合成器协议测试和无显示环境的真实 CLI 错误路径测试，尚未完成真实桌面目视验收；EPUB 当前只支持自研 XHTML 文本子集，CSS/图片等仍未渲染，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
@@ -90,17 +90,18 @@ cargo run -p readall --offline -- render-text tests/fixtures/sample_latin.txt ta
 
 `MeasuredLayout` 接收真实字宽回调，不依赖特定字体或窗口。它保留规范化文本范围与 locator 映射，但当前仍按 Unicode 标量逐个换行，不支持完整单词断行、字素簇、字距调整、复杂文字塑形或双向排版；不能将图片导出等同于完整阅读体验。单次排版默认最多 1,000,000 个 Unicode 标量、200,000 行，超过限制明确报错。
 
-## Linux 原生 TXT 窗口
+## Linux 原生阅读窗口
 
 在已登录的 Wayland 桌面终端中运行，系统须有可供链接的 `libwayland-client`：
 
 ```sh
 cargo run -p readall --features wayland --offline -- open tests/fixtures/sample_latin.txt --font /usr/share/fonts/dejavu/DejaVuSans.ttf
+cargo run -p readall --features wayland --offline -- open-epub /path/to/book.epub --font /path/to/font.ttf
 ```
 
-`open` 复用 `render-text` 的字体、尺寸、页边距、`--page`/`--at` 和缺字策略参数，但不需要图片输出路径。标题包含页码和字号。PageUp/左/上翻到前页；PageDown/右/下/Space 翻到后页；Home/End 跳到首末页；加减号位置键调整字号；Esc 关闭。左键点击页面左半区/右半区翻页，竖向滚轮翻页。目前快捷键按 Linux 物理键码处理，不实现文字输入、键盘布局转换或长按自动重复。
+`open` 复用 `render-text` 的字体、尺寸、页边距、`--page`/`--at` 和缺字策略参数，但不需要图片输出路径。`open-epub` 使用同一套自研字体/页面渲染，支持 `--spine N` 或 `--at epub-v1:...` 作为起点；页内翻到边界后会按 OPF 的 `linear=yes` 阅读顺序进入相邻 spine，Home/End 跨整本书跳到首末线性章节。两种窗口都支持 PageUp/左/上、PageDown/右/下/Space、加减号、Esc、左右半区点击和竖向滚轮。目前快捷键按 Linux 物理键码处理，不实现文字输入、键盘布局转换或长按自动重复。
 
-窗口缩放和字号变化保留同一个精确文本 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。原生阅读默认从 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时从 `$HOME/.local/state/readall/progress-v1` 恢复该文档的 locator；成功翻页及正常关闭时用同目录临时文件 + rename 更新状态。显式 `--page`/`--at` 优先于自动恢复。可用 `--progress off` 禁用，或 `--state-dir DIR` 指定独立状态目录；损坏状态会被忽略并提示，不阻止打开原书。失败的翻页/字号修改保留原状态并在终端报错；无法适配的窗口尺寸会明确报错退出。
+窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 原生阅读默认从 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时从 `$HOME/.local/state/readall/progress-v1` 恢复 locator；成功翻页及正常关闭时用同目录临时文件 + rename 更新状态。EPUB 使用绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator，但自动持久化尚未接入 EPUB。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
 
 窗口采用 `wl_compositor` v4、`xdg-shell` v1 和 XRGB8888 SHM；输入需要 `wl_seat` v5。等待 configure 并 ack 后才附加缓冲区；同一时刻最多两个未释放缓冲区，释放前不覆盖其内容。临时文件以独占方式创建并立即解除路径关联。空闲时阻塞等待事件，不持续绘制。
 
@@ -120,7 +121,7 @@ cargo run -p readall-platform --example probe --offline
 
 1. 真实 Wayland 桌面验收，补足 HiDPI、原生界面与 Windows/Android 平台入口。
 2. TXT 阅读：字体回退、字素/单词断行和文字选择；继续优化首次排版并完善进度数据的跨平台存储策略。
-3. EPUB：在已完成的受限 ZIP、container/OPF/manifest/spine 基础上，实现 XHTML 阅读子集、导航目录、CSS 子集、图片与自研排版。
+3. EPUB：在已完成的 ZIP/OPF、XHTML 文本、稳定 locator 和跨 spine 原生翻页基础上，加入导航目录、自动进度、CSS 子集、图片和更完整的自研排版。
 4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
 5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。
 
