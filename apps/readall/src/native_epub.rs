@@ -887,7 +887,7 @@ mod enabled {
         }
 
         let font_limits = FontLimits::default();
-        let font_bytes = if options.font == PathBuf::from(UiFont::builtin_label()) {
+        let font_bytes = if options.font.as_path() == Path::new(UiFont::builtin_label()) {
             builtin_font_bytes().to_vec()
         } else {
             let mut source = LocalFileSource::open(&options.font).epub_stage("open reader font")?;

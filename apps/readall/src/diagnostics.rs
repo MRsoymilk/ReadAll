@@ -1,42 +1,52 @@
 //! Persistent, dependency-free diagnostics for failures users can report.
+use std::path::PathBuf;
+
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 use std::{
     error::Error,
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 const LOG_NAME: &str = "readall-error.log";
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 #[derive(Debug)]
 pub(crate) struct StageError {
     stage: &'static str,
     source: Box<dyn Error>,
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 impl fmt::Display for StageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "EPUB stage '{}' failed: {}", self.stage, self.source)
     }
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 impl Error for StageError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(self.source.as_ref())
     }
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 pub(crate) fn boxed_stage(stage: &'static str, source: Box<dyn Error>) -> Box<dyn Error> {
     Box::new(StageError { stage, source })
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 pub(crate) trait ResultContext<T> {
     fn epub_stage(self, stage: &'static str) -> Result<T, Box<dyn Error>>;
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 impl<T, E> ResultContext<T> for Result<T, E>
 where
     E: Error + 'static,
@@ -51,10 +61,12 @@ where
     }
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 pub(crate) fn log_epub_failure(path: &Path, error: &(dyn Error + 'static)) -> io::Result<PathBuf> {
     log_epub_failure_at(&diagnostic_root(), path, error)
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 fn log_epub_failure_at(
     root: &Path,
     path: &Path,
@@ -147,6 +159,7 @@ fn diagnostic_root() -> PathBuf {
     std::env::temp_dir().join("readall/logs")
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 fn rotate_if_needed(path: &Path) -> io::Result<()> {
     let Ok(metadata) = fs::metadata(path) else {
         return Ok(());

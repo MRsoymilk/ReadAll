@@ -42,11 +42,11 @@ impl UiFont {
         }
         #[cfg(feature = "wayland")]
         {
-            return Self::from_bytes_face(
+            Self::from_bytes_face(
                 builtin_font_bytes().to_vec(),
                 PathBuf::from(BUILTIN_FONT_LABEL),
                 0,
-            );
+            )
         }
         #[cfg(not(feature = "wayland"))]
         Err("built-in GUI font is available only in GUI builds".into())
