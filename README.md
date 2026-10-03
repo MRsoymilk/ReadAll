@@ -61,7 +61,7 @@ cargo run -p readall --offline -- epub-text /path/to/book.epub --spine 1
 cargo run -p readall --offline -- render-epub /path/to/book.epub target/epub-page.ppm --spine 1 --font /path/to/font.ttf
 ```
 
-`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。`render-epub` 已能把单个 XHTML spine 的正文送入现有 TrueType 字体、真实字宽分页和 CPU 字形渲染管线，输出 PPM 页面；它仍是诊断路径，不是完整 EPUB 阅读模式。当前 locator 只针对抽取后的单章节规范化文本，尚未形成跨章节稳定 EPUB locator。下一步加入章节级定位、跨 spine 翻页、CSS 子集与图片。
+`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。`render-epub` 已能把单个 XHTML spine 的正文送入现有 TrueType 字体、真实字宽分页和 CPU 字形渲染管线，输出 PPM 页面；它仍是诊断路径，不是完整 EPUB 阅读模式。EPUB 现在使用独立的 `epub-v1:<整书SHA-256>:<零基spine>:<规范化UTF-8偏移>` locator；`render-epub --at '<locator>'` 可在页面尺寸变化后恢复到对应 spine 和内容位置，并拒绝其他 EPUB 修订版的 locator。下一步在此基础上实现跨 spine 连续翻页和原生窗口。
 
 ## 字体引擎
 

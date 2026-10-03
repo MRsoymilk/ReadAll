@@ -26,6 +26,7 @@ name = "readall-epub"
 version = "0.1.0"
 dependencies = [
  "readall-archive",
+ "readall-core",
 ]
 
 [[package]]

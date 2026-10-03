@@ -4,9 +4,11 @@ mod xhtml;
 mod xml;
 
 use readall_archive::{ArchiveError, ZipArchive, ZipLimits};
+use readall_core::DocumentId;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    str::FromStr,
 };
 
 use xml::{Event, XmlError, XmlLimits, local_name};
@@ -19,6 +21,7 @@ pub enum EpubError {
     Invalid(&'static str),
     Unsupported(&'static str),
     LimitExceeded(&'static str),
+    InvalidLocator(&'static str),
     AllocationFailed,
 }
 
@@ -29,6 +32,7 @@ impl fmt::Display for EpubError {
             Self::Invalid(reason) => write!(f, "invalid EPUB: {reason}"),
             Self::Unsupported(reason) => write!(f, "unsupported EPUB feature: {reason}"),
             Self::LimitExceeded(what) => write!(f, "EPUB budget exceeded: {what}"),
+            Self::InvalidLocator(reason) => write!(f, "invalid EPUB locator: {reason}"),
             Self::AllocationFailed => f.write_str("cannot allocate EPUB data"),
         }
     }
@@ -75,6 +79,78 @@ impl Default for EpubLimits {
     }
 }
 
+/// Stable reading position in the canonical text extracted by the EPUB v1 subset.
+/// Spine indices are zero-based in the serialized form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpubLocator {
+    book_id: DocumentId,
+    spine_index: usize,
+    utf8_offset: u64,
+}
+
+impl EpubLocator {
+    pub fn book_id(&self) -> DocumentId {
+        self.book_id
+    }
+    pub fn spine_index(&self) -> usize {
+        self.spine_index
+    }
+    pub fn utf8_offset(&self) -> u64 {
+        self.utf8_offset
+    }
+}
+
+impl fmt::Display for EpubLocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "epub-v1:{}:{}:{}",
+            self.book_id, self.spine_index, self.utf8_offset
+        )
+    }
+}
+
+impl FromStr for EpubLocator {
+    type Err = EpubError;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let mut parts = text.split(':');
+        if parts.next() != Some("epub-v1") {
+            return Err(EpubError::InvalidLocator("unknown locator version"));
+        }
+        let id = parts
+            .next()
+            .ok_or(EpubError::InvalidLocator("missing book ID"))?
+            .parse::<DocumentId>()
+            .map_err(|_| EpubError::InvalidLocator("invalid book ID"))?;
+        let spine = parts
+            .next()
+            .ok_or(EpubError::InvalidLocator("missing spine index"))?;
+        let offset = parts
+            .next()
+            .ok_or(EpubError::InvalidLocator("missing UTF-8 offset"))?;
+        if spine.is_empty()
+            || offset.is_empty()
+            || !spine.bytes().all(|byte| byte.is_ascii_digit())
+            || !offset.bytes().all(|byte| byte.is_ascii_digit())
+            || parts.next().is_some()
+        {
+            return Err(EpubError::InvalidLocator(
+                "expected numeric spine index and UTF-8 offset",
+            ));
+        }
+        Ok(Self {
+            book_id: id,
+            spine_index: spine
+                .parse()
+                .map_err(|_| EpubError::InvalidLocator("spine index overflow"))?,
+            utf8_offset: offset
+                .parse()
+                .map_err(|_| EpubError::InvalidLocator("UTF-8 offset overflow"))?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ManifestItem {
     id: String,
@@ -115,6 +191,7 @@ impl SpineItem {
 
 #[derive(Debug)]
 pub struct EpubBook<'a> {
+    id: DocumentId,
     archive: ZipArchive<'a>,
     package_path: String,
     title: Option<String>,
@@ -151,6 +228,7 @@ impl<'a> EpubBook<'a> {
         let parsed = parse_package(&package, &package_path, &archive, limits)?;
 
         Ok(Self {
+            id: DocumentId::of(bytes),
             archive,
             package_path,
             title: parsed.title,
@@ -160,6 +238,9 @@ impl<'a> EpubBook<'a> {
         })
     }
 
+    pub fn id(&self) -> DocumentId {
+        self.id
+    }
     pub fn package_path(&self) -> &str {
         &self.package_path
     }
@@ -198,6 +279,37 @@ impl<'a> EpubBook<'a> {
         ensure_xml_size(&bytes, self.limits.max_xml_bytes)?;
         xhtml::extract(&bytes, self.limits.max_xml_bytes)
     }
+    pub fn locator(&self, spine_index: usize, utf8_offset: usize) -> Result<EpubLocator> {
+        let text = self.read_spine_text(spine_index)?;
+        if !text.is_char_boundary(utf8_offset) {
+            return Err(EpubError::InvalidLocator(
+                "offset is outside the chapter or inside a UTF-8 character",
+            ));
+        }
+        Ok(EpubLocator {
+            book_id: self.id,
+            spine_index,
+            utf8_offset: utf8_offset as u64,
+        })
+    }
+
+    pub fn restore(&self, locator: &EpubLocator) -> Result<(usize, usize)> {
+        if locator.book_id != self.id {
+            return Err(EpubError::InvalidLocator(
+                "locator belongs to another EPUB revision",
+            ));
+        }
+        let offset = usize::try_from(locator.utf8_offset)
+            .map_err(|_| EpubError::InvalidLocator("offset cannot fit this platform"))?;
+        let text = self.read_spine_text(locator.spine_index)?;
+        if !text.is_char_boundary(offset) {
+            return Err(EpubError::InvalidLocator(
+                "offset is outside the chapter or inside a UTF-8 character",
+            ));
+        }
+        Ok((locator.spine_index, offset))
+    }
+
     pub fn read_resource(&self, path: &str) -> Result<Vec<u8>> {
         Ok(self.archive.read(path)?)
     }
@@ -680,6 +792,34 @@ mod tests {
             b"<html><body>Hello</body></html>"
         );
         assert_eq!(book.read_spine_text(0).unwrap(), "Hello");
+        let locator = book.locator(0, 2).unwrap();
+        assert_eq!(locator.spine_index(), 0);
+        assert_eq!(locator.utf8_offset(), 2);
+        assert_eq!(book.restore(&locator).unwrap(), (0, 2));
+        assert_eq!(locator.to_string().parse::<EpubLocator>().unwrap(), locator);
+    }
+
+    #[test]
+    fn epub_locators_reject_other_books_bad_offsets_and_malformed_values() {
+        let bytes = fixture();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        assert!(book.locator(0, usize::MAX).is_err());
+        assert!(book.locator(99, 0).is_err());
+
+        let foreign: EpubLocator = format!("epub-v1:{}:0:0", DocumentId::of(b"other"))
+            .parse()
+            .unwrap();
+        assert!(book.restore(&foreign).is_err());
+
+        for value in [
+            "epub-v2:00:0:0",
+            "epub-v1:bad:0:0",
+            "epub-v1:0000000000000000000000000000000000000000000000000000000000000000:-1:0",
+            "epub-v1:0000000000000000000000000000000000000000000000000000000000000000:0:+1",
+            "epub-v1:0000000000000000000000000000000000000000000000000000000000000000:0:0:extra",
+        ] {
+            assert!(value.parse::<EpubLocator>().is_err(), "{value}");
+        }
     }
 
     #[test]
