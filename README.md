@@ -1,7 +1,5 @@
 # ReadAll
 
-[![CI](https://github.com/MRsoymilk/ReadAll/actions/workflows/ci.yml/badge.svg)](https://github.com/MRsoymilk/ReadAll/actions/workflows/ci.yml)
-
 ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
 > **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/TXT；Windows、Android 和 PDF 仍在后续路线中。**
