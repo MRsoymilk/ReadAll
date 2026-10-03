@@ -58,9 +58,10 @@ UTF-16 必须带 BOM；GBK 等旧编码和 UTF-32 尚未支持。无效编码、
 ```sh
 cargo run -p readall --offline -- epub-info /path/to/book.epub
 cargo run -p readall --offline -- epub-text /path/to/book.epub --spine 1
+cargo run -p readall --offline -- render-epub /path/to/book.epub target/epub-page.ppm --spine 1 --font /path/to/font.ttf
 ```
 
-`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。两者都**不代表已经支持 EPUB 页面显示**。下一步是把抽取后的 XHTML 结构接入现有字体/分页管线，并逐步加入章节级 locator、CSS 子集与图片。
+`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。`render-epub` 已能把单个 XHTML spine 的正文送入现有 TrueType 字体、真实字宽分页和 CPU 字形渲染管线，输出 PPM 页面；它仍是诊断路径，不是完整 EPUB 阅读模式。当前 locator 只针对抽取后的单章节规范化文本，尚未形成跨章节稳定 EPUB locator。下一步加入章节级定位、跨 spine 翻页、CSS 子集与图片。
 
 ## 字体引擎
 

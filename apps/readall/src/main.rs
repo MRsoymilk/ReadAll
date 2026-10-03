@@ -1,4 +1,5 @@
 mod cli;
+mod epub_page;
 mod native;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod progress;
