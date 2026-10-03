@@ -211,6 +211,10 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
     let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
     let book = EpubBook::parse(&bytes, limits)?;
+    write_epub_info(&book, output)
+}
+
+fn write_epub_info(book: &EpubBook<'_>, output: &mut impl Write) -> Result<()> {
     writeln!(
         output,
         "Format: EPUB\nTitle: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
@@ -239,6 +243,38 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
             "... {} additional spine items omitted from diagnostic output",
             book.spine().len() - 32
         )?;
+    }
+    match book.navigation() {
+        Ok(navigation) if navigation.is_empty() => {
+            writeln!(output, "EPUB3 navigation: none")?;
+        }
+        Ok(navigation) => {
+            writeln!(output, "EPUB3 navigation entries: {}", navigation.len())?;
+            for entry in navigation.iter().take(32) {
+                let indent = "  ".repeat(entry.depth().min(8));
+                let fragment = entry
+                    .fragment()
+                    .map(|fragment| format!("#{fragment}"))
+                    .unwrap_or_default();
+                writeln!(
+                    output,
+                    "Nav: {indent}{} -> spine {}{}",
+                    entry.label(),
+                    entry.spine_index() + 1,
+                    fragment
+                )?;
+            }
+            if navigation.len() > 32 {
+                writeln!(
+                    output,
+                    "... {} additional navigation entries omitted from diagnostic output",
+                    navigation.len() - 32
+                )?;
+            }
+        }
+        Err(error) => {
+            writeln!(output, "EPUB3 navigation: unreadable ({error})")?;
+        }
     }
     Ok(())
 }
@@ -310,6 +346,7 @@ fn render_demo(path: PathBuf, output: &mut impl Write) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_epub;
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
@@ -341,6 +378,18 @@ mod tests {
         assert!(text.contains("ReadAll error log:"));
         assert!(text.contains("readall-error.log"));
         assert!(run(args(&["diagnostics", "extra"]), &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn epub_info_reports_epub3_navigation_targets() {
+        let bytes = test_epub::make_epub_with_navigation();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        let mut output = Vec::new();
+        write_epub_info(&book, &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("EPUB3 navigation entries: 2"));
+        assert!(text.contains("正式目录第一章 -> spine 1#intro"));
+        assert!(text.contains("  正式目录第二章 -> spine 2#deep"));
     }
 
     #[test]

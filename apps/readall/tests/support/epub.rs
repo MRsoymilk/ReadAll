@@ -60,6 +60,37 @@ pub fn make_epub_with_long_title() -> Vec<u8> {
 }
 
 #[allow(dead_code)]
+pub fn make_epub_with_navigation() -> Vec<u8> {
+    let chapter_one = format!(
+        "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
+        "AAAA WWWW ".repeat(80)
+    );
+    let chapter_two = format!(
+        "<html><body><h1>WWWW</h1><p>{}</p></body></html>",
+        "WWWW AAAA ".repeat(80)
+    );
+    let nav = r#"<?xml version="1.0"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="one.xhtml#intro">正式目录第一章</a><ol><li><a href="two.xhtml#deep">正式目录第二章</a></li></ol></li></ol></nav></body></html>"#;
+    build_epub_named_with_nav(
+        "ReadAll Navigation Test",
+        vec![
+            (
+                "one",
+                "one.xhtml",
+                "application/xhtml+xml",
+                chapter_one.into_bytes(),
+            ),
+            (
+                "two",
+                "two.xhtml",
+                "application/xhtml+xml",
+                chapter_two.into_bytes(),
+            ),
+        ],
+        Some(nav.as_bytes().to_vec()),
+    )
+}
+
+#[allow(dead_code)]
 pub fn make_epub_with_empty_spines() -> Vec<u8> {
     let chapter_one = format!(
         "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
@@ -110,6 +141,14 @@ fn build_epub(spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Vec<u8> {
 }
 
 fn build_epub_named(title: &str, spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Vec<u8> {
+    build_epub_named_with_nav(title, spines, None)
+}
+
+fn build_epub_named_with_nav(
+    title: &str,
+    spines: Vec<(&str, &str, &str, Vec<u8>)>,
+    navigation: Option<Vec<u8>>,
+) -> Vec<u8> {
     const CONTAINER: &[u8] = br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
 
     let mut package = format!(
@@ -119,6 +158,11 @@ fn build_epub_named(title: &str, spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Ve
         package.push_str(&format!(
             r#"<item id="{id}" href="{href}" media-type="{media_type}"/>"#
         ));
+    }
+    if navigation.is_some() {
+        package.push_str(
+            r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
+        );
     }
     package.push_str("</manifest><spine>");
     for (id, _, _, _) in &spines {
@@ -131,6 +175,9 @@ fn build_epub_named(title: &str, spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Ve
         ("META-INF/container.xml".into(), CONTAINER.to_vec()),
         ("OEBPS/package.opf".into(), package.into_bytes()),
     ];
+    if let Some(navigation) = navigation {
+        entries.push(("OEBPS/nav.xhtml".into(), navigation));
+    }
     for (_, href, _, data) in spines {
         entries.push((format!("OEBPS/{href}"), data));
     }

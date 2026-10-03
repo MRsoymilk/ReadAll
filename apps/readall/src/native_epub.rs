@@ -80,8 +80,12 @@ mod enabled {
             ui_font: UiFont,
         ) -> WindowResult<Self> {
             let surface = session.frame().surface.clone();
+            let current_spine = session.anchor().spine_index();
             let toc = session.toc_entries()?;
-            let toc_selected = toc.iter().position(|entry| entry.current).unwrap_or(0);
+            let toc_selected = toc
+                .iter()
+                .position(|entry| entry.spine == current_spine)
+                .unwrap_or(0);
             let mut reader = ReaderWindow {
                 session,
                 progress,
@@ -470,7 +474,6 @@ mod enabled {
                     }])?;
                 }
             }
-            let text_width = panel.width.saturating_sub(56);
             let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
             text.draw(
                 panel.x + 18,
@@ -487,8 +490,18 @@ mod enabled {
                 .enumerate()
             {
                 let y = panel.y + 57 + row as i32 * 38;
+                let indent = entry.depth.min(6) as i32 * 16;
+                let text_width = panel
+                    .width
+                    .saturating_sub(56_u32.saturating_add(indent as u32));
                 let title = text.fit(14, &entry.title, text_width)?;
-                text.draw(panel.x + 20, y, 14, &title, Color::rgba(60, 67, 78, 255))?;
+                text.draw(
+                    panel.x + 20 + indent,
+                    y,
+                    14,
+                    &title,
+                    Color::rgba(60, 67, 78, 255),
+                )?;
             }
             Ok(())
         }

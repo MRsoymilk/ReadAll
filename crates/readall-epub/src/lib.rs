@@ -189,6 +189,29 @@ impl SpineItem {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigationEntry {
+    label: String,
+    spine_index: usize,
+    fragment: Option<String>,
+    depth: usize,
+}
+
+impl NavigationEntry {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn spine_index(&self) -> usize {
+        self.spine_index
+    }
+    pub fn fragment(&self) -> Option<&str> {
+        self.fragment.as_deref()
+    }
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
 #[derive(Debug)]
 pub struct EpubBook<'a> {
     id: DocumentId,
@@ -312,6 +335,34 @@ impl<'a> EpubBook<'a> {
 
     pub fn read_resource(&self, path: &str) -> Result<Vec<u8>> {
         Ok(self.archive.read(path)?)
+    }
+
+    /// Returns the EPUB 3 table of contents from the manifest `nav` document.
+    /// Links that do not resolve to a spine document are ignored. Fragment IDs
+    /// are preserved for callers that support intra-document navigation.
+    pub fn navigation(&self) -> Result<Vec<NavigationEntry>> {
+        let Some(item) = self
+            .manifest
+            .iter()
+            .find(|item| has_token(item.properties(), "nav"))
+        else {
+            return Ok(Vec::new());
+        };
+        if item.media_type() != "application/xhtml+xml" {
+            return Err(EpubError::Invalid(
+                "EPUB navigation document is not application/xhtml+xml",
+            ));
+        }
+        let bytes = self.archive.read(item.path())?;
+        ensure_xml_size(&bytes, self.limits.max_xml_bytes)?;
+        parse_navigation_document(
+            &bytes,
+            item.path(),
+            &self.manifest,
+            &self.spine,
+            self.limits.max_xml_bytes,
+            self.limits.max_spine_items,
+        )
     }
 }
 
@@ -563,6 +614,199 @@ fn parse_package(
     })
 }
 
+fn has_token(value: &str, token: &str) -> bool {
+    value.split_ascii_whitespace().any(|value| value == token)
+}
+
+#[derive(Debug)]
+struct NavigationLink {
+    element_depth: usize,
+    list_depth: usize,
+    href: String,
+    label: String,
+}
+
+fn parse_navigation_document(
+    bytes: &[u8],
+    navigation_path: &str,
+    manifest: &[ManifestItem],
+    spine: &[SpineItem],
+    max_xml_bytes: usize,
+    max_entries: usize,
+) -> Result<Vec<NavigationEntry>> {
+    let events = xml::parse(bytes, xml_limits(max_xml_bytes))?;
+    let root = events.iter().find_map(|event| match event {
+        Event::Start(element) => Some(local_name(&element.name)),
+        _ => None,
+    });
+    if root != Some("html") {
+        return Err(EpubError::Invalid(
+            "EPUB navigation document root is not XHTML html",
+        ));
+    }
+
+    let mut entries = Vec::new();
+    entries
+        .try_reserve(max_entries.min(128))
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let mut depth = 0_usize;
+    let mut toc_depth = None;
+    let mut toc_complete = false;
+    let mut list_depth = 0_usize;
+    let mut link: Option<NavigationLink> = None;
+
+    for event in &events {
+        match event {
+            Event::Start(element) => {
+                let element_depth = depth + 1;
+                let local = local_name(&element.name);
+                if !toc_complete
+                    && toc_depth.is_none()
+                    && local == "nav"
+                    && element
+                        .attribute("type")
+                        .is_some_and(|value| has_token(value, "toc"))
+                {
+                    toc_depth = Some(element_depth);
+                } else if toc_depth.is_some() {
+                    if local == "ol" && !element.empty {
+                        list_depth = list_depth.saturating_add(1);
+                    } else if local == "a" && link.is_none() && !element.empty {
+                        if let Some(href) = element.attribute("href") {
+                            link = Some(NavigationLink {
+                                element_depth,
+                                list_depth: list_depth.saturating_sub(1),
+                                href: owned(href)?,
+                                label: String::new(),
+                            });
+                        }
+                    } else if let Some(active) = &mut link
+                        && local != "a"
+                        && let Some(alternative) = element
+                            .attribute("alt")
+                            .or_else(|| element.attribute("title"))
+                    {
+                        append_navigation_label(&mut active.label, alternative)?;
+                    }
+                }
+                if !element.empty {
+                    depth = element_depth;
+                }
+            }
+            Event::Text(text) => {
+                if let Some(active) = &mut link {
+                    append_navigation_label(&mut active.label, text)?;
+                }
+            }
+            Event::End(name) => {
+                let local = local_name(name);
+                if link
+                    .as_ref()
+                    .is_some_and(|active| active.element_depth == depth && local == "a")
+                {
+                    let active = link.take().expect("checked above");
+                    let label = normalize_navigation_label(&active.label)?;
+                    if !label.is_empty() {
+                        let (path, fragment) =
+                            resolve_navigation_href(navigation_path, &active.href)?;
+                        if let Some(spine_index) = spine_index_for_path(manifest, spine, &path) {
+                            if entries.len() >= max_entries {
+                                return Err(EpubError::LimitExceeded("navigation entries"));
+                            }
+                            entries
+                                .try_reserve(1)
+                                .map_err(|_| EpubError::AllocationFailed)?;
+                            entries.push(NavigationEntry {
+                                label,
+                                spine_index,
+                                fragment,
+                                depth: active.list_depth,
+                            });
+                        }
+                    }
+                }
+                if toc_depth.is_some() && local == "ol" {
+                    list_depth = list_depth.saturating_sub(1);
+                }
+                if toc_depth == Some(depth) && local == "nav" {
+                    toc_depth = None;
+                    toc_complete = true;
+                    list_depth = 0;
+                    link = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn append_navigation_label(output: &mut String, value: &str) -> Result<()> {
+    if output.len().saturating_add(value.len()) > 16 * 1024 {
+        return Err(EpubError::LimitExceeded("navigation label bytes"));
+    }
+    output
+        .try_reserve(value.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    output.push_str(value);
+    Ok(())
+}
+
+fn normalize_navigation_label(raw: &str) -> Result<String> {
+    let mut output = String::new();
+    output
+        .try_reserve(raw.len().min(256))
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let mut pending_space = false;
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            pending_space = !output.is_empty();
+            continue;
+        }
+        if pending_space {
+            output.push(' ');
+            pending_space = false;
+        }
+        output.push(ch);
+        if output.chars().count() >= 256 {
+            output.push('…');
+            break;
+        }
+    }
+    Ok(output)
+}
+
+fn resolve_navigation_href(base_file: &str, href: &str) -> Result<(String, Option<String>)> {
+    if href.is_empty() || href.contains('?') {
+        return Err(EpubError::Unsupported("non-local navigation reference"));
+    }
+    let (resource, fragment) = href
+        .split_once('#')
+        .map_or((href, None), |(resource, fragment)| {
+            (resource, (!fragment.is_empty()).then_some(fragment))
+        });
+    let path = if resource.is_empty() {
+        owned(base_file)?
+    } else {
+        resolve_path(base_file, resource)?
+    };
+    let fragment = fragment.map(owned).transpose()?;
+    Ok((path, fragment))
+}
+
+fn spine_index_for_path(
+    manifest: &[ManifestItem],
+    spine: &[SpineItem],
+    path: &str,
+) -> Option<usize> {
+    spine.iter().enumerate().find_map(|(index, item)| {
+        manifest
+            .get(item.manifest_index)
+            .filter(|manifest_item| manifest_item.path() == path)
+            .map(|_| index)
+    })
+}
+
 fn required_attribute<'a>(
     element: &'a xml::Element,
     name: &str,
@@ -773,6 +1017,69 @@ mod tests {
                 data: b"body { margin: 0; }",
             },
         ])
+    }
+
+    fn navigation_fixture() -> Vec<u8> {
+        const CONTAINER: &[u8] = br#"<container><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        const PACKAGE: &[u8] = br#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Navigation Test</dc:title></metadata><manifest><item id="one" href="text/one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="text/two.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="scripted nav cover-image"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>"#;
+        const NAV: &str = r#"<?xml version="1.0"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="landmarks"><ol><li><a href="text/one.xhtml">Landmark</a></li></ol></nav><nav epub:type="toc"><h1>Contents</h1><ol><li><a href="text/one.xhtml#intro">第一章 <em>开始</em></a><ol><li><a href="text/one.xhtml#details">详细部分</a></li></ol></li><li><a href="text/two.xhtml"><img alt="第二章" src="cover.png"/></a></li><li><a href="extra.xhtml">Not in spine</a></li></ol></nav></body></html>"#;
+        epub(&[
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: CONTAINER,
+            },
+            Entry {
+                name: "OEBPS/package.opf",
+                data: PACKAGE,
+            },
+            Entry {
+                name: "OEBPS/text/one.xhtml",
+                data: b"<html><body><h1>Wrong first line one</h1></body></html>",
+            },
+            Entry {
+                name: "OEBPS/text/two.xhtml",
+                data: b"<html><body><h1>Wrong first line two</h1></body></html>",
+            },
+            Entry {
+                name: "OEBPS/nav.xhtml",
+                data: NAV.as_bytes(),
+            },
+            Entry {
+                name: "OEBPS/extra.xhtml",
+                data: b"<html><body>Extra</body></html>",
+            },
+        ])
+    }
+
+    #[test]
+    fn epub3_navigation_document_maps_labels_depth_and_fragments_to_spine() {
+        let bytes = navigation_fixture();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        let navigation = book.navigation().unwrap();
+        assert_eq!(navigation.len(), 3);
+        assert_eq!(navigation[0].label(), "第一章 开始");
+        assert_eq!(navigation[0].spine_index(), 0);
+        assert_eq!(navigation[0].fragment(), Some("intro"));
+        assert_eq!(navigation[0].depth(), 0);
+        assert_eq!(navigation[1].label(), "详细部分");
+        assert_eq!(navigation[1].spine_index(), 0);
+        assert_eq!(navigation[1].fragment(), Some("details"));
+        assert_eq!(navigation[1].depth(), 1);
+        assert_eq!(navigation[2].label(), "第二章");
+        assert_eq!(navigation[2].spine_index(), 1);
+        assert_eq!(navigation[2].fragment(), None);
+        assert_eq!(navigation[2].depth(), 0);
+    }
+
+    #[test]
+    fn books_without_epub3_navigation_return_an_empty_navigation_list() {
+        let bytes = fixture();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        assert!(book.navigation().unwrap().is_empty());
     }
 
     #[test]

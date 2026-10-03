@@ -21,7 +21,7 @@ pub(crate) enum Action {
 pub(crate) struct TocEntry {
     pub(crate) spine: usize,
     pub(crate) title: String,
-    pub(crate) current: bool,
+    pub(crate) depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +134,41 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
     }
 
     pub(crate) fn toc_entries(&self) -> Result<Vec<TocEntry>> {
+        if let Ok(navigation) = self.book.navigation() {
+            let mut entries = Vec::new();
+            for item in navigation {
+                let spine = item.spine_index();
+                if entries.iter().any(|entry: &TocEntry| entry.spine == spine) {
+                    continue;
+                }
+                let Some(spine_item) = self.book.spine().get(spine) else {
+                    continue;
+                };
+                if !spine_item.linear() {
+                    continue;
+                }
+                let text = match self.book.read_spine_text(spine) {
+                    Ok(text) => text,
+                    Err(EpubError::Unsupported(_)) => continue,
+                    Err(_) => continue,
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                entries.push(TocEntry {
+                    spine,
+                    title: item.label().to_owned(),
+                    depth: item.depth(),
+                });
+                if entries.len() >= 512 {
+                    break;
+                }
+            }
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+        }
+
         let mut entries = Vec::new();
         for spine in 0..self.book.spine().len() {
             let Some(item) = self.book.spine().get(spine) else {
@@ -154,7 +189,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
             entries.push(TocEntry {
                 spine,
                 title,
-                current: spine == self.spine,
+                depth: 0,
             });
             if entries.len() >= 512 {
                 break;
@@ -544,8 +579,8 @@ mod tests {
         assert_eq!(toc.len(), 2);
         assert_eq!(toc[0].spine, 1);
         assert_eq!(toc[1].spine, 3);
-        assert!(toc[0].current);
-        assert!(!toc[1].current);
+        assert_eq!(toc[0].depth, 0);
+        assert_eq!(toc[1].depth, 0);
         assert!(toc[0].title.starts_with("AAAA"));
 
         assert!(session.jump_to_spine(toc[1].spine).unwrap());
@@ -553,6 +588,24 @@ mod tests {
         assert_eq!(session.frame().page, 0);
         assert!(!session.jump_to_spine(3).unwrap());
         assert!(session.jump_to_spine(0).is_err());
+    }
+
+    #[test]
+    fn toc_prefers_epub3_navigation_labels_and_preserves_hierarchy() {
+        let epub_bytes = test_epub::make_epub_with_navigation();
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+
+        let toc = session.toc_entries().unwrap();
+        assert_eq!(toc.len(), 2);
+        assert_eq!(toc[0].title, "正式目录第一章");
+        assert_eq!(toc[0].spine, 0);
+        assert_eq!(toc[0].depth, 0);
+        assert_eq!(toc[1].title, "正式目录第二章");
+        assert_eq!(toc[1].spine, 1);
+        assert_eq!(toc[1].depth, 1);
     }
 
     #[test]

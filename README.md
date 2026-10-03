@@ -36,6 +36,8 @@ ReadAll 当前自己处理：
 - `mimetype`
 - `META-INF/container.xml`
 - OPF metadata / manifest / spine
+- EPUB 3 Navigation Document：`properties="nav"` + `nav epub:type="toc"`
+- 正式目录标题、嵌套层级与 `href#fragment` 目标解析
 - XHTML 可见正文提取
 - 常见 HTML / XHTML DOCTYPE
 - 跨 spine 连续阅读
@@ -50,11 +52,12 @@ ReadAll 当前自己处理：
 - SVG 正文
 - MathML
 - EPUB 内嵌字体
-- 正式 EPUB navigation/NCX 目录语义
+- EPUB 2 NCX 目录
+- 同一 XHTML 内 `#fragment` 的精确正文偏移跳转
 - DRM / 加密 EPUB
 - Fixed-layout EPUB
 
-当前目录面板来自可读 spine/章节文本，并不是完整 EPUB Navigation 实现。
+目录面板优先使用 EPUB 3 Navigation Document 提供的正式标题和嵌套层级；没有 nav、nav 不可用或没有可映射的可读条目时，回退为从可读 spine 正文首行推断标题。当前 `href#fragment` 会保留 fragment 并定位到对应 spine 文档，但同一 XHTML 内的精确 fragment 偏移跳转尚未实现。
 
 ### TXT / 字体 / 渲染
 
@@ -234,7 +237,7 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 ## Roadmap
 
-1. EPUB Navigation/TOC、CSS 子集、图片与更完整的排版
+1. EPUB 目录 fragment 精确跳转、EPUB 2 NCX、CSS 子集、图片与更完整的排版
 2. 最近阅读、封面书架、阅读主题、设置页
 3. 字体 fallback、字素/单词断行、选择/高亮
 4. Windows 原生窗口后端
