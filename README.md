@@ -96,12 +96,12 @@ cargo run -p readall-platform --example probe --offline
 
 当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
 
-这一版尚无工具栏/书库、自绘窗口装饰、文字选择、字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次，但翻页和重排仍重建测量布局，字形缓存尚未跨页复用；大文档性能需要继续优化。Windows/Android 窗口尚未实现。
+这一版尚无工具栏/书库、自绘窗口装饰、文字选择、字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次；同一字号与窗口几何下翻页复用整本文本的测量布局，并跨页保留已经光栅化的字形蒙版。窗口尺寸变化只重建布局，字号变化建立新的字号专属字形缓存。仍未缓存完整页面像素，大文档首次排版性能需要继续优化。Windows/Android 窗口尚未实现。
 
 ## 后续顺序
 
 1. 真实 Wayland 桌面验收，补足 HiDPI、原生界面与 Windows/Android 平台入口。
-2. TXT 阅读：跨页缓存、字体回退、字素/单词断行和文字选择；继续完善进度数据的跨平台存储策略。
+2. TXT 阅读：字体回退、字素/单词断行和文字选择；继续优化首次排版并完善进度数据的跨平台存储策略。
 3. EPUB：受限 ZIP、包结构、目录、XHTML/CSS 阅读子集、自研排版。
 4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
 5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。

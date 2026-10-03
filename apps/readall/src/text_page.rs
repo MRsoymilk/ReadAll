@@ -1,6 +1,6 @@
 //! TXT page renderer shared by headless export and the native reading session.
 use readall_core::{
-    Limits, TextDocument, TextLocator,
+    DocumentId, Limits, TextDocument, TextLocator,
     layout::{LayoutConfig, MeasuredLayout, tab_advance},
     read_bounded,
 };
@@ -255,11 +255,201 @@ pub(crate) struct RenderedPage {
     pub missing: Vec<char>,
     pub cached_masks: usize,
 }
-pub(crate) fn render(
-    document: &TextDocument,
-    font: &Font<'_>,
-    options: &Options,
-) -> Result<RenderedPage> {
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayoutKey {
+    document_id: DocumentId,
+    width: u32,
+    height: u32,
+    margin: u32,
+}
+
+struct CachedLayout {
+    key: LayoutKey,
+    layout: MeasuredLayout,
+    ascender: f32,
+    line_height: f32,
+    tab_width: f32,
+    content_width: u32,
+    content_height: u32,
+}
+
+pub(crate) struct PageRenderer<'font, 'data> {
+    cache: GlyphCache<'font, 'data>,
+    size: u32,
+    allow_missing: bool,
+    layout: Option<CachedLayout>,
+    layout_builds: usize,
+}
+
+impl<'font, 'data> PageRenderer<'font, 'data> {
+    pub(crate) fn new(font: &'font Font<'data>, size: u32, allow_missing: bool) -> Result<Self> {
+        if !(8..=256).contains(&size) {
+            return Err("font size must be 8..256".into());
+        }
+        let metrics = font.metrics();
+        if metrics.ascender <= 0 || metrics.descender > 0 {
+            return Err("unsupported horizontal font metrics for this first layout engine".into());
+        }
+        Ok(Self {
+            cache: GlyphCache::new(font, size, allow_missing),
+            size,
+            allow_missing,
+            layout: None,
+            layout_builds: 0,
+        })
+    }
+
+    fn ensure_layout(&mut self, document: &TextDocument, options: &Options) -> Result<()> {
+        validate_options(options)?;
+        if options.size != self.size || options.allow_missing != self.allow_missing {
+            return Err("page renderer font configuration does not match options".into());
+        }
+        let key = LayoutKey {
+            document_id: document.id(),
+            width: options.width,
+            height: options.height,
+            margin: options.margin,
+        };
+        if self.layout.as_ref().is_some_and(|layout| layout.key == key) {
+            return Ok(());
+        }
+
+        let metrics = self.cache.font.metrics();
+        let ascender = f32::from(metrics.ascender) * self.cache.scale;
+        let line_height = ((f32::from(metrics.ascender) - f32::from(metrics.descender)
+            + f32::from(metrics.line_gap.max(0)))
+            * self.cache.scale)
+            .ceil()
+            .max(options.size as f32);
+        let content_width = options.width - options.margin * 2;
+        let content_height = options.height - options.margin * 2;
+        let rows = (content_height as f32 / line_height).floor() as usize;
+        if rows == 0 {
+            return Err("page is too short for one line with this font and size".into());
+        }
+        let tab_width = (self.cache.advance(' ')? * 4.0).max(options.size as f32);
+        let layout = MeasuredLayout::build(
+            document,
+            LayoutConfig {
+                width: content_width as f32,
+                rows,
+                tab_width,
+                ..LayoutConfig::default()
+            },
+            |ch| self.cache.advance(ch),
+        )?;
+
+        self.layout = Some(CachedLayout {
+            key,
+            layout,
+            ascender,
+            line_height,
+            tab_width,
+            content_width,
+            content_height,
+        });
+        self.layout_builds = self.layout_builds.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn render(
+        &mut self,
+        document: &TextDocument,
+        options: &Options,
+    ) -> Result<RenderedPage> {
+        self.ensure_layout(document, options)?;
+        let cached = self
+            .layout
+            .as_ref()
+            .ok_or("measured layout cache was not initialized")?;
+        let page = if let Some(at) = &options.at {
+            cached.layout.page_for_locator(document, at)?
+        } else {
+            options.page.unwrap_or(0)
+        };
+        let lines = cached
+            .layout
+            .page(page)
+            .ok_or("page is outside this document")?;
+        let locator = document.locator(lines[0].text_range.start)?;
+
+        let mut surface = Surface::new(options.width, options.height, RenderLimits::default())?;
+        surface.draw(&[DrawCommand::FillRect {
+            rect: Rect::new(0, 0, options.width, options.height),
+            color: Color::WHITE,
+        }])?;
+        let clip = Rect::new(
+            options.margin as i32,
+            options.margin as i32,
+            cached.content_width,
+            cached.content_height,
+        );
+        let (mut count, mut blend_work) = (0_usize, 0_u64);
+        for (row, line) in lines.iter().enumerate() {
+            let baseline =
+                options.margin as f32 + cached.ascender + row as f32 * cached.line_height;
+            let mut x = 0.0_f32;
+            for ch in document.text()[line.text_range.clone()].chars() {
+                if ch == '\t' {
+                    x += tab_advance(x, cached.tab_width);
+                    continue;
+                }
+                count += 1;
+                if count > 200_000 {
+                    return Err(PageError::Budget("visible glyphs").into());
+                }
+                let advance = self.cache.advance(ch)?;
+                let mask = self.cache.mask(ch)?;
+                blend_work = blend_work
+                    .checked_add(u64::from(mask.width()) * u64::from(mask.height()))
+                    .filter(|n| *n <= 64 * 1024 * 1024)
+                    .ok_or(PageError::Budget("aggregate glyph blending"))?;
+                surface.draw_glyph(
+                    mask,
+                    (
+                        (options.margin as f32 + x).round() as i32,
+                        baseline.round() as i32,
+                    ),
+                    Color::rgba(24, 24, 24, 255),
+                    clip,
+                )?;
+                x += advance;
+            }
+        }
+
+        let mut missing: Vec<_> = self.cache.missing.iter().copied().collect();
+        missing.sort_unstable();
+        let cached_masks = self
+            .cache
+            .entries
+            .values()
+            .filter(|glyph| glyph.mask.is_some())
+            .count();
+        Ok(RenderedPage {
+            surface,
+            page,
+            pages: cached.layout.page_count(),
+            locator,
+            missing,
+            cached_masks,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> (usize, usize) {
+        (
+            self.layout_builds,
+            self.cache
+                .entries
+                .values()
+                .filter(|glyph| glyph.mask.is_some())
+                .count(),
+        )
+    }
+}
+
+fn validate_options(options: &Options) -> Result<()> {
     if !(128..=4096).contains(&options.width)
         || !(128..=4096).contains(&options.height)
         || !(8..=256).contains(&options.size)
@@ -269,98 +459,16 @@ pub(crate) fn render(
     {
         return Err("invalid page geometry or conflicting page and locator".into());
     }
-    let mut cache = GlyphCache::new(font, options.size, options.allow_missing);
-    let metrics = font.metrics();
-    if metrics.ascender <= 0 || metrics.descender > 0 {
-        return Err("unsupported horizontal font metrics for this first layout engine".into());
-    }
-    let ascender = f32::from(metrics.ascender) * cache.scale;
-    let line_height = ((f32::from(metrics.ascender) - f32::from(metrics.descender)
-        + f32::from(metrics.line_gap.max(0)))
-        * cache.scale)
-        .ceil()
-        .max(options.size as f32);
-    let content_width = options.width - options.margin * 2;
-    let content_height = options.height - options.margin * 2;
-    let rows = (content_height as f32 / line_height).floor() as usize;
-    if rows == 0 {
-        return Err("page is too short for one line with this font and size".into());
-    }
-    let tab_width = (cache.advance(' ')? * 4.0).max(options.size as f32);
-    let layout = MeasuredLayout::build(
-        document,
-        LayoutConfig {
-            width: content_width as f32,
-            rows,
-            tab_width,
-            ..LayoutConfig::default()
-        },
-        |ch| cache.advance(ch),
-    )?;
-    let page = if let Some(at) = &options.at {
-        layout.page_for_locator(document, at)?
-    } else {
-        options.page.unwrap_or(0)
-    };
-    let lines = layout.page(page).ok_or("page is outside this document")?;
-    let locator = document.locator(lines[0].text_range.start)?;
-    let mut surface = Surface::new(options.width, options.height, RenderLimits::default())?;
-    surface.draw(&[DrawCommand::FillRect {
-        rect: Rect::new(0, 0, options.width, options.height),
-        color: Color::WHITE,
-    }])?;
-    let clip = Rect::new(
-        options.margin as i32,
-        options.margin as i32,
-        content_width,
-        content_height,
-    );
-    let (mut count, mut blend_work) = (0_usize, 0_u64);
-    for (row, line) in lines.iter().enumerate() {
-        let baseline = options.margin as f32 + ascender + row as f32 * line_height;
-        let mut x = 0.0_f32;
-        for ch in document.text()[line.text_range.clone()].chars() {
-            if ch == '\t' {
-                x += tab_advance(x, tab_width);
-                continue;
-            }
-            count += 1;
-            if count > 200_000 {
-                return Err(PageError::Budget("visible glyphs").into());
-            }
-            let advance = cache.advance(ch)?;
-            let mask = cache.mask(ch)?;
-            blend_work = blend_work
-                .checked_add(u64::from(mask.width()) * u64::from(mask.height()))
-                .filter(|n| *n <= 64 * 1024 * 1024)
-                .ok_or(PageError::Budget("aggregate glyph blending"))?;
-            surface.draw_glyph(
-                mask,
-                (
-                    (options.margin as f32 + x).round() as i32,
-                    baseline.round() as i32,
-                ),
-                Color::rgba(24, 24, 24, 255),
-                clip,
-            )?;
-            x += advance;
-        }
-    }
-    let mut missing: Vec<_> = cache.missing.iter().copied().collect();
-    missing.sort_unstable();
-    let cached_masks = cache
-        .entries
-        .values()
-        .filter(|glyph| glyph.mask.is_some())
-        .count();
-    Ok(RenderedPage {
-        surface,
-        page,
-        pages: layout.page_count(),
-        locator,
-        missing,
-        cached_masks,
-    })
+    Ok(())
+}
+
+pub(crate) fn render(
+    document: &TextDocument,
+    font: &Font<'_>,
+    options: &Options,
+) -> Result<RenderedPage> {
+    let mut renderer = PageRenderer::new(font, options.size, options.allow_missing)?;
+    renderer.render(document, options)
 }
 
 pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {

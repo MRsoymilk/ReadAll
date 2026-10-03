@@ -1,6 +1,6 @@
 //! Transactional reading state. Reflow retains an exact content anchor, not the
 //! start of whichever page happened to contain it on the previous resize.
-use crate::text_page::{Options, RenderedPage, render};
+use crate::text_page::{Options, PageRenderer, RenderedPage};
 use readall_core::{TextDocument, TextLocator};
 use readall_font::Font;
 use std::error::Error;
@@ -19,6 +19,7 @@ pub(crate) struct Session<'doc, 'font, 'bytes> {
     document: &'doc TextDocument,
     font: &'font Font<'bytes>,
     options: Options,
+    renderer: PageRenderer<'font, 'bytes>,
     frame: RenderedPage,
     anchor: TextLocator,
 }
@@ -28,12 +29,14 @@ impl<'doc, 'font, 'bytes> Session<'doc, 'font, 'bytes> {
         font: &'font Font<'bytes>,
         options: Options,
     ) -> Result<Self> {
-        let frame = render(document, font, &options)?;
+        let mut renderer = PageRenderer::new(font, options.size, options.allow_missing)?;
+        let frame = renderer.render(document, &options)?;
         let anchor = options.at.clone().unwrap_or_else(|| frame.locator.clone());
         Ok(Self {
             document,
             font,
             options,
+            renderer,
             frame,
             anchor,
         })
@@ -69,11 +72,26 @@ impl<'doc, 'font, 'bytes> Session<'doc, 'font, 'bytes> {
     fn reflow(&mut self, mut options: Options) -> Result<bool> {
         options.page = None;
         options.at = Some(self.anchor.clone());
-        let frame = render(self.document, self.font, &options)?;
+        if options.size != self.options.size || options.allow_missing != self.options.allow_missing
+        {
+            let mut renderer = PageRenderer::new(self.font, options.size, options.allow_missing)?;
+            let frame = renderer.render(self.document, &options)?;
+            self.renderer = renderer;
+            self.options = options;
+            self.frame = frame;
+            return Ok(true);
+        }
+
+        let frame = self.renderer.render(self.document, &options)?;
         self.options = options;
         self.frame = frame;
         Ok(true)
     }
+    #[cfg(test)]
+    pub(crate) fn renderer_stats(&self) -> (usize, usize) {
+        self.renderer.stats()
+    }
+
     pub(crate) fn action(&mut self, action: Action) -> Result<bool> {
         let mut options = self.options.clone();
         let target = match action {
@@ -99,7 +117,7 @@ impl<'doc, 'font, 'bytes> Session<'doc, 'font, 'bytes> {
         }
         options.page = Some(target);
         options.at = None;
-        let frame = render(self.document, self.font, &options)?;
+        let frame = self.renderer.render(self.document, &options)?;
         self.anchor = frame.locator.clone();
         self.frame = frame;
         self.options = options;
@@ -149,6 +167,31 @@ mod tests {
         assert!(session.action(Action::First).unwrap());
         assert_eq!(doc.restore(session.anchor()).unwrap(), 0);
     }
+    #[test]
+    fn page_navigation_reuses_layout_and_glyph_cache() {
+        let bytes = test_font::make_font();
+        let font = Font::parse(&bytes, 0, FontLimits::default()).unwrap();
+        let doc =
+            TextDocument::from_bytes("AAAA WWWW AAAA\n".repeat(30).as_bytes(), Limits::default())
+                .unwrap();
+        let mut session = Session::new(&doc, &font, options()).unwrap();
+        let initial = session.renderer_stats();
+        assert_eq!(initial.0, 1);
+
+        assert!(session.action(Action::Next).unwrap());
+        let after_next = session.renderer_stats();
+        assert_eq!(after_next.0, 1);
+        assert!(after_next.1 >= initial.1);
+
+        assert!(session.action(Action::Previous).unwrap());
+        let after_back = session.renderer_stats();
+        assert_eq!(after_back.0, 1);
+        assert_eq!(after_back.1, after_next.1);
+
+        assert!(session.resize(240, 160).unwrap());
+        assert_eq!(session.renderer_stats().0, 2);
+    }
+
     #[test]
     fn repeated_reflow_preserves_exact_anchor_without_backwards_drift() {
         let bytes = test_font::make_font();
