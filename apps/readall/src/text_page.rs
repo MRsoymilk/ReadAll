@@ -1,4 +1,4 @@
-//! Headless first-page renderer, reusable by a future native window controller.
+//! TXT page renderer shared by headless export and the native reading session.
 use readall_core::{
     Limits, TextDocument, TextLocator,
     layout::{LayoutConfig, MeasuredLayout, tab_advance},
@@ -21,20 +21,20 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-#[derive(Debug)]
-struct Options {
-    font: PathBuf,
-    face: u32,
-    width: u32,
-    height: u32,
-    size: u32,
-    margin: u32,
-    page: Option<usize>,
-    at: Option<TextLocator>,
-    allow_missing: bool,
+#[derive(Debug, Clone)]
+pub(crate) struct Options {
+    pub font: PathBuf,
+    pub face: u32,
+    pub width: u32,
+    pub height: u32,
+    pub size: u32,
+    pub margin: u32,
+    pub page: Option<usize>,
+    pub at: Option<TextLocator>,
+    pub allow_missing: bool,
 }
 impl Options {
-    fn parse(args: &[OsString]) -> Result<Self> {
+    pub(crate) fn parse(args: &[OsString]) -> Result<Self> {
         if args.len() % 2 != 0 {
             return Err("each render-text option requires a value".into());
         }
@@ -247,15 +247,28 @@ impl<'f, 'data> GlyphCache<'f, 'data> {
             .ok_or(PageError::Budget("missing glyph mask"))
     }
 }
-struct RenderedPage {
-    surface: Surface,
-    page: usize,
-    pages: usize,
-    locator: TextLocator,
-    missing: Vec<char>,
-    cached_masks: usize,
+pub(crate) struct RenderedPage {
+    pub surface: Surface,
+    pub page: usize,
+    pub pages: usize,
+    pub locator: TextLocator,
+    pub missing: Vec<char>,
+    pub cached_masks: usize,
 }
-fn render(document: &TextDocument, font: &Font<'_>, options: &Options) -> Result<RenderedPage> {
+pub(crate) fn render(
+    document: &TextDocument,
+    font: &Font<'_>,
+    options: &Options,
+) -> Result<RenderedPage> {
+    if !(128..=4096).contains(&options.width)
+        || !(128..=4096).contains(&options.height)
+        || !(8..=256).contains(&options.size)
+        || options.margin >= options.width / 2
+        || options.margin >= options.height / 2
+        || (options.page.is_some() && options.at.is_some())
+    {
+        return Err("invalid page geometry or conflicting page and locator".into());
+    }
     let mut cache = GlyphCache::new(font, options.size, options.allow_missing);
     let metrics = font.metrics();
     if metrics.ascender <= 0 || metrics.descender > 0 {

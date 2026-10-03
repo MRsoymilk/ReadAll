@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+wayland = ["readall-platform/wayland"]
+
 [dependencies]
 readall-font.workspace = true
 readall-core.workspace = true

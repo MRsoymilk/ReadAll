@@ -4,11 +4,11 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 ## 当前状态
 
-项目处于基础引擎阶段，**已有命令行和真实字体的 TXT 页面图片导出，没有原生 GUI，也不能阅读 PDF/EPUB**。不得把文件签名检测当作对应格式已经支持。
+项目处于基础引擎阶段，**已有命令行、真实字体 TXT 页面导出，以及可选的 Linux Wayland 原生 TXT 窗口和翻页交互**。窗口已通过编译与本地模拟合成器协议测试，尚未完成真实桌面目视验收；不能阅读 PDF/EPUB。不得把文件签名检测当作对应格式已经支持。
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
-当前外部 crate 依赖为零；仅使用 Rust 标准库及工作区内部 crate。操作系统和标准库自身不属于“零依赖”承诺。源码禁止 unsafe；以后平台 FFI 的必要例外应限定在独立适配层，并单独审查。
+当前外部 crate 依赖为零，仅使用 Rust 标准库和工作区内部 crate。启用 `wayland` 功能时，会链接系统 `libwayland-client` 处理窗口协议与文件描述符传输；字体解析、排版和像素绘制仍由 Rust 自研代码完成。默认不启用窗口，不链接该显示库。核心/字体/渲染模块继续禁止 unsafe；平台层默认 deny，仅私有 `wayland` 模块允许必要 FFI，原始指针不暴露给应用。操作系统、系统库和标准库不属于“零依赖”承诺。
 
 ## 构建与运行
 
@@ -34,8 +34,8 @@ Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成
 | `readall-core` | 文档输入约束、格式模型、文本解析、内容位置；不依赖文件路径或窗口对象 |
 | `readall-font` | 自研 TrueType/TTC 解析、Unicode 字形映射、真实字宽、简单及复合字形轮廓；不执行字体字节码 |
 | `readall-render` | 自研 RGBA 像素缓冲区、矩形裁剪与合成、二次曲线字形光栅化和灰度蒙版；无 GPU 或窗口呈现 |
-| `readall-platform` | 本地文件访问；后续承接窗口、系统输入、Android URI 和像素呈现 |
-| `readall` | 诊断 CLI、TXT 页面编排、字形缓存与图片导出；后续的原生应用入口 |
+| `readall-platform` | 本地文件访问、安全窗口接口、可选 Wayland 输入/共享内存呈现；Android URI 尚未实现 |
+| `readall` | CLI、TXT 页面编排、字形缓存、图片导出和原生阅读会话；失败时保留原页面与位置 |
 
 矩形绘制模块限制像素数量、指令数量、裁剪深度和累计混合像素数；`draw` 先检查整份矩形/裁剪指令，再修改像素，失败不会留下部分绘制结果。字形绘制逐次检查蒙版与裁剪；页面导出在内存中完成整页后才创建目标文件，输入解析或绘制失败不会生成页面文件，但磁盘写入失败仍可能留下新建的部分文件。透明度为直通 Alpha 的字节空间 source-over 合成，不提供线性光或完整 PDF 色彩管理。诊断分页默认最多 200,000 行。
 
@@ -72,10 +72,36 @@ cargo run -p readall --offline -- render-text tests/fixtures/sample_latin.txt ta
 
 `MeasuredLayout` 接收真实字宽回调，不依赖特定字体或窗口。它保留规范化文本范围与 locator 映射，但当前仍按 Unicode 标量逐个换行，不支持完整单词断行、字素簇、字距调整、复杂文字塑形或双向排版；不能将图片导出等同于完整阅读体验。单次排版默认最多 1,000,000 个 Unicode 标量、200,000 行，超过限制明确报错。
 
+## Linux 原生 TXT 窗口
+
+在已登录的 Wayland 桌面终端中运行，系统须有可供链接的 `libwayland-client`：
+
+```sh
+cargo run -p readall --features wayland --offline -- open tests/fixtures/sample_latin.txt --font /usr/share/fonts/dejavu/DejaVuSans.ttf
+```
+
+`open` 复用 `render-text` 的字体、尺寸、页边距、`--page`/`--at` 和缺字策略参数，但不需要图片输出路径。标题包含页码和字号。PageUp/左/上翻到前页；PageDown/右/下/Space 翻到后页；Home/End 跳到首末页；加减号位置键调整字号；Esc 关闭。左键点击页面左半区/右半区翻页，竖向滚轮翻页。目前快捷键按 Linux 物理键码处理，不实现文字输入、键盘布局转换或长按自动重复。
+
+窗口缩放和字号变化保留同一个精确文本 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。正常关闭后终端输出 `Reading locator`，下次可用 `--at` 恢复；尚未自动保存阅读进度。失败的翻页/字号修改保留原状态并在终端报错；无法适配的窗口尺寸会明确报错退出。
+
+窗口采用 `wl_compositor` v4、`xdg-shell` v1 和 XRGB8888 SHM；输入需要 `wl_seat` v5。等待 configure 并 ack 后才附加缓冲区；同一时刻最多两个未释放缓冲区，释放前不覆盖其内容。临时文件以独占方式创建并立即解除路径关联。空闲时阻塞等待事件，不持续绘制。
+
+`--display <socket>` 用于显式选择合成器，默认只使用调用进程的 Wayland 会话配置，不猜测用户 socket，也不修改桌面环境。`--frames 1` 是一次提交后关闭的协议诊断选项，只表示提交已由合成器处理，不代表用户已经看到画面。
+
+```sh
+cargo test --workspace --features wayland --offline
+cargo clippy --workspace --all-targets --features wayland --offline -- -D warnings
+cargo run -p readall-platform --example probe --offline
+```
+
+当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
+
+这一版尚无工具栏/书库、自绘窗口装饰、文字选择、字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次，但翻页和重排仍重建测量布局，字形缓存尚未跨页复用；大文档性能需要继续优化。Windows/Android 窗口尚未实现。
+
 ## 后续顺序
 
-1. 完成 P0：在已有绘制底座上接入原生窗口/输入适配，分别验证 Linux、Windows、Android 的最小启动。
-2. TXT 阅读：在真实字体和分页底座上增加原生翻页、字体回退、字素/单词断行和阅读进度持久化。
+1. 真实 Wayland 桌面验收，补足 HiDPI、原生界面与 Windows/Android 平台入口。
+2. TXT 阅读：跨页缓存、字体回退、字素/单词断行、文字选择和阅读进度持久化。
 3. EPUB：受限 ZIP、包结构、目录、XHTML/CSS 阅读子集、自研排版。
 4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
 5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。
