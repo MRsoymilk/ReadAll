@@ -50,7 +50,9 @@ fn event_bytes(object: u32, opcode: u16, body: &[u8]) -> Vec<u8> {
     bytes
 }
 fn event(stream: &mut UnixStream, object: u32, opcode: u16, body: &[u8]) {
-    stream.write_all(&event_bytes(object, opcode, body)).unwrap();
+    stream
+        .write_all(&event_bytes(object, opcode, body))
+        .unwrap();
 }
 #[derive(Clone, Copy, Debug)]
 enum Kind {
