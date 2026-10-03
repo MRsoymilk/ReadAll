@@ -18,10 +18,13 @@ use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
-    if args.is_empty() || matches!(args[0].to_str(), Some("--help" | "-h")) {
+    if args.is_empty() {
+        return crate::home::run(output);
+    }
+    if matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFont shaping, PDF and EPUB reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFull EPUB styling, font shaping and PDF reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
         )?;
         return Ok(());
@@ -287,10 +290,10 @@ mod tests {
     #[test]
     fn help_does_not_claim_gui_or_pdf_support() {
         let mut output = Vec::new();
-        run(vec![], &mut output).unwrap();
+        run(vec![OsString::from("--help")], &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("inspect"));
-        assert!(text.contains("not implemented"));
+        assert!(text.contains("Full EPUB styling"));
     }
 
     #[test]

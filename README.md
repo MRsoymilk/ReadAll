@@ -4,7 +4,7 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 ## 当前状态
 
-项目处于基础引擎阶段，**已有命令行、真实字体 TXT/EPUB 文本页面渲染，以及可选的 Linux Wayland 原生 TXT 和 EPUB 阅读窗口**。窗口已通过编译、本地模拟合成器协议测试和无显示环境的真实 CLI 错误路径测试，尚未完成真实桌面目视验收；EPUB 当前只支持自研 XHTML 文本子集，CSS/图片等仍未渲染，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
+项目处于基础引擎阶段，**Linux Wayland 构建下零参数启动已默认进入原生 ReadAll 主窗口，同时保留命令行、真实字体 TXT/EPUB 文本页面渲染，以及原生 TXT 和 EPUB 阅读窗口**。窗口已通过编译、本地模拟合成器协议测试和无显示环境的真实 CLI 错误路径测试，尚未完成真实桌面目视验收；EPUB 当前只支持自研 XHTML 文本子集，CSS/图片等仍未渲染，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
@@ -13,6 +13,10 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 ## 构建与运行
 
 ```sh
+cargo build --release --features wayland --offline
+./target/release/readall
+./target/release/readall --help
+
 cargo test --workspace --offline
 cargo run -p readall --offline -- inspect tests/fixtures/sample.txt
 cargo run -p readall --offline -- read tests/fixtures/sample.txt --columns 40 --rows 8 --page 1
@@ -20,6 +24,8 @@ cargo run -p readall --offline -- render-demo target/calibration.ppm
 cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
+
+Linux 使用 `--features wayland` 构建后，直接运行 `readall` 会启动自绘主窗口；只有 `readall --help` / `-h` 才打印命令行帮助。当前主窗口包含 EPUB/TXT 入口卡片和选择状态，系统文件选择器尚未接入，因此卡片暂时用于主界面导航展示，具体书籍仍可通过 `open` / `open-epub` 子命令打开。
 
 `read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
 
@@ -32,12 +38,12 @@ Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成
 | 模块 | 职责 |
 | --- | --- |
 | `readall-archive` | 自研受限 ZIP 与 raw DEFLATE（Stored/Fixed/Dynamic Huffman）、CRC-32、路径和资源预算检查 |
-| `readall-epub` | EPUB mimetype、container.xml、OPF metadata/manifest/spine 和本地资源路径解析；尚无 XHTML/CSS 排版 |
+| `readall-epub` | EPUB mimetype、container.xml、OPF metadata/manifest/spine、本地资源路径、XHTML 文本子集与稳定 epub-v1 locator；CSS/图片尚未渲染 |
 | `readall-core` | 文档输入约束、格式模型、文本解析、内容位置；不依赖文件路径或窗口对象 |
 | `readall-font` | 自研 TrueType/TTC 解析、Unicode 字形映射、真实字宽、简单及复合字形轮廓；不执行字体字节码 |
 | `readall-render` | 自研 RGBA 像素缓冲区、矩形裁剪与合成、二次曲线字形光栅化和灰度蒙版；无 GPU 或窗口呈现 |
 | `readall-platform` | 本地文件访问、安全窗口接口、可选 Wayland 输入/共享内存呈现；Android URI 尚未实现 |
-| `readall` | CLI、TXT 页面编排、字形缓存、图片导出和原生阅读会话；失败时保留原页面与位置 |
+| `readall` | 默认原生主窗口、CLI、TXT/EPUB 页面编排、字形缓存、图片导出和原生阅读会话；失败时保留原页面与位置 |
 
 矩形绘制模块限制像素数量、指令数量、裁剪深度和累计混合像素数；`draw` 先检查整份矩形/裁剪指令，再修改像素，失败不会留下部分绘制结果。字形绘制逐次检查蒙版与裁剪；页面导出在内存中完成整页后才创建目标文件，输入解析或绘制失败不会生成页面文件，但磁盘写入失败仍可能留下新建的部分文件。透明度为直通 Alpha 的字节空间 source-over 合成，不提供线性光或完整 PDF 色彩管理。诊断分页默认最多 200,000 行。
 
