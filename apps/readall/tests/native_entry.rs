@@ -35,6 +35,24 @@ fn malformed_window_options_fail_before_loading_a_book() {
             .unwrap()
             .contains("one-frame")
     );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_readall"))
+        .args([
+            "open-epub",
+            "not-opened.epub",
+            "--progress",
+            "off",
+            "--state-dir",
+            "/tmp/unused",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("--state-dir cannot be used")
+    );
 }
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 #[test]

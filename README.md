@@ -101,7 +101,7 @@ cargo run -p readall --features wayland --offline -- open-epub /path/to/book.epu
 
 `open` 复用 `render-text` 的字体、尺寸、页边距、`--page`/`--at` 和缺字策略参数，但不需要图片输出路径。`open-epub` 使用同一套自研字体/页面渲染，支持 `--spine N` 或 `--at epub-v1:...` 作为起点；页内翻到边界后会按 OPF 的 `linear=yes` 阅读顺序进入相邻 spine，Home/End 跨整本书跳到首末线性章节。两种窗口都支持 PageUp/左/上、PageDown/右/下/Space、加减号、Esc、左右半区点击和竖向滚轮。目前快捷键按 Linux 物理键码处理，不实现文字输入、键盘布局转换或长按自动重复。
 
-窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 原生阅读默认从 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时从 `$HOME/.local/state/readall/progress-v1` 恢复 locator；成功翻页及正常关闭时用同目录临时文件 + rename 更新状态。EPUB 使用绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator，但自动持久化尚未接入 EPUB。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
+窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 与 EPUB 原生阅读都默认使用 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时使用 `$HOME/.local/state/readall/progress-v1`；TXT 保存 `TextLocator`，EPUB 保存绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator。成功翻页及正常关闭时用同目录临时文件 + rename 更新状态；显式 `--page`/`--spine`/`--at` 优先于自动恢复。两种窗口都可用 `--progress off` 禁用或 `--state-dir DIR` 指定状态目录。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
 
 窗口采用 `wl_compositor` v4、`xdg-shell` v1 和 XRGB8888 SHM；输入需要 `wl_seat` v5。等待 configure 并 ack 后才附加缓冲区；同一时刻最多两个未释放缓冲区，释放前不覆盖其内容。临时文件以独占方式创建并立即解除路径关联。空闲时阻塞等待事件，不持续绘制。
 
@@ -121,7 +121,7 @@ cargo run -p readall-platform --example probe --offline
 
 1. 真实 Wayland 桌面验收，补足 HiDPI、原生界面与 Windows/Android 平台入口。
 2. TXT 阅读：字体回退、字素/单词断行和文字选择；继续优化首次排版并完善进度数据的跨平台存储策略。
-3. EPUB：在已完成的 ZIP/OPF、XHTML 文本、稳定 locator 和跨 spine 原生翻页基础上，加入导航目录、自动进度、CSS 子集、图片和更完整的自研排版。
+3. EPUB：在已完成的 ZIP/OPF、XHTML 文本、稳定 locator、跨 spine 原生翻页和自动进度基础上，加入导航目录、CSS 子集、图片和更完整的自研排版。
 4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
 5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。
 

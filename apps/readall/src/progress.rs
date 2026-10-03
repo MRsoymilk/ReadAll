@@ -1,6 +1,7 @@
 //! Versioned, dependency-free reading progress storage.
 //! Progress is keyed by document content identity and stores a content locator, never a page number.
 use readall_core::{DocumentId, TextDocument, TextLocator};
+use readall_epub::{EpubBook, EpubLocator};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -23,22 +24,7 @@ impl ProgressStore {
 
     #[cfg(all(target_os = "linux", feature = "wayland"))]
     pub(crate) fn from_environment() -> io::Result<Self> {
-        if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
-            let path = PathBuf::from(path);
-            if path.is_absolute() {
-                return Ok(Self::new(path.join("readall/progress-v1")));
-            }
-        }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "neither absolute XDG_STATE_HOME nor HOME is available",
-                )
-            })?;
-        Ok(Self::new(home.join(".local/state/readall/progress-v1")))
+        Ok(Self::new(environment_root()?))
     }
 
     fn path_for(&self, id: DocumentId) -> PathBuf {
@@ -46,48 +32,10 @@ impl ProgressStore {
     }
 
     pub(crate) fn load(&self, document: &TextDocument) -> io::Result<Option<TextLocator>> {
-        let path = self.path_for(document.id());
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
+        let Some(raw) = read_locator(&self.path_for(document.id()), "readall-progress-v1")? else {
+            return Ok(None);
         };
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "reading progress is not a regular file",
-            ));
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_PROGRESS_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_PROGRESS_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "reading progress exceeds the size limit",
-            ));
-        }
-        let text = std::str::from_utf8(&bytes).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "reading progress is not UTF-8")
-        })?;
-        let text = text.strip_suffix('\n').unwrap_or(text);
-        let mut lines = text.lines();
-        if lines.next() != Some("readall-progress-v1") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unknown reading progress version",
-            ));
-        }
-        let locator = lines
-            .next()
-            .and_then(|line| line.strip_prefix("locator="))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing reading locator"))?;
-        if lines.next().is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected reading progress fields",
-            ));
-        }
-        let locator: TextLocator = locator
+        let locator: TextLocator = raw
             .parse()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         document
@@ -97,36 +45,157 @@ impl ProgressStore {
     }
 
     pub(crate) fn save(&self, locator: &TextLocator) -> io::Result<()> {
-        fs::create_dir_all(&self.root)?;
-        if !self.root.metadata()?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "reading progress root is not a directory",
-            ));
-        }
         let target = self.path_for(locator.document_id);
-        let temp = self.root.join(format!(
-            ".{}.{}.{}.tmp",
-            locator.document_id,
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            write!(file, "readall-progress-v1\nlocator={locator}\n")?;
-            file.sync_all()?;
-            fs::rename(&temp, &target)?;
-            sync_directory(&self.root)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temp);
-        }
-        result
+        write_locator(
+            &self.root,
+            &target,
+            &locator.document_id.to_string(),
+            "readall-progress-v1",
+            &locator.to_string(),
+        )
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EpubProgressStore {
+    root: PathBuf,
+}
+
+impl EpubProgressStore {
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub(crate) fn from_environment() -> io::Result<Self> {
+        Ok(Self::new(environment_root()?))
+    }
+
+    fn path_for(&self, id: DocumentId) -> PathBuf {
+        self.root.join(format!("epub-{id}.state"))
+    }
+
+    pub(crate) fn load(&self, book: &EpubBook<'_>) -> io::Result<Option<EpubLocator>> {
+        let Some(raw) = read_locator(&self.path_for(book.id()), "readall-epub-progress-v1")? else {
+            return Ok(None);
+        };
+        let locator: EpubLocator = raw
+            .parse()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        book.restore(&locator)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(Some(locator))
+    }
+
+    pub(crate) fn save(&self, locator: &EpubLocator) -> io::Result<()> {
+        let target = self.path_for(locator.book_id());
+        write_locator(
+            &self.root,
+            &target,
+            &format!("epub-{}", locator.book_id()),
+            "readall-epub-progress-v1",
+            &locator.to_string(),
+        )
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+fn environment_root() -> io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return Ok(path.join("readall/progress-v1"));
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "neither absolute XDG_STATE_HOME nor HOME is available",
+            )
+        })?;
+    Ok(home.join(".local/state/readall/progress-v1"))
+}
+
+fn read_locator(path: &Path, version: &str) -> io::Result<Option<String>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reading progress is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PROGRESS_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PROGRESS_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reading progress exceeds the size limit",
+        ));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "reading progress is not UTF-8"))?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next() != Some(version) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown reading progress version",
+        ));
+    }
+    let locator = lines
+        .next()
+        .and_then(|line| line.strip_prefix("locator="))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing reading locator"))?;
+    if lines.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected reading progress fields",
+        ));
+    }
+    Ok(Some(locator.to_owned()))
+}
+
+fn write_locator(
+    root: &Path,
+    target: &Path,
+    temp_key: &str,
+    version: &str,
+    locator: &str,
+) -> io::Result<()> {
+    fs::create_dir_all(root)?;
+    if !root.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reading progress root is not a directory",
+        ));
+    }
+    let temp = root.join(format!(
+        ".{temp_key}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        write!(file, "{version}\nlocator={locator}\n")?;
+        file.sync_all()?;
+        fs::rename(&temp, target)?;
+        sync_directory(root)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -136,7 +205,9 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_epub;
     use readall_core::Limits;
+    use readall_epub::EpubLimits;
 
     struct Temp(PathBuf);
     impl Temp {
@@ -203,6 +274,18 @@ mod tests {
             store.load(&document).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn epub_progress_roundtrips_stable_locator() {
+        let temp = Temp::new();
+        let store = EpubProgressStore::new(temp.0.join("state"));
+        let bytes = test_epub::make_epub();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        assert!(store.load(&book).unwrap().is_none());
+        let locator = book.locator(1, 11).unwrap();
+        store.save(&locator).unwrap();
+        assert_eq!(store.load(&book).unwrap(), Some(locator));
     }
 
     #[test]

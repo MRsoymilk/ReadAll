@@ -13,6 +13,7 @@ mod enabled {
     use super::*;
     use crate::{
         epub_session::{Action as ReaderAction, EpubSession, Start},
+        progress::EpubProgressStore,
         text_page::Options,
     };
     use readall_core::read_bounded;
@@ -27,6 +28,18 @@ mod enabled {
 
     struct ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
         session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
+        progress: Option<EpubProgressStore>,
+    }
+
+    impl ReaderWindow<'_, '_, '_, '_> {
+        fn save_progress(&self) {
+            let Some(store) = &self.progress else {
+                return;
+            };
+            if let Err(error) = store.save(self.session.anchor()) {
+                eprintln!("ReadAll: cannot save EPUB reading progress: {error}");
+            }
+        }
     }
 
     impl WindowHandler for ReaderWindow<'_, '_, '_, '_> {
@@ -45,7 +58,12 @@ mod enabled {
                 Action::Close => return Ok(false),
             };
             match EpubSession::action(&mut self.session, action) {
-                Ok(changed) => Ok(changed),
+                Ok(changed) => {
+                    if changed {
+                        self.save_progress();
+                    }
+                    Ok(changed)
+                }
                 Err(error) => {
                     eprintln!("ReadAll: keeping current EPUB page: {error}");
                     Ok(false)
@@ -74,6 +92,9 @@ mod enabled {
         let mut page_args = Vec::new();
         let mut spine = None;
         let mut locator: Option<EpubLocator> = None;
+        let mut state_dir = None;
+        let mut progress_enabled = true;
+        let mut progress_seen = false;
         for pair in args[1..].chunks_exact(2) {
             match pair[0].to_str() {
                 Some("--display") => {
@@ -106,11 +127,31 @@ mod enabled {
                     }
                     locator = Some(pair[1].to_str().ok_or("locator must be UTF-8")?.parse()?);
                 }
+                Some("--state-dir") => {
+                    if state_dir.is_some() {
+                        return Err("duplicate --state-dir".into());
+                    }
+                    state_dir = Some(PathBuf::from(&pair[1]));
+                }
+                Some("--progress") => {
+                    if progress_seen {
+                        return Err("duplicate --progress".into());
+                    }
+                    progress_seen = true;
+                    progress_enabled = match pair[1].to_str() {
+                        Some("on") => true,
+                        Some("off") => false,
+                        _ => return Err("--progress expects on or off".into()),
+                    };
+                }
                 _ => page_args.extend_from_slice(pair),
             }
         }
         if spine.is_some() && locator.is_some() {
             return Err("--spine and EPUB --at cannot be combined".into());
+        }
+        if !progress_enabled && state_dir.is_some() {
+            return Err("--state-dir cannot be used with --progress off".into());
         }
 
         let options = Options::parse(&page_args)?;
@@ -124,6 +165,42 @@ mod enabled {
             epub_limits.zip.max_archive_bytes,
         )?;
         let book = EpubBook::parse(&epub_bytes, epub_limits)?;
+        let explicit_position = spine.is_some() || locator.is_some() || options.page.is_some();
+        let progress = if progress_enabled {
+            match state_dir
+                .map(EpubProgressStore::new)
+                .map(Ok)
+                .unwrap_or_else(EpubProgressStore::from_environment)
+            {
+                Ok(store) => Some(store),
+                Err(error) => {
+                    writeln!(
+                        output,
+                        "EPUB reading progress disabled for this session: {error}"
+                    )?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if !explicit_position {
+            if let Some(store) = &progress {
+                match store.load(&book) {
+                    Ok(Some(saved)) => {
+                        writeln!(output, "Restored EPUB locator: {saved}")?;
+                        locator = Some(saved);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        writeln!(
+                            output,
+                            "Ignoring invalid EPUB reading progress and starting normally: {error}"
+                        )?;
+                    }
+                }
+            }
+        }
 
         let font_limits = FontLimits::default();
         let font_bytes = read_bounded(
@@ -140,15 +217,16 @@ mod enabled {
             Start::Beginning
         };
         let session = EpubSession::new(&book, &font, options, start)?;
-        let mut reader = ReaderWindow { session };
+        let mut reader = ReaderWindow { session, progress };
 
         writeln!(
             output,
-            "Native Wayland EPUB reader (XHTML text subset)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc closes.\nPage navigation crosses linear spine boundaries. CSS, images, shaping and font fallback are not rendered yet."
+            "Native Wayland EPUB reader (XHTML text subset)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc closes.\nPage navigation crosses linear spine boundaries. Reading position is saved with epub-v1 locator when progress storage is available.\nCSS, images, shaping and font fallback are not rendered yet."
         )?;
         output.flush()?;
 
         let report: WindowReport = window::run(&mut reader, window)?;
+        reader.save_progress();
         writeln!(
             output,
             "Closed. Buffer commits: {}; last size: {}x{}\nEPUB locator: {}",
