@@ -43,6 +43,23 @@ pub fn make_epub() -> Vec<u8> {
 }
 
 #[allow(dead_code)]
+pub fn make_epub_with_long_title() -> Vec<u8> {
+    let chapter = format!(
+        "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
+        "AAAA WWWW ".repeat(80)
+    );
+    build_epub_named(
+        "A Very Long ReadAll Test Book Title That Must Scroll Horizontally Across The Header",
+        vec![(
+            "one",
+            "one.xhtml",
+            "application/xhtml+xml",
+            chapter.into_bytes(),
+        )],
+    )
+}
+
+#[allow(dead_code)]
 pub fn make_epub_with_empty_spines() -> Vec<u8> {
     let chapter_one = format!(
         "<html><body><h1>AAAA</h1><p>{}</p></body></html>",
@@ -89,10 +106,14 @@ pub fn make_epub_with_empty_spines() -> Vec<u8> {
 }
 
 fn build_epub(spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Vec<u8> {
+    build_epub_named("ReadAll Test", spines)
+}
+
+fn build_epub_named(title: &str, spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Vec<u8> {
     const CONTAINER: &[u8] = br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
 
-    let mut package = String::from(
-        r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>ReadAll Test</dc:title></metadata><manifest>"#,
+    let mut package = format!(
+        r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>{title}</dc:title></metadata><manifest>"#,
     );
     for (id, href, media_type, _) in &spines {
         package.push_str(&format!(

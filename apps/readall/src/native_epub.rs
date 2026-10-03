@@ -28,7 +28,10 @@ mod enabled {
         window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
     };
     use readall_render::{Color, DrawCommand, Rect, Surface};
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ToolbarMode {
@@ -55,6 +58,8 @@ mod enabled {
         toc_scroll: usize,
         toolbar: ToolbarMode,
         pointer: Option<(i32, i32)>,
+        title_scroll: u32,
+        title_marquee_span: u32,
         close_requested: bool,
     }
 
@@ -86,6 +91,8 @@ mod enabled {
                 toc_scroll: 0,
                 toolbar: ToolbarMode::Expanded,
                 pointer: None,
+                title_scroll: 0,
+                title_marquee_span: 0,
                 close_requested: false,
             };
             reader.keep_toc_selected_visible();
@@ -219,11 +226,31 @@ mod enabled {
             );
             {
                 let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-                let title = text.fit(14, self.session.book_title(), width.saturating_sub(320))?;
-                text.draw(16, 8, 14, &title, ink)?;
                 let status_width = text.measure(12, &status)?;
                 let status_x = width.saturating_sub(status_width.saturating_add(16)) as i32;
                 text.draw(status_x, 9, 12, &status, muted)?;
+
+                let title_clip_end = status_x.saturating_sub(14).max(16);
+                let title_clip = Rect::new(16, 4, (title_clip_end - 16).max(0) as u32, 24);
+                let title = self.session.book_title();
+                let measured = text.measure(14, title)?;
+                if title_clip.width == 0 || measured <= title_clip.width {
+                    self.title_scroll = 0;
+                    self.title_marquee_span = 0;
+                    if title_clip.width != 0 {
+                        text.draw_clipped(16, 8, 14, title, ink, title_clip)?;
+                    }
+                } else {
+                    let span = measured.saturating_add(48).max(1);
+                    self.title_marquee_span = span;
+                    self.title_scroll %= span;
+                    let first_x = 16_i32.saturating_sub(self.title_scroll as i32);
+                    text.draw_clipped(first_x, 8, 14, title, ink, title_clip)?;
+                    let second_x = first_x.saturating_add(span as i32);
+                    if second_x < title_clip.x.saturating_add(title_clip.width as i32) {
+                        text.draw_clipped(second_x, 8, 14, title, ink, title_clip)?;
+                    }
+                }
             }
 
             let track_w = width.saturating_sub(32);
@@ -704,6 +731,19 @@ mod enabled {
             self.session.title()
         }
 
+        fn animation_interval(&self) -> Option<Duration> {
+            (self.title_marquee_span != 0).then_some(Duration::from_millis(40))
+        }
+
+        fn animation_tick(&mut self) -> WindowResult<bool> {
+            if self.title_marquee_span == 0 {
+                return Ok(false);
+            }
+            self.title_scroll = (self.title_scroll + 1) % self.title_marquee_span;
+            self.refresh_surface()?;
+            Ok(true)
+        }
+
         fn close_requested(&self) -> bool {
             self.close_requested
         }
@@ -969,6 +1009,27 @@ mod enabled {
             assert!(smaller.x + smaller.width as i32 <= larger.x);
             assert!(previous.x + (previous.width as i32) < smaller.x);
             assert!(larger.x + (larger.width as i32) < next.x);
+        }
+
+        #[test]
+        fn long_title_enables_marquee_and_animation_ticks_move_it() {
+            let epub_bytes = test_epub::make_epub_with_long_title();
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui_font =
+                UiFont::from_bytes(font_bytes.clone(), PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui_font).unwrap();
+
+            assert!(reader.title_marquee_span > 0);
+            assert_eq!(reader.animation_interval(), Some(Duration::from_millis(40)));
+            let before = reader.title_scroll;
+            assert!(reader.animation_tick().unwrap());
+            assert_eq!(
+                reader.title_scroll,
+                (before + 1) % reader.title_marquee_span
+            );
         }
 
         #[test]

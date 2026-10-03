@@ -1,6 +1,6 @@
 //! Small safe boundary between the reader and native presentation.
 use readall_render::Surface;
-use std::{error::Error, path::PathBuf};
+use std::{error::Error, path::PathBuf, time::Duration};
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 use {
     readall_render::Color,
@@ -40,6 +40,12 @@ pub trait WindowHandler {
     fn action(&mut self, action: Action) -> WindowResult<bool>;
     fn surface(&self) -> &Surface;
     fn title(&self) -> String;
+    fn animation_interval(&self) -> Option<Duration> {
+        None
+    }
+    fn animation_tick(&mut self) -> WindowResult<bool> {
+        Ok(false)
+    }
     fn close_requested(&self) -> bool {
         false
     }

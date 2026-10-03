@@ -110,13 +110,32 @@ impl<'font, 'surface> UiPainter<'font, 'surface> {
         text: &str,
         color: Color,
     ) -> UiResult<u32> {
+        self.draw_clipped(
+            x,
+            y,
+            size,
+            text,
+            color,
+            Rect::new(0, 0, self.surface.width(), self.surface.height()),
+        )
+    }
+
+    pub(crate) fn draw_clipped(
+        &mut self,
+        x: i32,
+        y: i32,
+        size: u32,
+        text: &str,
+        color: Color,
+        clip: Rect,
+    ) -> UiResult<u32> {
         if !(8..=96).contains(&size) {
             return Err("UI font size must be 8..96".into());
         }
         let scale = size as f32 / f32::from(self.font.metrics().units_per_em);
         let ascender = f32::from(self.font.metrics().ascender) * scale;
         let baseline_y = (y as f32 + ascender).round() as i32;
-        let clip = Rect::new(0, 0, self.surface.width(), self.surface.height());
+        let clip = clip.intersection(Rect::new(0, 0, self.surface.width(), self.surface.height()));
         let mut cursor = x as f32;
 
         for ch in text.chars() {

@@ -318,6 +318,60 @@ fn real_client_library_completes_initial_configure_and_buffer_commit() {
     assert_eq!(observed.sizes, [(320, 300)]);
     assert!(observed.pong);
 }
+struct AnimatedHandler {
+    inner: Handler,
+    ticks: usize,
+}
+impl WindowHandler for AnimatedHandler {
+    fn resize(&mut self, w: u32, h: u32) -> WindowResult<bool> {
+        self.inner.resize(w, h)
+    }
+    fn action(&mut self, action: Action) -> WindowResult<bool> {
+        self.inner.action(action)
+    }
+    fn surface(&self) -> &Surface {
+        self.inner.surface()
+    }
+    fn title(&self) -> String {
+        "ReadAll animation test".into()
+    }
+    fn animation_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(1))
+    }
+    fn animation_tick(&mut self) -> WindowResult<bool> {
+        self.ticks += 1;
+        self.inner.surface.draw(&[DrawCommand::FillRect {
+            rect: Rect::new((self.ticks % 10) as i32, 0, 1, 1),
+            color: Color::WHITE,
+        }])?;
+        Ok(true)
+    }
+}
+
+#[test]
+fn animation_ticks_produce_frames_without_input_events() {
+    let temp = Temp::new();
+    let socket = temp.0.join("display");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let thread = thread::spawn(move || serve(listener, false));
+    let mut handler = AnimatedHandler {
+        inner: Handler::new(),
+        ticks: 0,
+    };
+    let report = run(
+        &mut handler,
+        WindowOptions {
+            display: Some(socket),
+            close_after_frames: Some(2),
+        },
+    )
+    .unwrap();
+    let observed = thread.join().unwrap();
+    assert_eq!(report.committed_frames, 2);
+    assert!(handler.ticks >= 1);
+    assert_eq!(observed.frames, 2);
+}
+
 #[test]
 fn keyboard_resize_ack_and_buffer_release_work_on_the_wire() {
     let temp = Temp::new();

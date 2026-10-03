@@ -434,7 +434,7 @@ impl Connection {
             if start.elapsed() > Duration::from_secs(10) {
                 return Err("Wayland initialization timed out".into());
             }
-            self.pump()?;
+            self.pump(1000)?;
         }
         Ok(())
     }
@@ -550,7 +550,7 @@ impl Connection {
         }
         Ok(())
     }
-    fn pump(&mut self) -> WindowResult<()> {
+    fn pump(&mut self, timeout_ms: i32) -> WindowResult<()> {
         // SAFETY: prepare/read/cancel are balanced on every path. Poll does not
         // dispatch callbacks. No Rust state borrow exists across dispatch_pending.
         unsafe {
@@ -573,7 +573,7 @@ impl Connection {
                 events: flags,
                 revents: 0,
             };
-            let result = poll(&mut fd, 1, 1000);
+            let result = poll(&mut fd, 1, timeout_ms.clamp(0, 1000));
             if result < 0 {
                 let error = io::Error::last_os_error();
                 wl_display_cancel_read(self.display);
@@ -744,6 +744,7 @@ pub(super) fn run(
     let start = Instant::now();
     let mut report = WindowReport::default();
     let mut finishing = false;
+    let mut last_animation = Instant::now();
     loop {
         // SAFETY: state is only borrowed between (not during) dispatch calls.
         let (closed, configured, dirty, width, height, synced, xrgb) = unsafe {
@@ -789,6 +790,12 @@ pub(super) fn run(
                     return Ok(report);
                 }
             }
+            if let Some(interval) = handler.animation_interval()
+                && last_animation.elapsed() >= interval
+            {
+                changed |= handler.animation_tick()?;
+                last_animation = Instant::now();
+            }
             unsafe {
                 (*connection.state).dirty |= changed;
             }
@@ -805,7 +812,15 @@ pub(super) fn run(
                 }
             }
         }
-        connection.pump()?;
+        let timeout_ms = if configured && !finishing {
+            handler.animation_interval().map_or(1000, |interval| {
+                let remaining = interval.saturating_sub(last_animation.elapsed());
+                remaining.as_millis().clamp(1, 1000) as i32
+            })
+        } else {
+            1000
+        };
+        connection.pump(timeout_ms)?;
     }
 }
 #[cfg(test)]
