@@ -8,12 +8,12 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
-当前外部 crate 依赖为零，仅使用 Rust 标准库和工作区内部 crate。启用 `wayland` 功能时，会链接系统 `libwayland-client` 处理窗口协议与文件描述符传输；字体解析、排版和像素绘制仍由 Rust 自研代码完成。默认不启用窗口，不链接该显示库。核心/字体/渲染模块继续禁止 unsafe；平台层默认 deny，仅私有 `wayland` 模块允许必要 FFI，原始指针不暴露给应用。操作系统、系统库和标准库不属于“零依赖”承诺。
+当前外部 crate 依赖为零，仅使用 Rust 标准库和工作区内部 crate。`readall` 应用默认启用 `wayland` feature，在 Linux 会链接系统 `libwayland-client` 处理窗口协议与文件描述符传输；字体解析、排版和像素绘制仍由 Rust 自研代码完成。如需纯命令行/无窗口构建，可显式使用 `--no-default-features`。核心/字体/渲染模块继续禁止 unsafe；平台层默认 deny，仅私有 `wayland` 模块允许必要 FFI，原始指针不暴露给应用。操作系统、系统库和标准库不属于“零依赖”承诺。
 
 ## 构建与运行
 
 ```sh
-cargo build --release --features wayland --offline
+cargo build --release --offline
 ./target/release/readall
 ./target/release/readall --help
 
@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Linux 使用 `--features wayland` 构建后，直接运行 `readall` 会启动自绘主窗口；只有 `readall --help` / `-h` 才打印命令行帮助。当前主窗口包含 EPUB/TXT 入口卡片和选择状态，系统文件选择器尚未接入，因此卡片暂时用于主界面导航展示，具体书籍仍可通过 `open` / `open-epub` 子命令打开。
+Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘主窗口，只有 `readall --help` / `-h` 才打印命令行帮助。`--features wayland` 是 Cargo 的编译参数，不是 `readall` 的运行参数。当前主窗口包含 EPUB/TXT 入口卡片和选择状态，系统文件选择器尚未接入，因此卡片暂时用于主界面导航展示，具体书籍仍可通过 `open` / `open-epub` 子命令打开。
 
 `read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
 

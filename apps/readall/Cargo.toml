@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["wayland"]
 wayland = ["readall-platform/wayland"]
 
 [dependencies]
