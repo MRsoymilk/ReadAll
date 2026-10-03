@@ -12,6 +12,7 @@ pub(crate) fn run(_: &[OsString], _: &mut impl Write) -> Result<()> {
 mod enabled {
     use super::*;
     use crate::{
+        diagnostics::{ResultContext, boxed_stage},
         epub_session::{Action as ReaderAction, EpubSession, Start, TocEntry},
         progress::EpubProgressStore,
         svg_icon::{
@@ -835,17 +836,19 @@ mod enabled {
             return Err("--state-dir cannot be used with --progress off".into());
         }
 
-        let options = Options::parse(&page_args)?;
+        let options = Options::parse(&page_args)
+            .map_err(|error| boxed_stage("parse reader options", error))?;
         if locator.is_some() && options.page.is_some() {
             return Err("EPUB --at and --page cannot be combined".into());
         }
 
         let epub_limits = EpubLimits::default();
-        let epub_bytes = read_bounded(
-            &mut LocalFileSource::open(PathBuf::from(&args[0]))?,
-            epub_limits.zip.max_archive_bytes,
-        )?;
-        let book = EpubBook::parse(&epub_bytes, epub_limits)?;
+        let epub_path = PathBuf::from(&args[0]);
+        let mut source = LocalFileSource::open(&epub_path).epub_stage("open EPUB file")?;
+        let epub_bytes = read_bounded(&mut source, epub_limits.zip.max_archive_bytes)
+            .epub_stage("read EPUB bytes")?;
+        let book =
+            EpubBook::parse(&epub_bytes, epub_limits).epub_stage("parse EPUB ZIP/container/OPF")?;
         let explicit_position = spine.is_some() || locator.is_some() || options.page.is_some();
         let progress = if progress_enabled {
             match state_dir
@@ -887,14 +890,14 @@ mod enabled {
         let font_bytes = if options.font == PathBuf::from(UiFont::builtin_label()) {
             builtin_font_bytes().to_vec()
         } else {
-            read_bounded(
-                &mut LocalFileSource::open(&options.font)?,
-                font_limits.max_file_bytes,
-            )?
+            let mut source = LocalFileSource::open(&options.font).epub_stage("open reader font")?;
+            read_bounded(&mut source, font_limits.max_file_bytes).epub_stage("read reader font")?
         };
         let ui_font =
-            UiFont::from_bytes_face(font_bytes.clone(), options.font.clone(), options.face)?;
-        let font = Font::parse(&font_bytes, options.face, font_limits)?;
+            UiFont::from_bytes_face(font_bytes.clone(), options.font.clone(), options.face)
+                .map_err(|error| boxed_stage("prepare UI font", error))?;
+        let font =
+            Font::parse(&font_bytes, options.face, font_limits).epub_stage("parse reader font")?;
 
         let start = if let Some(locator) = locator {
             Start::Locator(locator)
@@ -903,8 +906,10 @@ mod enabled {
         } else {
             Start::Beginning
         };
-        let session = EpubSession::new(&book, &font, options, start)?;
-        let mut reader = ReaderWindow::new(session, progress, ui_font)?;
+        let session = EpubSession::new(&book, &font, options, start)
+            .map_err(|error| boxed_stage("restore/select readable EPUB chapter", error))?;
+        let mut reader = ReaderWindow::new(session, progress, ui_font)
+            .map_err(|error| boxed_stage("build EPUB reader UI and TOC", error))?;
 
         writeln!(
             output,
@@ -912,7 +917,8 @@ mod enabled {
         )?;
         output.flush()?;
 
-        let report: WindowReport = window::run(&mut reader, window)?;
+        let report: WindowReport = window::run(&mut reader, window)
+            .map_err(|error| boxed_stage("run native reader window", error))?;
         reader.save_progress();
         writeln!(
             output,
@@ -1080,7 +1086,24 @@ mod enabled {
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
-    enabled::start(args, output)
+    let result = enabled::start(args, output);
+    if let Err(error) = &result
+        && let Some(path) = args.first().map(std::path::PathBuf::from)
+    {
+        match crate::diagnostics::log_epub_failure(&path, error.as_ref()) {
+            Ok(log) => {
+                let _ = writeln!(output, "错误日志: {}", log.display());
+            }
+            Err(log_error) => {
+                let _ = writeln!(
+                    output,
+                    "错误日志写入失败: {log_error}; 目标路径: {}",
+                    crate::diagnostics::diagnostic_path().display()
+                );
+            }
+        }
+    }
+    result
 }
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]

@@ -642,6 +642,14 @@ mod enabled {
             output.flush()?;
             if let Err(error) = crate::native_epub::open_path(&book, output) {
                 writeln!(output, "无法打开 EPUB: {error}")?;
+                match crate::diagnostics::log_epub_failure(&book, error.as_ref()) {
+                    Ok(path) => writeln!(output, "错误日志: {}", path.display())?,
+                    Err(log_error) => writeln!(
+                        output,
+                        "错误日志写入失败: {log_error}; 目标路径: {}",
+                        crate::diagnostics::diagnostic_path().display()
+                    )?,
+                }
                 output.flush()?;
             }
         }

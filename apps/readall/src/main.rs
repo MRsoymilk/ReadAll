@@ -1,4 +1,5 @@
 mod cli;
+mod diagnostics;
 mod epub_page;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod epub_session;
