@@ -34,7 +34,7 @@ ReadAll 当前自己处理：
   - Dynamic Huffman
 - CRC-32、路径安全和资源预算
 - `mimetype`
-- `META-INF/container.xml`
+- `META-INF/container.xml`，支持多个 `rootfile` 并按顺序选择第一个可解析 rendering
 - OPF metadata / manifest / spine
 - EPUB 3 Navigation Document：`properties="nav"` + `nav epub:type="toc"`
 - EPUB 2 NCX fallback：`spine toc` + `navMap/navPoint/navLabel/content`

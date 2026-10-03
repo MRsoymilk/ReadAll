@@ -240,27 +240,37 @@ impl<'a> EpubBook<'a> {
             .read("META-INF/container.xml")
             .map_err(|_| EpubError::Invalid("META-INF/container.xml is absent or unreadable"))?;
         ensure_xml_size(&container, limits.max_xml_bytes)?;
-        let package_path = parse_container(&container, limits.max_xml_bytes)?;
-        if archive.entry(&package_path).is_none() {
-            return Err(EpubError::Invalid(
-                "package document is absent from the archive",
-            ));
+        let package_paths = parse_container(&container, limits.max_xml_bytes)?;
+        let mut first_error = None;
+        for package_path in package_paths {
+            let parsed = (|| -> Result<ParsedPackage> {
+                if archive.entry(&package_path).is_none() {
+                    return Err(EpubError::Invalid(
+                        "package document is absent from the archive",
+                    ));
+                }
+                let package = archive.read(&package_path)?;
+                ensure_xml_size(&package, limits.max_xml_bytes)?;
+                parse_package(&package, &package_path, &archive, limits)
+            })();
+            match parsed {
+                Ok(parsed) => {
+                    return Ok(Self {
+                        id: DocumentId::of(bytes),
+                        archive,
+                        package_path,
+                        title: parsed.title,
+                        manifest: parsed.manifest,
+                        spine: parsed.spine,
+                        legacy_toc_manifest_index: parsed.legacy_toc_manifest_index,
+                        limits,
+                    });
+                }
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
         }
-
-        let package = archive.read(&package_path)?;
-        ensure_xml_size(&package, limits.max_xml_bytes)?;
-        let parsed = parse_package(&package, &package_path, &archive, limits)?;
-
-        Ok(Self {
-            id: DocumentId::of(bytes),
-            archive,
-            package_path,
-            title: parsed.title,
-            manifest: parsed.manifest,
-            spine: parsed.spine,
-            legacy_toc_manifest_index: parsed.legacy_toc_manifest_index,
-            limits,
-        })
+        Err(first_error.unwrap_or(EpubError::Invalid("EPUB package rootfile is absent")))
     }
 
     pub fn id(&self) -> DocumentId {
@@ -475,7 +485,7 @@ fn validate_mimetype(archive: &ZipArchive<'_>) -> Result<()> {
     Ok(())
 }
 
-fn parse_container(bytes: &[u8], max_xml_bytes: usize) -> Result<String> {
+fn parse_container(bytes: &[u8], max_xml_bytes: usize) -> Result<Vec<String>> {
     let events = xml::parse(bytes, xml_limits(max_xml_bytes))?;
     let first = events.iter().find_map(|event| match event {
         Event::Start(element) => Some(element),
@@ -485,7 +495,10 @@ fn parse_container(bytes: &[u8], max_xml_bytes: usize) -> Result<String> {
         return Err(EpubError::Invalid("container.xml root element"));
     }
 
-    let mut rootfile = None;
+    let mut rootfiles = Vec::new();
+    rootfiles
+        .try_reserve(4)
+        .map_err(|_| EpubError::AllocationFailed)?;
     for event in &events {
         let Event::Start(element) = event else {
             continue;
@@ -500,13 +513,22 @@ fn parse_container(bytes: &[u8], max_xml_bytes: usize) -> Result<String> {
             .attribute("full-path")
             .ok_or(EpubError::Invalid("rootfile is missing full-path"))?;
         let path = resolve_path("", path)?;
-        if rootfile.replace(path).is_some() {
-            return Err(EpubError::Unsupported(
-                "multiple package documents are not supported yet",
-            ));
+        if rootfiles.iter().any(|existing| existing == &path) {
+            continue;
         }
+        if rootfiles.len() >= 1024 {
+            return Err(EpubError::LimitExceeded("package rootfiles"));
+        }
+        rootfiles
+            .try_reserve(1)
+            .map_err(|_| EpubError::AllocationFailed)?;
+        rootfiles.push(path);
     }
-    rootfile.ok_or(EpubError::Invalid("EPUB package rootfile is absent"))
+    if rootfiles.is_empty() {
+        Err(EpubError::Invalid("EPUB package rootfile is absent"))
+    } else {
+        Ok(rootfiles)
+    }
 }
 
 fn parse_package(
@@ -1431,6 +1453,34 @@ mod tests {
         assert_eq!(locator.utf8_offset(), 2);
         assert_eq!(book.restore(&locator).unwrap(), (0, 2));
         assert_eq!(locator.to_string().parse::<EpubLocator>().unwrap(), locator);
+    }
+
+    #[test]
+    fn multiple_rootfiles_select_the_first_supported_rendering() {
+        const CONTAINER: &[u8] = br#"<container><rootfiles><rootfile full-path="missing.opf" media-type="application/oebps-package+xml"/><rootfile full-path="alt/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        const PACKAGE: &[u8] = br#"<package><metadata><title>Alternate Rendering</title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#;
+        let bytes = epub(&[
+            Entry {
+                name: "mimetype",
+                data: b"application/epub+zip",
+            },
+            Entry {
+                name: "META-INF/container.xml",
+                data: CONTAINER,
+            },
+            Entry {
+                name: "alt/package.opf",
+                data: PACKAGE,
+            },
+            Entry {
+                name: "alt/chapter.xhtml",
+                data: b"<html><body>Alternate body</body></html>",
+            },
+        ]);
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        assert_eq!(book.package_path(), "alt/package.opf");
+        assert_eq!(book.title(), Some("Alternate Rendering"));
+        assert_eq!(book.read_spine_text(0).unwrap(), "Alternate body");
     }
 
     #[test]
