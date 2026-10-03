@@ -15,7 +15,7 @@ mod enabled {
         epub_session::{Action as ReaderAction, EpubSession, Start},
         progress::EpubProgressStore,
         text_page::Options,
-        ui::{UiFont, UiPainter},
+        ui::{UiFont, UiPainter, builtin_font_bytes},
     };
     use readall_core::read_bounded;
     use readall_epub::{EpubBook, EpubLimits, EpubLocator};
@@ -182,29 +182,11 @@ mod enabled {
     }
 
     pub(super) fn open_path(path: &Path, output: &mut impl Write) -> Result<()> {
-        let epub_limits = EpubLimits::default();
-        let epub_bytes = read_bounded(
-            &mut LocalFileSource::open(path)?,
-            epub_limits.zip.max_archive_bytes,
-        )?;
-        let book = EpubBook::parse(&epub_bytes, epub_limits)?;
-        let mut sample = String::new();
-        for (index, spine) in book.spine().iter().enumerate() {
-            if !spine.linear() || sample.chars().count() >= 4096 {
-                continue;
-            }
-            if let Ok(text) = book.read_spine_text(index) {
-                for ch in text.chars().take(4096 - sample.chars().count()) {
-                    sample.push(ch);
-                }
-            }
-        }
-        let font = crate::font_select::find_for_text(&sample)?;
-        writeln!(output, "Selected GUI font: {:?}", font)?;
+        writeln!(output, "使用内置字体: {}", UiFont::builtin_file_name())?;
         let args = vec![
             path.as_os_str().to_owned(),
             OsString::from("--font"),
-            font.into_os_string(),
+            OsString::from(UiFont::builtin_label()),
             OsString::from("--missing"),
             OsString::from("replacement"),
         ];
@@ -334,10 +316,14 @@ mod enabled {
         }
 
         let font_limits = FontLimits::default();
-        let font_bytes = read_bounded(
-            &mut LocalFileSource::open(&options.font)?,
-            font_limits.max_file_bytes,
-        )?;
+        let font_bytes = if options.font == PathBuf::from(UiFont::builtin_label()) {
+            builtin_font_bytes().to_vec()
+        } else {
+            read_bounded(
+                &mut LocalFileSource::open(&options.font)?,
+                font_limits.max_file_bytes,
+            )?
+        };
         let ui_font =
             UiFont::from_bytes_face(font_bytes.clone(), options.font.clone(), options.face)?;
         let font = Font::parse(&font_bytes, options.face, font_limits)?;

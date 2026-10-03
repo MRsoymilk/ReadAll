@@ -1,5 +1,4 @@
 //! Dependency-free native UI text drawn through ReadAll's own TrueType rasterizer.
-use crate::font_select;
 use readall_core::read_bounded;
 use readall_font::{Font, FontLimits};
 use readall_platform::LocalFileSource;
@@ -16,8 +15,13 @@ use std::{
 
 pub(crate) type UiResult<T> = Result<T, Box<dyn Error>>;
 
-const UI_SAMPLE: &str =
-    "ReadAll 阅读器 书库 打开图书 返回 上一级 当前阅读 章节 页码 字号 目录 最近阅读 设置 EPUB TXT";
+const BUILTIN_FONT_FILE: &str = "LXGWWenKaiLite-Regular.ttf";
+const BUILTIN_FONT_LABEL: &str = "<built-in>/LXGWWenKaiLite-Regular.ttf";
+
+#[cfg(feature = "wayland")]
+pub(crate) fn builtin_font_bytes() -> &'static [u8] {
+    include_bytes!(concat!(env!("OUT_DIR"), "/LXGWWenKaiLite-Regular.ttf"))
+}
 
 struct CachedGlyph {
     advance: f32,
@@ -33,8 +37,19 @@ pub(crate) struct UiFont {
 
 impl UiFont {
     pub(crate) fn system() -> UiResult<Self> {
-        let path = font_select::find_for_text(UI_SAMPLE)?;
-        Self::load(path)
+        if let Some(path) = std::env::var_os("READALL_UI_FONT").map(PathBuf::from) {
+            return Self::load(path);
+        }
+        #[cfg(feature = "wayland")]
+        {
+            return Self::from_bytes_face(
+                builtin_font_bytes().to_vec(),
+                PathBuf::from(BUILTIN_FONT_LABEL),
+                0,
+            );
+        }
+        #[cfg(not(feature = "wayland"))]
+        Err("built-in GUI font is available only in GUI builds".into())
     }
 
     pub(crate) fn load(path: PathBuf) -> UiResult<Self> {
@@ -61,6 +76,14 @@ impl UiFont {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn builtin_label() -> &'static str {
+        BUILTIN_FONT_LABEL
+    }
+
+    pub(crate) fn builtin_file_name() -> &'static str {
+        BUILTIN_FONT_FILE
     }
 }
 

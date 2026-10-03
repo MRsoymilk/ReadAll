@@ -8,14 +8,15 @@ Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文�
 
 已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
 
-当前外部 crate 依赖为零，仅使用 Rust 标准库和工作区内部 crate。`readall` 应用默认启用 `wayland` feature，在 Linux 会链接系统 `libwayland-client` 处理窗口协议与文件描述符传输；字体解析、排版和像素绘制仍由 Rust 自研代码完成。如需纯命令行/无窗口构建，可显式使用 `--no-default-features`。核心/字体/渲染模块继续禁止 unsafe；平台层默认 deny，仅私有 `wayland` 模块允许必要 FFI，原始指针不暴露给应用。操作系统、系统库和标准库不属于“零依赖”承诺。
+当前外部 crate 依赖为零，仅使用 Rust 标准库和工作区内部 crate。GUI 发布二进制内置 `LXGW WenKai Lite Regular` 中文字体；字体文件采用 SIL Open Font License 1.1，许可证保存在 `licenses/LXGW_WenKai_Lite_OFL.txt`，也可运行 `readall licenses` 查看。`readall` 应用默认启用 `wayland` feature，在 Linux 会链接系统 `libwayland-client` 处理窗口协议与文件描述符传输；字体解析、排版和像素绘制仍由 Rust 自研代码完成。如需纯命令行/无窗口构建，可显式使用 `--no-default-features`。核心/字体/渲染模块继续禁止 unsafe；平台层默认 deny，仅私有 `wayland` 模块允许必要 FFI，原始指针不暴露给应用。操作系统、系统库和标准库不属于“零依赖”承诺。
 
 ## 构建与运行
 
 ```sh
-cargo build --release --offline
+cargo build --release
 ./target/release/readall
 ./target/release/readall --help
+./target/release/readall licenses
 
 cargo test --workspace --offline
 cargo run -p readall --offline -- inspect tests/fixtures/sample.txt
@@ -25,7 +26,7 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击“打开图书”或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部“返回”回到上级。GUI 已移除 5×7 像素字库，书库、文件名、路径、状态栏和阅读栏统一使用项目自己的 TrueType 轮廓解析与抗锯齿光栅化，因此中文文件名不再替换成 `?`。`--features wayland` 是 Cargo 编译参数，不是运行参数。
+Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击“打开图书”或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部“返回”回到上级。GUI 已移除 5×7 像素字库，书库、中文文件名、路径、状态栏、阅读栏和默认 EPUB 正文统一使用**内置中文 TrueType 字体**与项目自己的抗锯齿光栅化；最终用户不需要安装或下载字体。`READALL_UI_FONT=/path/font.ttf` 仅保留为开发覆盖项。
 
 `read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
 
@@ -80,7 +81,7 @@ cargo run -p readall-font --example inspect --offline -- --discover
 cargo run -p readall-font --example inspect --offline -- /usr/share/fonts/dejavu/DejaVuSans.ttf
 ```
 
-上面的实际字体路径取决于系统安装情况；缺字显示 `MISSING`，不把 .notdef 当作该字符已受支持。GUI 和自动 EPUB 字体选择会把汉字覆盖作为硬条件：如果需要中文却找不到当前引擎可解析的中文 TTF/TTC，会明确报错，而不是错误选择符号字体。可用 `READALL_UI_FONT=/绝对路径/字体.ttf` 显式指定字体。开发诊断可用 `--discover-cjk` 查找常见 CJK 字体命名。
+上面的实际字体路径只用于字体引擎开发诊断；GUI 不再依赖系统中文字体。默认内置字体固定为 `LXGW WenKai Lite Regular`，构建脚本锁定上游提交 `4cddacbe244b0a24b10076369105f0495e5ec898`，下载后会校验字节大小、TrueType 结构和关键中英文字形，再通过 `include_bytes!` 编入二进制。开发诊断仍可用 `--discover-cjk` 查找系统 CJK 字体。
 
 ## 真实字体 TXT 页面导出
 
@@ -105,7 +106,7 @@ cargo run -p readall --features wayland --offline -- open tests/fixtures/sample_
 cargo run -p readall --features wayland --offline -- open-epub /path/to/book.epub --font /path/to/font.ttf
 ```
 
-默认 GUI 打开 EPUB 时会对若干线性章节采样字符，在系统字体目录中有界扫描当前自研引擎可解析的 TTF/TTC；若文本包含汉字，候选字体必须实际提供汉字 glyph，并优先选择覆盖更完整的字体。阅读页顶部使用真实字体显示书名、章节/页码和字号，底部显示中文操作提示与整书进度条。左右半区点击、竖向滚轮、PageUp/PageDown/方向键/Space 翻页，`+/-` 调字号，Backspace 返回书库。命令行 `open-epub` 仍支持显式 `--font`、`--spine` 和 `--at epub-v1:...`。
+默认 GUI 打开 EPUB 时直接复用二进制内置的中文字体，不扫描系统字体。阅读页顶部使用该真实字体显示书名、章节/页码和字号，底部显示中文操作提示与整书进度条。左右半区点击、竖向滚轮、PageUp/PageDown/方向键/Space 翻页，`+/-` 调字号，Backspace 返回书库。命令行 `open-epub` 仍支持显式 `--font`、`--spine` 和 `--at epub-v1:...`。
 
 窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 与 EPUB 原生阅读都默认使用 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时使用 `$HOME/.local/state/readall/progress-v1`；TXT 保存 `TextLocator`，EPUB 保存绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator。成功翻页及正常关闭时用同目录临时文件 + rename 更新状态；显式 `--page`/`--spine`/`--at` 优先于自动恢复。两种窗口都可用 `--progress off` 禁用或 `--state-dir DIR` 指定状态目录。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
 
@@ -118,6 +119,8 @@ cargo test --workspace --features wayland --offline
 cargo clippy --workspace --all-targets --features wayland --offline -- -D warnings
 cargo run -p readall-platform --example probe --offline
 ```
+
+从源码进行**第一次干净 GUI 构建**时，`apps/readall/build.rs` 会自动获取固定提交的字体 TTF；这属于构建资源获取，发布后的 `readall` 二进制已包含字体，运行时不联网。源码打包器或完全离线构建可预先准备同一字体，并通过 `READALL_BUILTIN_FONT_SOURCE=/path/LXGWWenKaiLite-Regular.ttf` 指定本地来源。字体已经存在于 Cargo 的构建输出后，后续构建不会重复获取；因此首次推荐 `cargo build --release`，完全缓存后再使用 Cargo `--offline`。
 
 当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
 

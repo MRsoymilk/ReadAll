@@ -2,8 +2,6 @@ mod cli;
 mod epub_page;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod epub_session;
-#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
-mod font_select;
 mod home;
 mod native;
 mod native_epub;

@@ -24,12 +24,24 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFull EPUB styling, font shaping and PDF reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFull EPUB styling, font shaping and PDF reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
         )?;
         return Ok(());
     }
     let command = args[0].to_str().ok_or("command must be UTF-8")?;
+    if command == "licenses" {
+        if args.len() != 1 {
+            return Err("licenses takes no arguments".into());
+        }
+        writeln!(
+            output,
+            "ReadAll bundled font: LXGW WenKai Lite Regular\nSource commit: {}\n\n{}",
+            option_env!("READALL_BUILTIN_FONT_COMMIT").unwrap_or("not bundled in this build"),
+            include_str!("../../../licenses/LXGW_WenKai_Lite_OFL.txt")
+        )?;
+        return Ok(());
+    }
     if command == "open" {
         return crate::native::run(&args[1..], output);
     }
@@ -294,6 +306,16 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("inspect"));
         assert!(text.contains("Full EPUB styling"));
+    }
+
+    #[test]
+    fn bundled_font_license_is_user_visible() {
+        let mut output = Vec::new();
+        run(args(&["licenses"]), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("LXGW WenKai Lite Regular"));
+        assert!(text.contains("SIL OPEN FONT LICENSE Version 1.1"));
+        assert!(run(args(&["licenses", "extra"]), &mut Vec::new()).is_err());
     }
 
     #[test]

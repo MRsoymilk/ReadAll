@@ -3,10 +3,14 @@ name = "readall"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [features]
 default = ["wayland"]
 wayland = ["readall-platform/wayland"]
+
+[build-dependencies]
+readall-font.workspace = true
 
 [dependencies]
 readall-epub.workspace = true
