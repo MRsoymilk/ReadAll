@@ -7,6 +7,7 @@ name = "readall"
 version = "0.1.0"
 dependencies = [
  "readall-core",
+ "readall-font",
  "readall-platform",
  "readall-render",
 ]
@@ -29,3 +30,6 @@ dependencies = [
 [[package]]
 name = "readall-render"
 version = "0.1.0"
+dependencies = [
+ "readall-font",
+]

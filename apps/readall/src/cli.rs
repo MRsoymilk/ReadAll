@@ -19,12 +19,15 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if args.is_empty() || matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nDiagnostic CLI only. Native GUI, font shaping, PDF and EPUB reading are not implemented yet.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nDiagnostic CLI only. Native GUI, font shaping, PDF and EPUB reading are not implemented yet.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
         )?;
         return Ok(());
     }
     let command = args[0].to_str().ok_or("command must be UTF-8")?;
+    if command == "render-text" {
+        return crate::text_page::run(&args[1..], output);
+    }
     if !matches!(command, "inspect" | "read" | "render-demo") {
         return Err("unknown command; use --help".into());
     }

@@ -1,0 +1,15 @@
+ReadAll: from text to pixels
+
+This is an original rendering fixture for the ReadAll project.
+The page uses actual TrueType advances, not estimated character cells.
+Wide letters: WWWW MMMM. Narrow letters: iiii llll.
+Curves and counters: abcdefghijklmnopqrstuvwxyz 0123456789.
+Composite outlines: café, naïve, déjà vu. Greek: Ω α β.
+
+A page is a view of the document, not the identity of its content.
+Change the font size or page width and restore the saved text locator.
+The renderer should find the same passage under the new layout.
+
+Rasterization is implemented in Rust using quadratic outlines.
+This first renderer does not perform shaping, kerning, or word breaking.
+It is an engineering step toward a native reader, not a finished GUI.

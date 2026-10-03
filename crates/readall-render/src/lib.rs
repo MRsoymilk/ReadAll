@@ -1,5 +1,7 @@
-//! Dependency-free CPU drawing foundations; no fonts, paths, GPU, or window backend yet.
+//! Dependency-free CPU drawing and unhinted TrueType glyph rasterization; no GPU or window backend.
 //! Channels use straight-alpha, byte-space source-over compositing (not linear-light color management).
+
+pub mod glyph;
 
 use std::{
     fmt,
@@ -110,6 +112,7 @@ impl Default for RenderLimits {
 #[derive(Debug)]
 pub enum RenderError {
     InvalidDimensions,
+    InvalidGeometry(&'static str),
     BudgetExceeded(&'static str),
     InvalidClipStack,
     AllocationFailed,
@@ -120,6 +123,7 @@ impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDimensions => f.write_str("surface dimensions must be 1..16384"),
+            Self::InvalidGeometry(reason) => write!(f, "invalid geometry: {reason}"),
             Self::BudgetExceeded(what) => write!(f, "render budget exceeded: {what}"),
             Self::InvalidClipStack => f.write_str("unbalanced clip stack"),
             Self::AllocationFailed => f.write_str("cannot allocate rendering buffer"),

@@ -1,4 +1,5 @@
 mod cli;
+mod text_page;
 
 use std::{io, process::ExitCode};
 

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+readall-font.workspace = true
 readall-core.workspace = true
 readall-render.workspace = true
 readall-platform.workspace = true

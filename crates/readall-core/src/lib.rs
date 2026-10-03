@@ -2,6 +2,7 @@
 //! No windowing, filesystem paths, or third-party dependencies belong here.
 
 mod digest;
+pub mod layout;
 pub mod preview;
 pub mod source;
 pub mod text;
@@ -88,7 +89,7 @@ impl fmt::Display for Error {
                 write!(f, "unsupported control character U+{:04X}", u32::from(*ch))
             }
             Self::InvalidLocator(reason) => write!(f, "invalid text locator: {reason}"),
-            Self::InvalidLayout(reason) => write!(f, "invalid diagnostic layout: {reason}"),
+            Self::InvalidLayout(reason) => write!(f, "invalid layout: {reason}"),
         }
     }
 }
