@@ -1,0 +1,50 @@
+name: EPUB compatibility bug
+description: Report an EPUB that ReadAll cannot open or renders incorrectly.
+title: "[EPUB] "
+labels: ["epub", "compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先使用最新 main / release 复现。
+        如果 EPUB 打不开，请运行 `readall diagnostics` 并粘贴日志。
+        **不要上传你无权公开分发的整本电子书。**
+
+  - type: input
+    id: version
+    attributes:
+      label: ReadAll version / commit
+      placeholder: "v0.1.0 / b1ed54c"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Gentoo Linux + Hyprland / Windows 11 / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: 描述无法打开、章节缺失、文字错误或其他兼容问题。
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: readall diagnostics
+      description: 粘贴 `./readall diagnostics` 输出。可先检查并删除你不希望公开的本地路径。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: metadata
+    attributes:
+      label: Optional book metadata
+      description: 可提供书名、EPUB 版本、制作工具等非版权内容；不要上传受版权保护的完整图书。

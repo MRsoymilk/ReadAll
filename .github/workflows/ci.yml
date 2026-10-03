@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  READALL_SKIP_BUILTIN_FONT: "1"
+  READALL_BUILTIN_FONT_SOURCE: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev fonts-dejavu-core
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --workspace --offline
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --offline -- -D warnings
+
+      - name: Headless build
+        run: cargo check -p readall --no-default-features --offline

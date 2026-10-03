@@ -1,139 +1,267 @@
 # ReadAll
 
-Rust 自研电子书阅读器，目标平台为 Linux、Windows、Android。文档解析、排版、绘制和阅读交互由项目自身实现，不使用 WebView 或现成 PDF/EPUB 引擎。
+[![CI](https://github.com/MRsoymilk/ReadAll/actions/workflows/ci.yml/badge.svg)](https://github.com/MRsoymilk/ReadAll/actions/workflows/ci.yml)
 
-## 当前状态
+ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
-项目处于基础引擎阶段，**Linux Wayland 下零参数启动进入原生 ReadAll 书库界面，可在 GUI 内浏览目录、选择 `.epub` 并直接进入阅读，同时保留命令行、TXT/EPUB 页面渲染和原生阅读窗口**。窗口已通过编译、本地模拟合成器协议测试和无显示环境的真实 CLI 错误路径测试，尚未完成真实桌面目视验收；EPUB 当前只支持自研 XHTML 文本子集，CSS/图片等仍未渲染，PDF 尚未实现。不得把文件签名检测当作对应格式已经支持。
+> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/TXT；Windows、Android 和 PDF 仍在后续路线中。**
 
-已实现：有大小上限的文档输入、平台无关的随机读取接口、UTF-8/UTF-8 BOM/UTF-16 BOM 文本解码、换行规范化、原始文件 SHA-256 内容标识、可序列化且校验文档/字符边界的文本定位、诊断分页与重排定位、真实字宽驱动的基础分页、自研 TrueType 字形抗锯齿绘制、CPU 矩形绘制/嵌套裁剪/透明度合成。
+## v0.1.0 已实现
 
-当前外部 crate 依赖为零，仅使用 Rust 标准库和工作区内部 crate。GUI 发布二进制内置 `LXGW WenKai Lite Regular` 中文字体；字体文件采用 SIL Open Font License 1.1，许可证保存在 `licenses/LXGW_WenKai_Lite_OFL.txt`，也可运行 `readall licenses` 查看。`readall` 应用默认启用 `wayland` feature，在 Linux 会链接系统 `libwayland-client` 处理窗口协议与文件描述符传输；字体解析、排版和像素绘制仍由 Rust 自研代码完成。如需纯命令行/无窗口构建，可显式使用 `--no-default-features`。核心/字体/渲染模块继续禁止 unsafe；平台层默认 deny，仅私有 `wayland` 模块允许必要 FFI，原始指针不暴露给应用。操作系统、系统库和标准库不属于“零依赖”承诺。
+### 原生 Linux 阅读界面
 
-## 构建与运行
+- 零参数启动原生书库：`./readall`
+- 内置文件浏览器，可直接选择 `.epub`
+- 中文文件名、中文界面和中文正文
+- 内置 **LXGW WenKai Lite Regular / 霞鹜文楷轻便版**
+- 鼠标 hover 高亮，不需要先点击
+- 长书名自动横向滚动，不覆盖右侧章节/页码
+- 三层底部悬浮工具栏：
+  - 上一页 / 下一页
+  - 目录
+  - 字号减 / 字号加
+  - 展开 / 收起
+- Feather SVG 图标由 ReadAll 自己解析和抗锯齿绘制
+- EPUB 阅读进度自动保存和恢复
+- 窗口尺寸、字号变化后尽量保持同一内容位置
 
-```sh
+### EPUB
+
+ReadAll 当前自己处理：
+
+- ZIP 中央目录和本地文件头
+- Store / raw DEFLATE
+  - Stored block
+  - Fixed Huffman
+  - Dynamic Huffman
+- CRC-32、路径安全和资源预算
+- `mimetype`
+- `META-INF/container.xml`
+- OPF metadata / manifest / spine
+- XHTML 可见正文提取
+- 常见 HTML / XHTML DOCTYPE
+- 跨 spine 连续阅读
+- 自动跳过 SVG 封面、纯图片页、空 XHTML 和当前不可读 spine
+- 稳定内容定位：
+  `epub-v1:<book-sha256>:<spine>:<utf8-offset>`
+
+当前 EPUB **尚未完整渲染**：
+
+- CSS
+- 图片
+- SVG 正文
+- MathML
+- EPUB 内嵌字体
+- 正式 EPUB navigation/NCX 目录语义
+- DRM / 加密 EPUB
+- Fixed-layout EPUB
+
+当前目录面板来自可读 spine/章节文本，并不是完整 EPUB Navigation 实现。
+
+### TXT / 字体 / 渲染
+
+- UTF-8、UTF-8 BOM
+- UTF-16 LE/BE BOM
+- CRLF / CR → LF 规范化
+- SHA-256 内容身份
+- 稳定 `txt-v1` 内容 locator
+- 自研 TrueType/TTC 解析
+- `cmap` format 4 / 12
+- `hhea/hmtx` 字宽
+- `loca/glyf`
+- 简单字形、复合字形
+- 二次 Bézier 轮廓光栅化
+- 4×4 灰度抗锯齿
+- CPU RGBA surface、裁剪与 source-over
+- TXT/EPUB 页面导出诊断路径
+
+字体引擎目前不支持 CFF/CFF2、WOFF、可变字体、hinting、复杂文字 shaping、完整双向排版和真正的多字体 fallback。
+
+## 构建
+
+### 要求
+
+- Rust **1.85+**
+- Linux Wayland
+- 系统 `libwayland-client`
+
+Gentoo：
+
+```bash
+sudo emerge --ask dev-libs/wayland
+```
+
+Debian / Ubuntu：
+
+```bash
+sudo apt install libwayland-dev
+```
+
+### 编译
+
+```bash
+git clone https://github.com/MRsoymilk/ReadAll.git
+cd ReadAll
 cargo build --release
 ./target/release/readall
-./target/release/readall --help
-./target/release/readall licenses
-
-cargo test --workspace --offline
-cargo run -p readall --offline -- inspect tests/fixtures/sample.txt
-cargo run -p readall --offline -- read tests/fixtures/sample.txt --columns 40 --rows 8 --page 1
-cargo run -p readall --offline -- render-demo target/calibration.ppm
-cargo clippy --workspace --all-targets --offline -- -D warnings
-cargo fmt --all -- --check
 ```
 
-Linux 默认构建已经启用 Wayland；直接运行 `readall` 会启动自绘书库。点击“打开图书”或按 Enter 进入内置文件浏览器，浏览器从 `$HOME` 开始，只显示目录和 `.epub` 文件；点击目录继续进入，点击 EPUB 直接打开，Backspace 或顶部“返回”回到上级。鼠标进入“打开图书”卡片、返回按钮或文件列表行时会立即显示悬浮背景/强调色，不需要先点击；鼠标离开后恢复，键盘 selected 状态与 hover 独立。GUI 已移除 5×7 像素字库，书库、中文文件名、路径、状态栏、阅读栏和默认 EPUB 正文统一使用**内置中文 TrueType 字体**与项目自己的抗锯齿光栅化；最终用户不需要安装或下载字体。`READALL_UI_FONT=/path/font.ttf` 仅保留为开发覆盖项。
+首次从干净源码构建 GUI 时，构建脚本会获取固定版本的 LXGW WenKai Lite TTF，校验后通过 `include_bytes!` 嵌入二进制。**最终运行 ReadAll 不需要联网，也不要求用户安装中文字体。**
 
-`read` 的页码从 1 开始；输出 `Start locator` 可通过 `--at 'txt-v1:…'` 恢复到包含对应内容的页面，允许同时更改 `--columns`/`--rows`。`--page` 与 `--at` 互斥。`render-demo` 输出图形校准 PPM，不是电子书页面；为保护文件，目标已存在时拒绝覆盖。
+完全离线打包可预先准备同一字体：
 
-诊断分页按 ASCII 1 格、其他 Unicode 标量 2 格、Tab 4 格制表位估算宽度，仅验证源文本覆盖和位置映射。不等同于终端真实显示宽度，也不支持真实字体塑形、字素簇、双向排版、单词断行或完整 Unicode 规则。`render-text` 使用独立的真实字宽排版模块，不使用这个格数估算。
+```bash
+READALL_BUILTIN_FONT_SOURCE=/path/to/LXGWWenKaiLite-Regular.ttf \
+cargo build --release
+```
 
-Cargo 声明 Rust 1.85 / edition 2024 作为最低目标；这不是已经完成所有工具链与系统验证的声明。Linux、Windows 和 Android 实机验证分别推进，不把宿主机编译等同于三端验收。
+纯命令行 / 无 Wayland 构建：
 
-## 模块边界
+```bash
+cargo build -p readall --release --no-default-features
+```
 
-| 模块 | 职责 |
+## 使用
+
+直接启动书库：
+
+```bash
+./target/release/readall
+```
+
+常用阅读操作：
+
+| 操作 | 键盘 / 鼠标 |
 | --- | --- |
-| `readall-archive` | 自研受限 ZIP 与 raw DEFLATE（Stored/Fixed/Dynamic Huffman）、CRC-32、路径和资源预算检查 |
-| `readall-epub` | EPUB mimetype、container.xml、OPF metadata/manifest/spine、本地资源路径、XHTML 文本子集与稳定 epub-v1 locator；CSS/图片尚未渲染 |
-| `readall-core` | 文档输入约束、格式模型、文本解析、内容位置；不依赖文件路径或窗口对象 |
-| `readall-font` | 自研 TrueType/TTC 解析、Unicode 字形映射、真实字宽、简单及复合字形轮廓；不执行字体字节码 |
-| `readall-render` | 自研 RGBA 像素缓冲区、矩形裁剪与合成、二次曲线字形光栅化和灰度蒙版；无 GPU 或窗口呈现 |
-| `readall-platform` | 本地文件访问、安全窗口接口、可选 Wayland 输入/共享内存呈现；Android URI 尚未实现 |
-| `readall` | 默认原生主窗口、CLI、TXT/EPUB 页面编排、字形缓存、图片导出和原生阅读会话；失败时保留原页面与位置 |
+| 下一页 | PageDown / → / ↓ / Space / 页面右侧点击 |
+| 上一页 | PageUp / ← / ↑ / 页面左侧点击 |
+| 第一页 | Home |
+| 最后一页 | End |
+| 字号 | `+` / `-` 或底部工具栏 |
+| 目录 | 底部“目录” |
+| 返回书库 | Backspace |
+| 关闭 | Esc |
 
-矩形绘制模块限制像素数量、指令数量、裁剪深度和累计混合像素数；`draw` 先检查整份矩形/裁剪指令，再修改像素，失败不会留下部分绘制结果。字形绘制逐次检查蒙版与裁剪；页面导出在内存中完成整页后才创建目标文件，输入解析或绘制失败不会生成页面文件，但磁盘写入失败仍可能留下新建的部分文件。透明度为直通 Alpha 的字节空间 source-over 合成，不提供线性光或完整 PDF 色彩管理。诊断分页默认最多 200,000 行。
+CLI 帮助：
 
-文本读取默认限制原文件 32 MiB、解码后 64 MiB，调用方可配置。SHA-256 用于内容身份，不提供数字签名验证。读取能发现长度变化，但不承诺对正在修改的文件取得原子快照。
-
-文本位置格式为 `txt-v1:<原始文件SHA-256>:<规范化UTF-8字节偏移>`。v1 去除编码 BOM，将 CRLF/CR 规范化为 LF；偏移不是 UTF-16 文件的原始字节位置，也不是字符序号或页码。原文件内容改变后，旧位置拒绝恢复。原生阅读默认按文档内容 SHA-256 保存该 locator，而不是保存易受重排影响的页码。
-
-UTF-16 必须带 BOM；GBK 等旧编码和 UTF-32 尚未支持。无效编码、NUL/终端控制字符会报错，而不是有损替换。`ZIP` 签名只说明可能为 EPUB，尚不验证 ZIP/EPUB 结构。
-
-## EPUB 容器与包结构
-
-当前 EPUB 阶段没有使用 `zip`、`flate2`、XML/HTML 等第三方 crate。新增 `readall-archive` 自行解析 ZIP 中央目录和本地文件头，支持 Store 与 raw DEFLATE 的 Stored/Fixed/Dynamic Huffman block，并验证 CRC-32、大小预算、重复条目、越界/重叠范围和危险路径。初期明确拒绝 ZIP64、多磁盘、加密以及未支持的压缩方法，不把未知特性静默降级。
-
-`readall-epub` 在此基础上校验 EPUB 的首个未压缩 `mimetype`、`META-INF/container.xml`、package OPF、manifest 与 spine，并解析标题和本地资源引用。自研受限 XML 解析器支持命名空间名、实体、注释和 CDATA，同时拒绝 DTD、自定义实体、过深结构和资源超限。当前为了边界清晰，`META-INF/encryption.xml`、远程资源 URI、多 package rootfile 都直接报告未支持。现在也能读取 `application/xhtml+xml` spine 项的初始阅读子集：只提取 `body` 可见文本，保留常见块级/换行语义并规范化空白，忽略 `script/style/template` 内容；CSS、图片、SVG、MathML 尚未进入排版。
-
-可以对真实 EPUB 做结构检查：
-
-```sh
-cargo run -p readall --offline -- epub-info /path/to/book.epub
-cargo run -p readall --offline -- epub-text /path/to/book.epub --spine 1
-cargo run -p readall --offline -- render-epub /path/to/book.epub target/epub-page.ppm --spine 1 --font /path/to/font.ttf
+```bash
+./target/release/readall --help
 ```
 
-`epub-info` 只输出结构信息；`epub-text` 可检查指定 spine 的规范化正文。`render-epub` 是无窗口诊断导出，而默认 GUI 已可选择 EPUB、跨 `linear=yes` spine 连续翻页并自动保存进度。EPUB 使用独立的 `epub-v1:<整书SHA-256>:<零基spine>:<规范化UTF-8偏移>` locator；页面尺寸或字号变化后仍按内容位置恢复，并拒绝其他 EPUB 修订版的 locator。
+一些开发/诊断命令：
 
-## 字体引擎
-
-`readall-font` 已支持静态 TrueType sfnt 与 TTC 指定 face、Unicode `cmap` 4/12、`hhea/hmtx` 字宽、长短 `loca`、简单轮廓与复合轮廓（平移、缩放、矩阵变换和实际轮廓点对齐）。循环引用、截断数据、越界索引及超出深度/点数/组件预算会报错。解析格式参考 [OpenType 规范](https://learn.microsoft.com/en-us/typography/opentype/spec/)、[字符映射](https://learn.microsoft.com/en-us/typography/opentype/spec/cmap)与[字形轮廓](https://learn.microsoft.com/en-us/typography/opentype/spec/glyf)。
-
-当前不支持 CFF/CFF2、WOFF、可变字体、字体塑形、hinting 字节码、phantom point 对齐或带变换的 USE_MY_METRICS。文件结构校验不等于字体真实性认证，也未实现字体校验和检查。字体加载上限默认 64 MiB；解析核心不访问系统路径。测试在 Rust 中构造小型样本，不将系统字体复制进项目。
-
-```sh
-cargo run -p readall-font --example inspect --offline -- --discover
-cargo run -p readall-font --example inspect --offline -- /usr/share/fonts/dejavu/DejaVuSans.ttf
+```bash
+./target/release/readall epub-info /path/to/book.epub
+./target/release/readall epub-text /path/to/book.epub --spine 1
+./target/release/readall inspect tests/fixtures/sample.txt
+./target/release/readall read tests/fixtures/sample.txt --columns 40 --rows 8 --page 1
 ```
 
-上面的实际字体路径只用于字体引擎开发诊断；GUI 不再依赖系统中文字体。默认内置字体固定为 `LXGW WenKai Lite Regular`，构建脚本锁定上游提交 `4cddacbe244b0a24b10076369105f0495e5ec898`，下载后会校验字节大小、TrueType 结构和关键中英文字形，再通过 `include_bytes!` 编入二进制。开发诊断仍可用 `--discover-cjk` 查找系统 CJK 字体。
+## EPUB 兼容问题与错误日志
 
-## 真实字体 TXT 页面导出
+EPUB 打开失败时，ReadAll 会在终端输出失败阶段和诊断日志位置，例如：
 
-```sh
-cargo run -p readall --offline -- render-text tests/fixtures/sample_latin.txt target/text-page.ppm --font /usr/share/fonts/dejavu/DejaVuSans.ttf --font-size 24 --width 800 --height 1000
+```text
+无法打开 EPUB: EPUB stage 'parse EPUB ZIP/container/OPF' failed: ...
+错误日志: /home/user/.local/state/readall/logs/readall-error.log
 ```
 
-`render-text` 将文本通过自研字体解析、字宽测量、分页和像素合成输出为 PPM 图片。`--font` 必填；TTC 可用 `--face N` 选择字体。页码 `--page N` 从 1 开始，也可用 `--at 'txt-v1:…'` 恢复到包含内容位置的页面，两者互斥。可调整 `--width`、`--height`、`--font-size`、`--margin`。目标存在时拒绝覆盖，包括误把原书或字体路径作为输出。
+查看当前日志：
 
-默认遇到缺字直接报错。`--missing replacement` 是显式降级选项，使用该字体的 `.notdef` 轮廓并报告缺失字符，不静默忽略；尚无字体回退。示例字体已在开发宿主上验证拉丁文字、重音字符和希腊字母，但不包含中文。中文渲染需要含相应字形且采用当前支持轮廓格式的字体，不能仅凭文件扩展名判断。
-
-字形绘制采用自适应二次曲线细分、非零环绕填充和 4×4 灰度采样，包含轮廓空洞、重叠与负侧边距处理。当前不执行 hinting、不做亚像素定位；字形基线取整数像素。每页按需缓存可见字形蒙版，限制独立字形数、解码点数、蒙版缓存和绘制工作量。
-
-`MeasuredLayout` 接收真实字宽回调，不依赖特定字体或窗口。它保留规范化文本范围与 locator 映射，但当前仍按 Unicode 标量逐个换行，不支持完整单词断行、字素簇、字距调整、复杂文字塑形或双向排版；不能将图片导出等同于完整阅读体验。单次排版默认最多 1,000,000 个 Unicode 标量、200,000 行，超过限制明确报错。
-
-## Linux 原生阅读窗口
-
-在已登录的 Wayland 桌面终端中运行，系统须有可供链接的 `libwayland-client`：
-
-```sh
-cargo run -p readall --features wayland --offline -- open tests/fixtures/sample_latin.txt --font /usr/share/fonts/dejavu/DejaVuSans.ttf
-cargo run -p readall --features wayland --offline -- open-epub /path/to/book.epub --font /path/to/font.ttf
+```bash
+./target/release/readall diagnostics
 ```
 
-默认 GUI 打开 EPUB 时直接复用二进制内置的中文字体，不扫描系统字体。阅读会话会自动跳过 `linear=yes` 中当前没有可读文本的 SVG 封面、纯图片页、空 XHTML 以及当前未支持的非 XHTML spine；只有整本书都找不到可读 XHTML 文本时才报错。阅读页顶部只保留书名与章节/页码/字号；短书名静态显示，超出左侧可用宽度的长书名会在裁剪区域内自动横向循环滚动，不覆盖右侧章节/页码。底部悬浮栏改成三层结构：顶部整条为向上/向下收起控制；左侧“上一页”和右侧“下一页”贯穿三层；中间第二层为“目录”；第三层为“字体 - / 字体 +”。所有图标都来自 `res/icons/reader/` 的 Feather Icons v4.29.2 SVG（MIT，许可证同目录），ReadAll 自己解析 `<line>/<polyline>` 并做 4×4 抗锯齿线条光栅化，不再使用矩形拼接的像素图标；中文说明仍走内置 TrueType 字体。目录按钮弹出可读章节列表，目录项按章节首行生成，支持鼠标点击直接跳转；目录打开时上下/滚轮移动选择、Enter 跳转、Backspace 先关闭目录。底部仍保留极细阅读进度线。页面左右半区点击、PageUp/PageDown/方向键/Space 翻页，Backspace 在目录关闭后返回书库。命令行 `open-epub` 仍支持显式 `--font`、`--spine` 和 `--at epub-v1:...`。
+默认路径：
 
-EPUB 打开失败会自动追加持久诊断日志，并在终端打印具体日志路径。默认位置是 `$XDG_STATE_HOME/readall/logs/readall-error.log`，未设置绝对 `XDG_STATE_HOME` 时使用 `$HOME/.local/state/readall/logs/readall-error.log`，两者都不可用时退回系统临时目录。日志包含 ReadAll 版本、平台、PID、工作目录、启动参数、书籍路径/大小/修改时间、失败阶段和完整 `caused_by[n]` 错误链；超过 2 MiB 自动轮换为 `readall-error.log.old`。可运行 `readall diagnostics` 直接输出日志路径和当前日志内容，方便提交问题时复制。
-
-窗口缩放和字号变化保留同一个精确内容 anchor，不反复替换成“当前屏幕第一页文字”，防止连续缩放后位置向前漂移。TXT 与 EPUB 原生阅读都默认使用 `$XDG_STATE_HOME/readall/progress-v1`，或未设置绝对 `XDG_STATE_HOME` 时使用 `$HOME/.local/state/readall/progress-v1`；TXT 保存 `TextLocator`，EPUB 保存绑定整书 SHA-256、spine 和规范化文本偏移的 `epub-v1` locator。成功翻页及正常关闭时用同目录临时文件 + rename 更新状态；显式 `--page`/`--spine`/`--at` 优先于自动恢复。两种窗口都可用 `--progress off` 禁用或 `--state-dir DIR` 指定状态目录。失败的跨章节翻页、重排或字号修改保留当前可见页面并在终端报错。
-
-窗口采用 `wl_compositor` v4、`xdg-shell` v1 和 XRGB8888 SHM；输入需要 `wl_seat` v5。等待 configure 并 ack 后才附加缓冲区；同一时刻最多两个未释放缓冲区，释放前不覆盖其内容。临时文件以独占方式创建并立即解除路径关联。空闲时阻塞等待事件，不持续绘制。
-
-`--display <socket>` 用于显式选择合成器，默认只使用调用进程的 Wayland 会话配置，不猜测用户 socket，也不修改桌面环境。`--frames 1` 是一次提交后关闭的协议诊断选项，只表示提交已由合成器处理，不代表用户已经看到画面。
-
-```sh
-cargo test --workspace --features wayland --offline
-cargo clippy --workspace --all-targets --features wayland --offline -- -D warnings
-cargo run -p readall-platform --example probe --offline
+```text
+$XDG_STATE_HOME/readall/logs/readall-error.log
 ```
 
-从源码进行**第一次干净 GUI 构建**时，`apps/readall/build.rs` 会自动获取固定提交的字体 TTF；这属于构建资源获取，发布后的 `readall` 二进制已包含字体，运行时不联网。源码打包器或完全离线构建可预先准备同一字体，并通过 `READALL_BUILTIN_FONT_SOURCE=/path/LXGWWenKaiLite-Regular.ttf` 指定本地来源。字体已经存在于 Cargo 的构建输出后，后续构建不会重复获取；因此首次推荐 `cargo build --release`，完全缓存后再使用 Cargo `--offline`。
+未设置绝对 `XDG_STATE_HOME` 时：
 
-当前验证环境缺少 `WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR` 和桌面 socket。测试使用真实 `libwayland-client` 连接 Rust 本地模拟合成器，覆盖 ping/pong、首次 configure、提交顺序、键盘事件、鼠标 enter/motion/leave、重配尺寸和 buffer release，**不等同于 Hyprland/Weston 等真实桌面的视觉/交互验收**。窗口接口中的 `PointerMove` / `PointerLeave` 是平台无关事件，未来 Windows 原生窗口后端可直接复用相同 hover UI；当前 Windows 后端本身仍未实现。模拟测试不连接或操作用户桌面。接口依据 [Wayland 客户端 API](https://wayland.freedesktop.org/docs/html/apb.html)、[核心协议](https://wayland.freedesktop.org/docs/html/apa.html)及系统安装的稳定 xdg-shell 协议描述。
+```text
+$HOME/.local/state/readall/logs/readall-error.log
+```
 
-这一版已有基础书库/文件浏览和阅读状态栏，但尚无封面墙、EPUB 元数据书架、目录侧栏、文字选择、真正多字体回退、输入法、无障碍接口或 HiDPI/分数缩放适配。SHM 像素按 1:1 逻辑尺寸提交。文档和字体文件只读取一次；同一字号与窗口几何下翻页复用整本文本的测量布局，并跨页保留已经光栅化的字形蒙版。窗口尺寸变化只重建布局，字号变化建立新的字号专属字形缓存。仍未缓存完整页面像素，大文档首次排版性能需要继续优化。Windows/Android 窗口尚未实现。
+日志包含版本、平台、书籍路径/大小、失败阶段以及完整 `caused_by[n]` 错误链。超过 2 MiB 会轮换为 `readall-error.log.old`。
 
-## 后续顺序
+如果某本 EPUB 无法打开，请优先提交 **EPUB compatibility** Issue，并附上 `readall diagnostics` 输出。请不要上传仍受版权保护的整本电子书，除非你有权公开分发它。
 
-1. 优先继续 UI：最近阅读/封面书架、EPUB 元数据展示、正式 navigation/TOC、阅读主题；设置保持少而集中，不堆叠常驻文字控件。
-2. EPUB：在已完成的 GUI 打开、XHTML 文本、稳定 locator、跨 spine 翻页和自动进度基础上，加入 navigation/TOC、CSS 子集、图片和更完整的自研排版。
-3. 文本与字体：真正字体回退、字素/单词断行、文字选择，并优化首次排版和大书缓存。
-4. PDF：对象与交叉引用、页面/资源、绘制指令、字体与图像；按功能建立兼容性矩阵。
-5. 原生书架、搜索、书签、高亮、笔记及可靠持久化。
+## 项目结构
 
-不预先宣称完整 Unicode 排版、完整 EPUB/PDF 兼容或跨平台发布可用。新增格式必须有正常、损坏和资源超限测试。
+```text
+ReadAll/
+├── apps/
+│   └── readall/            # GUI、CLI、阅读会话、进度和诊断
+├── crates/
+│   ├── readall-archive/    # ZIP / DEFLATE / CRC
+│   ├── readall-core/       # 文档、文本、locator、布局
+│   ├── readall-epub/       # EPUB container / OPF / XHTML
+│   ├── readall-font/       # TrueType / TTC / glyph outline
+│   ├── readall-render/     # CPU surface / glyph rasterizer
+│   └── readall-platform/   # 文件与原生窗口平台层
+├── res/
+│   └── icons/reader/       # Reader SVG icons
+├── licenses/               # Bundled font licenses
+└── tests/
+    └── fixtures/
+```
+
+依赖方向保持分层：解析层不持有窗口对象，渲染层不处理 EPUB，平台层不解析文档。
+
+## 开发检查
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --offline
+cargo clippy --workspace --all-targets --offline -- -D warnings
+cargo check -p readall --no-default-features --offline
+```
+
+项目包含一个本地模拟 Wayland compositor，用于测试 configure、buffer commit/release、键盘、鼠标、hover 和无输入动画 tick。模拟测试不能替代 Hyprland/Weston 等真实桌面的视觉验收。
+
+## 当前限制
+
+v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
+
+- Linux 原生 GUI 当前只实现 Wayland
+- Windows / Android 窗口后端尚未实现
+- PDF 尚未实现
+- EPUB CSS / 图片 / SVG / MathML 尚未完整进入阅读排版
+- 没有复杂字体 shaping / bidi / 字素簇级排版
+- 没有真正的字体 fallback
+- 没有封面墙、搜索、书签、高亮和笔记
+- HiDPI / 分数缩放仍需继续完善
+
+## Roadmap
+
+1. EPUB Navigation/TOC、CSS 子集、图片与更完整的排版
+2. 最近阅读、封面书架、阅读主题、设置页
+3. 字体 fallback、字素/单词断行、选择/高亮
+4. Windows 原生窗口后端
+5. Android 平台入口
+6. PDF 对象、页面、字体、图像和绘制指令
+
+## 许可证与第三方资源
+
+ReadAll 项目源码目前**尚未声明统一的开源许可证**。在明确项目代码许可证之前，请不要假定项目源码可以按 MIT/Apache/GPL 等许可证再分发。
+
+已捆绑的第三方资源分别遵循其自己的许可证：
+
+- **LXGW WenKai Lite Regular**：SIL Open Font License 1.1  
+  许可证：`licenses/LXGW_WenKai_Lite_OFL.txt`
+- **Feather Icons v4.29.2**：MIT  
+  许可证：`res/icons/reader/LICENSE`
+
+运行：
+
+```bash
+./target/release/readall licenses
+```
+
+可查看内置字体许可证。
+
+---
+
+Repository: https://github.com/MRsoymilk/ReadAll
