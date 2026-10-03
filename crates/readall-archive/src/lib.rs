@@ -150,7 +150,7 @@ impl<'a> ZipArchive<'a> {
             }
             let flags = le16(header, 8)?;
             let method = le16(header, 10)?;
-            validate_flags(flags, method)?;
+            validate_flags(flags)?;
             if !matches!(method, 0 | 8) {
                 return Err(ArchiveError::Unsupported("compression method"));
             }
@@ -389,22 +389,21 @@ fn local_data_range(
     Ok(start..end)
 }
 
-fn validate_flags(flags: u16, method: u16) -> Result<()> {
+fn validate_flags(flags: u16) -> Result<()> {
     if flags & 0x0001 != 0 {
         return Err(ArchiveError::Unsupported("encrypted entries"));
     }
-    // Bits 1/2 and bit 4 are compression metadata for DEFLATE and do not
-    // change the raw method-8 stream. Bit 3 selects a data descriptor and
-    // bit 11 declares UTF-8 names. Patched data, strong encryption, masked
-    // headers/central-directory encryption, and reserved bits stay rejected.
+    // Bits 1/2 are compression-option metadata for methods that define them;
+    // bit 4 is reserved for enhanced DEFLATE. Real-world EPUB producers may
+    // leave these bits set even on STORE entries. The compression-method field
+    // is authoritative for decoding, so these bits are safe to ignore for the
+    // two methods ReadAll supports (STORE=0, DEFLATE=8). Bit 3 selects a data
+    // descriptor and bit 11 declares UTF-8 names. Patched data, strong
+    // encryption, masked headers/central-directory encryption, and reserved
+    // bits stay rejected.
     const ALLOWED: u16 = 0x081e;
     if flags & !ALLOWED != 0 {
         return Err(ArchiveError::UnsupportedFlags(flags));
-    }
-    if method != 8 && flags & 0x0016 != 0 {
-        return Err(ArchiveError::Invalid(
-            "DEFLATE option flags used with another method",
-        ));
     }
     Ok(())
 }
@@ -620,19 +619,15 @@ mod tests {
         let archive = ZipArchive::parse(&enhanced, ZipLimits::default()).unwrap();
         assert_eq!(archive.read("OPS/chapter.xhtml").unwrap(), plain);
 
-        let mut stored_with_deflate_flag = zip(&[Entry {
+        let mut stored_with_compat_flags = zip(&[Entry {
             name: "mimetype",
             method: 0,
             compressed: b"application/epub+zip",
             plain: b"application/epub+zip",
         }]);
-        set_single_entry_flags(&mut stored_with_deflate_flag, 0x0810);
-        assert!(matches!(
-            ZipArchive::parse(&stored_with_deflate_flag, ZipLimits::default()),
-            Err(ArchiveError::Invalid(
-                "DEFLATE option flags used with another method"
-            ))
-        ));
+        set_single_entry_flags(&mut stored_with_compat_flags, 0x0816);
+        let archive = ZipArchive::parse(&stored_with_compat_flags, ZipLimits::default()).unwrap();
+        assert_eq!(archive.read("mimetype").unwrap(), b"application/epub+zip");
 
         for unsafe_flags in [0x0820_u16, 0x0840, 0x2800, 0x1800] {
             let mut bytes = zip(&[Entry {
