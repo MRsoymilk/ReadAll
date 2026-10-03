@@ -10,6 +10,7 @@ type Result<T> = std::result::Result<T, ArchiveError>;
 pub enum ArchiveError {
     Invalid(&'static str),
     Unsupported(&'static str),
+    UnsupportedFlags(u16),
     LimitExceeded(&'static str),
     AllocationFailed,
     CrcMismatch,
@@ -20,6 +21,10 @@ impl fmt::Display for ArchiveError {
         match self {
             Self::Invalid(reason) => write!(f, "invalid ZIP archive: {reason}"),
             Self::Unsupported(reason) => write!(f, "unsupported ZIP feature: {reason}"),
+            Self::UnsupportedFlags(flags) => write!(
+                f,
+                "unsupported ZIP feature: general-purpose flags 0x{flags:04x}"
+            ),
             Self::LimitExceeded(what) => write!(f, "ZIP budget exceeded: {what}"),
             Self::AllocationFailed => f.write_str("cannot allocate ZIP data"),
             Self::CrcMismatch => f.write_str("ZIP entry CRC-32 mismatch"),
@@ -388,11 +393,15 @@ fn validate_flags(flags: u16, method: u16) -> Result<()> {
     if flags & 0x0001 != 0 {
         return Err(ArchiveError::Unsupported("encrypted entries"));
     }
-    const ALLOWED: u16 = 0x080e;
+    // Bits 1/2 and bit 4 are compression metadata for DEFLATE and do not
+    // change the raw method-8 stream. Bit 3 selects a data descriptor and
+    // bit 11 declares UTF-8 names. Patched data, strong encryption, masked
+    // headers/central-directory encryption, and reserved bits stay rejected.
+    const ALLOWED: u16 = 0x081e;
     if flags & !ALLOWED != 0 {
-        return Err(ArchiveError::Unsupported("general-purpose flags"));
+        return Err(ArchiveError::UnsupportedFlags(flags));
     }
-    if method != 8 && flags & 0x0006 != 0 {
+    if method != 8 && flags & 0x0016 != 0 {
         return Err(ArchiveError::Invalid(
             "DEFLATE option flags used with another method",
         ));
@@ -585,6 +594,55 @@ mod tests {
         }]);
         for length in 0..valid.len() {
             assert!(ZipArchive::parse(&valid[..length], ZipLimits::default()).is_err());
+        }
+    }
+
+    fn set_single_entry_flags(bytes: &mut [u8], flags: u16) {
+        bytes[6..8].copy_from_slice(&flags.to_le_bytes());
+        let central = bytes
+            .windows(4)
+            .position(|window| window == [0x50, 0x4b, 0x01, 0x02])
+            .unwrap();
+        bytes[central + 8..central + 10].copy_from_slice(&flags.to_le_bytes());
+    }
+
+    #[test]
+    fn deflate_metadata_flags_are_accepted_but_unsafe_flags_stay_rejected() {
+        let plain = b"hello hello hello";
+        let fixed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
+        let mut enhanced = zip(&[Entry {
+            name: "OPS/chapter.xhtml",
+            method: 8,
+            compressed: &fixed,
+            plain,
+        }]);
+        set_single_entry_flags(&mut enhanced, 0x0810);
+        let archive = ZipArchive::parse(&enhanced, ZipLimits::default()).unwrap();
+        assert_eq!(archive.read("OPS/chapter.xhtml").unwrap(), plain);
+
+        let mut stored_with_deflate_flag = zip(&[Entry {
+            name: "mimetype",
+            method: 0,
+            compressed: b"application/epub+zip",
+            plain: b"application/epub+zip",
+        }]);
+        set_single_entry_flags(&mut stored_with_deflate_flag, 0x0810);
+        assert!(matches!(
+            ZipArchive::parse(&stored_with_deflate_flag, ZipLimits::default()),
+            Err(ArchiveError::Invalid(
+                "DEFLATE option flags used with another method"
+            ))
+        ));
+
+        for unsafe_flags in [0x0820_u16, 0x0840, 0x2800, 0x1800] {
+            let mut bytes = zip(&[Entry {
+                name: "OPS/chapter.xhtml",
+                method: 8,
+                compressed: &fixed,
+                plain,
+            }]);
+            set_single_entry_flags(&mut bytes, unsafe_flags);
+            assert!(ZipArchive::parse(&bytes, ZipLimits::default()).is_err());
         }
     }
 
