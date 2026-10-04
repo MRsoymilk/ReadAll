@@ -2,7 +2,20 @@
 
 ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
-> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/MOBI/AZW3/TXT；Windows、Android 和 PDF 仍在后续路线中。**
+> **v0.1.0 是首个开发预览版。当前已验证的界面为 Linux Wayland；Android 已加入独立开发入口，APK 与真机验收仍待完成。Windows 和 PDF 仍在后续路线中。**
+
+## Android 开发入口
+
+新增共享 `readall` 库、`mobile` 阅读工作线程与 `readall-android` JNI 边界，复用桌面 EPUB/MOBI/AZW3 解析、排版、图片与进度逻辑。`apps/android` 使用 SDK 原生 Java 界面，包含系统文件选择、加载状态、基础翻页、目录、字号、主题、添加书签和继续阅读；没有引入 WebView、AndroidX 或 Gradle。手机端完整触摸选择、链接交互及三种翻页效果仍需后续独立接入，不能把桌面功能表当作手机支持表。
+
+构建工具全部通过绝对路径参数调用，不修改 shell 环境变量。见 [Android 构建、SDK 可见性及验收说明](apps/android/README.md)。
+
+```bash
+/usr/bin/python3 apps/android/tools/build.py doctor --sdk /opt/android-sdk
+/usr/bin/python3 apps/android/tools/build.py build --sdk /opt/android-sdk
+```
+
+宿主机 `host-test` 使用真实 JVM/JNI，可验证共享引擎和数据传递，但不代替 SDK 交叉编译、APK 安装或手机测试。
 
 ## v0.1.0 已实现
 
@@ -431,7 +444,7 @@ cargo check -p readall --no-default-features --offline
 v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 - Linux 原生 GUI 当前只实现 Wayland
-- Windows / Android 窗口后端尚未实现
+- Windows 窗口后端尚未实现；Android 是单独开发入口，APK 与真机验收尚未完成
 - PDF 尚未实现
 - MOBI 支持未加密 MOBI6/7，AZW3 支持独立可重排 KF8；固定版式 KF8、KFX、DRM、字典专用索引和完整 Kindle 版式尚未实现
 - EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/GIF/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
