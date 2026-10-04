@@ -151,6 +151,7 @@ impl EpubBook<'_> {
                 runs: Vec::new(),
                 blocks: Vec::new(),
                 links: Vec::new(),
+                codes: Vec::new(),
                 images: vec![crate::ImageReference {
                     offset: 0,
                     source: "<spine-svg>".into(),
@@ -220,6 +221,7 @@ impl EpubBook<'_> {
             images: extracted.images,
             blocks: extracted.blocks,
             links: extracted.links,
+            codes: extracted.codes,
             warnings,
         })
     }

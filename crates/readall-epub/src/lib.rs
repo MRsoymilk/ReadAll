@@ -7,7 +7,7 @@ pub use search::{SearchHit, SearchLimits, SearchReport};
 pub mod css;
 mod text_offsets;
 mod xhtml;
-pub use xhtml::{BlockBoundary, ChapterContent, ImageReference, StyleRun};
+pub use xhtml::{BlockBoundary, ChapterContent, CodeBlock, ImageReference, StyleRun};
 mod links;
 pub use links::ContentLink;
 mod xml;

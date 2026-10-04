@@ -7,7 +7,9 @@ use crate::{
 };
 
 use crate::css::{BoxStyle, StyleSheet, TextStyle, WhiteSpace};
+mod code;
 mod whitespace;
+pub use code::CodeBlock;
 #[cfg(test)]
 mod whitespace_tests;
 use std::ops::Range;
@@ -47,6 +49,7 @@ pub struct ChapterContent {
     pub blocks: Vec<BlockBoundary>,
     pub links: Vec<crate::ContentLink>,
     pub warnings: Vec<String>,
+    pub codes: Vec<CodeBlock>,
     pub(crate) anchors: Vec<(String, usize)>,
     pub(crate) legacy_text: Option<String>,
 }
@@ -60,6 +63,7 @@ pub(crate) struct ExtractedText {
     pub(crate) images: Vec<ImageReference>,
     pub(crate) blocks: Vec<BlockBoundary>,
     pub(crate) links: Vec<crate::ContentLink>,
+    pub(crate) codes: Vec<CodeBlock>,
 }
 
 impl ExtractedText {
@@ -133,6 +137,7 @@ fn extract_impl(
     let mut blocks = Vec::new();
     let mut open_blocks = Vec::new();
     let mut links = crate::links::LinkCollector::default();
+    let mut codes = code::CodeCollector::default();
     let mut svg_capture: Option<(usize, usize, String)> = None;
 
     for event in &events {
@@ -201,6 +206,14 @@ fn extract_impl(
                         }
                         pending_space = false;
                     }
+                }
+                if formatting
+                    && sheet.is_some()
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                {
+                    codes.start(element, current, output.len(), style);
                 }
                 let boxed = sheet.is_some()
                     && body_depth.is_some()
@@ -319,6 +332,7 @@ fn extract_impl(
             }
             Event::Text(_) => {}
             Event::End(name) => {
+                codes.end(depth, output.len());
                 if local_name(name) == "a" {
                     links.end(depth, output.len(), images.len());
                 }
@@ -387,6 +401,7 @@ fn extract_impl(
         boundary.offset = boundary.offset.min(output.len());
     }
     let links = links.finish(output.len());
+    let codes = codes.finish(output.len());
     let legacy_text = if legacy_candidate {
         let legacy = extract_with_anchors(bytes, max_bytes)?.text;
         (legacy != output).then_some(legacy)
@@ -401,6 +416,7 @@ fn extract_impl(
         images,
         blocks,
         links,
+        codes,
     })
 }
 
