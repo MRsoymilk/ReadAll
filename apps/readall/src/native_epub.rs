@@ -266,8 +266,8 @@ mod enabled {
             let (chapter, chapters) = self.session.chapter_position();
             let (page, pages) = self.session.page_position();
             let status = format!(
-                "第 {chapter}/{chapters} 章 · 第 {page}/{pages} 页 · {} px",
-                self.session.font_size()
+                "第 {chapter}/{chapters} 章 · 第 {page}/{pages} 页 · {:.1}%",
+                self.session.overall_progress() * 100.0
             );
             {
                 let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
@@ -1162,6 +1162,107 @@ mod enabled {
                 .map(Into::into),
             )
             .unwrap()
+        }
+
+        fn assert_header_status(reader: &ReaderWindow<'_, '_, '_, '_>, status: &str) {
+            let width = reader.surface.width();
+            let mut expected = reader.session.frame().surface.clone();
+            let background = reader.session.settings().theme.colors().0;
+            expected
+                .draw(&[
+                    DrawCommand::FillRect {
+                        rect: Rect::new(0, 0, width, 32),
+                        color: Color {
+                            a: 245,
+                            ..background
+                        },
+                    },
+                    DrawCommand::FillRect {
+                        rect: Rect::new(0, 31, width, 1),
+                        color: Color::rgba(224, 228, 234, 255),
+                    },
+                ])
+                .unwrap();
+            let mut text = UiPainter::new(&reader.ui_font, &mut expected).unwrap();
+            let x = width.saturating_sub(text.measure(12, status).unwrap() + 16);
+            text.draw(x as i32, 9, 12, status, Color::rgba(112, 121, 133, 255))
+                .unwrap();
+            for y in 0..32 {
+                for x in x..width {
+                    assert_eq!(
+                        reader.surface.pixel(x, y),
+                        expected.pixel(x, y),
+                        "header must display {status:?} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn header_replaces_font_size_with_overall_percentage_only() {
+            let epub_bytes =
+                test_epub::make_epub_with_resources(&["<html><body>AAAA</body></html>"; 4], vec![]);
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui_bytes = test_font::make_layout_font(
+                *b"latn",
+                *b"liga",
+                false,
+                &(33..127)
+                    .map(|ch| (ch, if ch == u32::from(b'%') { 2 } else { 1 }))
+                    .collect::<Vec<_>>(),
+            );
+            let ui = UiFont::from_bytes(ui_bytes, PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui).unwrap();
+            let title = reader.session.book_title().to_owned();
+            let toolbar = reader.toolbar_rect();
+            let size = reader.session.font_size();
+            assert_header_status(&reader, "第 1/4 章 · 第 1/1 页 · 25.0%");
+            reader.action(Action::Next).unwrap();
+            assert_header_status(&reader, "第 2/4 章 · 第 1/1 页 · 50.0%");
+            reader.action(Action::Last).unwrap();
+            assert_header_status(&reader, "第 4/4 章 · 第 1/1 页 · 100.0%");
+            reader.action(Action::First).unwrap();
+            assert_header_status(&reader, "第 1/4 章 · 第 1/1 页 · 25.0%");
+            assert_eq!(reader.session.font_size(), size);
+            reader.action(Action::Larger).unwrap();
+            assert!(reader.session.font_size() > size);
+            assert_header_status(&reader, "第 1/4 章 · 第 1/1 页 · 25.0%");
+            assert_eq!(reader.session.book_title(), title);
+            assert_eq!(reader.toolbar_rect(), toolbar);
+        }
+
+        #[test]
+        fn header_percentage_updates_within_a_chapter_using_the_existing_progress_bar_value() {
+            let long = format!(
+                "<html><body>{}</body></html>",
+                "<p>AAAA WWWW</p>".repeat(80)
+            );
+            let epub_bytes = test_epub::make_epub_with_resources(
+                &[long.as_str(), "<html><body>AAAA</body></html>"],
+                vec![],
+            );
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui = UiFont::from_bytes(font_bytes.clone(), PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui).unwrap();
+            let pages = reader.session.page_position().1;
+            assert!(pages > 2);
+            let before = reader.session.overall_progress();
+            reader.action(Action::Next).unwrap();
+            assert!(reader.session.overall_progress() > before);
+            assert!(reader.session.overall_progress() < 0.5);
+            assert_header_status(
+                &reader,
+                &format!(
+                    "第 1/2 章 · 第 2/{pages} 页 · {:.1}%",
+                    reader.session.overall_progress() * 100.0
+                ),
+            );
         }
 
         #[test]

@@ -159,6 +159,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         (self.frame.page + 1, self.frame.pages)
     }
 
+    #[cfg(test)]
     pub(crate) fn font_size(&self) -> u32 {
         self.options.size
     }
