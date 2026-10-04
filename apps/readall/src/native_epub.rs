@@ -567,6 +567,7 @@ mod enabled {
                 return Ok(false);
             };
             let changed = self.session.jump_to_toc_target(spine, offset)?;
+            self.tools.clear_selection();
             self.toc_selected = index;
             self.keep_toc_selected_visible();
             self.toolbar = ToolbarMode::Expanded;
@@ -614,6 +615,7 @@ mod enabled {
         }
 
         fn handle_toolbar_button(&mut self, index: usize) -> WindowResult<bool> {
+            self.tools.cancel_gesture();
             match index {
                 0 => {
                     self.toolbar = ToolbarMode::Expanded;
@@ -658,11 +660,7 @@ mod enabled {
                     self.refresh_surface()?;
                     return Ok(true);
                 }
-                return self.perform_reader_action(if x < self.surface.width() as i32 / 2 {
-                    ReaderAction::Previous
-                } else {
-                    ReaderAction::Next
-                });
+                return Ok(false);
             }
 
             if self.toolbar == ToolbarMode::Toc
@@ -680,11 +678,8 @@ mod enabled {
                 self.refresh_surface()?;
                 return Ok(true);
             }
-            self.perform_reader_action(if x < self.surface.width() as i32 / 2 {
-                ReaderAction::Previous
-            } else {
-                ReaderAction::Next
-            })
+            // Body clicks are handled by selection/link gestures, never by page side.
+            Ok(false)
         }
 
         fn hover_target_at(&self, x: i32, y: i32) -> ReaderHover {
@@ -743,6 +738,9 @@ mod enabled {
 
     impl WindowHandler for ReaderWindow<'_, '_, '_, '_> {
         fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool> {
+            if (width, height) != (self.surface.width(), self.surface.height()) {
+                self.tools.cancel_gesture();
+            }
             let changed = EpubSession::resize(&mut self.session, width, height)?;
             if changed {
                 self.refresh_surface()?;
@@ -1111,7 +1109,7 @@ mod enabled {
 
                 writeln!(
                     output,
-                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nPage navigation crosses linear spine boundaries. Progress uses epub-v1 text locators and epub-v2 image locators when storage is available.\nPNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection; Ctrl+C/Ctrl+V clipboard. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
+                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nPage navigation crosses linear spine boundaries. Progress uses epub-v1 text locators and epub-v2 image locators when storage is available.\nPNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
                 )?;
                 output.flush()?;
 

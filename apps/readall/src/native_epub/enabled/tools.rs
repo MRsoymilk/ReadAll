@@ -1,5 +1,6 @@
 //! Native search, annotations, settings, selection and image inspection overlays.
 mod external;
+mod gestures;
 #[cfg(test)]
 mod link_tests;
 mod links;
@@ -47,7 +48,7 @@ pub(super) struct Tools {
     link_history: Vec<readall_epub::EpubLocator>,
     external: external::ExternalLink,
     pub(super) selecting: bool,
-    drag: Option<Range<usize>>,
+    drag: Option<gestures::Gesture>,
     pub(super) selection: Option<Range<usize>>,
     zoom: Option<Arc<RgbaImage>>,
     factor: f32,
@@ -61,6 +62,9 @@ impl Tools {
     }
     pub(super) fn pending(&self) -> bool {
         self.clipboard.is_some() || self.external.pending()
+    }
+    pub(super) fn cancel_gesture(&mut self) {
+        self.drag = None;
     }
     pub(super) fn clear_selection(&mut self) {
         self.selection = None;
@@ -180,7 +184,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     fn tool_highlight(&mut self) -> WindowResult<()> {
-        let range = self.tools.selection.clone().ok_or("请先按 F9 选择文字")?;
+        let range = self.tools.selection.clone().ok_or("请先拖动选择文字")?;
         let locator = self.session.selected_locator(range.start)?;
         self.tool_store()?.add(
             self.session.book(),
@@ -285,6 +289,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     fn tool_command(&mut self, command: ReaderCommand) -> WindowResult<()> {
+        self.tools.cancel_gesture();
         match command {
             ReaderCommand::Find => {
                 self.tools.mode = Mode::Search;
@@ -324,9 +329,9 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 self.tools.selecting = !self.tools.selecting;
                 self.tools.clear_selection();
                 self.tools.status = if self.tools.selecting {
-                    "拖动选择文字；Ctrl+C 复制；F8 高亮；F7 笔记；Esc 退出"
+                    "文字选择优先：链接也可选字；Ctrl+C 复制；F8 高亮；F7 笔记；F9 返回普通阅读"
                 } else {
-                    "文字选择已关闭"
+                    "普通阅读：直接拖选文字，单击链接跳转；Ctrl+C 复制，F8 高亮，F7 笔记"
                 }
                 .into();
             }
@@ -335,7 +340,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     .tools
                     .selection
                     .clone()
-                    .ok_or("没有选中的文字；按 F9 开始选择")?;
+                    .ok_or("没有选中的文字；请直接拖动选择")?;
                 self.start_clipboard(Some(self.session.text_at(range)))?;
             }
             ReaderCommand::Paste => {
@@ -366,25 +371,31 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
     }
     fn hit_range(&self, x: i32, y: i32, nearest: bool) -> Option<Range<usize>> {
         let hits = &self.session.frame().hits;
-        let hit = hits
-            .iter()
-            .find(|hit| point_in(hit.rect, x, y))
-            .or_else(|| {
-                nearest
-                    .then(|| {
-                        hits.iter().min_by_key(|hit| {
-                            let r = hit.rect;
-                            let dx = (i64::from(x) - i64::from(r.x)).abs();
-                            let dy =
-                                (i64::from(y) - i64::from(r.y) - i64::from(r.height) / 2).abs();
-                            dy * 10000 + dx
-                        })
+        let visible = || {
+            hits.iter()
+                .filter(|hit| hit.rect.width > 0 && hit.rect.height > 0)
+        };
+        let hit = visible().find(|hit| point_in(hit.rect, x, y)).or_else(|| {
+            nearest
+                .then(|| {
+                    visible().min_by_key(|hit| {
+                        let r = hit.rect;
+                        let (x, y) = (i64::from(x), i64::from(y));
+                        let dx = (x - x
+                            .clamp(i64::from(r.x), i64::from(r.x) + i64::from(r.width) - 1))
+                        .abs();
+                        let dy = (y - y
+                            .clamp(i64::from(r.y), i64::from(r.y) + i64::from(r.height) - 1))
+                        .abs();
+                        dy * 10000 + dx
                     })
-                    .flatten()
-            })?;
+                })
+                .flatten()
+        })?;
         Some(self.session.grapheme_range(hit.start..hit.end))
     }
     fn tool_click(&mut self, x: i32, y: i32) -> WindowResult<Option<bool>> {
+        self.tools.cancel_gesture();
         if self.tools.mode != Mode::None {
             let panel = self.tool_panel();
             if !point_in(panel, x, y) || y < panel.y + 34 && x > panel.x + panel.width as i32 - 44 {
@@ -429,17 +440,11 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             return Ok(Some(false));
         }
         if !self.tools.selecting
-            && (!self.tools.status.is_empty() || !self.tools.link_history.is_empty())
-            && point_in(
-                Rect::new(8, 34, self.surface.width().saturating_sub(16), 26),
-                x,
-                y,
-            )
+            && self.tools.selection.is_none()
+            && !self.tools.link_history.is_empty()
+            && point_in(self.link_back_rect(), x, y)
         {
-            if !self.tools.link_history.is_empty() && point_in(self.link_back_rect(), x, y) {
-                return Ok(Some(self.return_from_link()?));
-            }
-            return Ok(Some(false));
+            return Ok(Some(self.return_from_link()?));
         }
         if self.toolbar != ToolbarMode::Collapsed {
             for (index, cmd) in [
@@ -456,43 +461,31 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 }
             }
         }
-        if point_in(self.toolbar_rect(), x, y) && self.toolbar != ToolbarMode::Collapsed
-            || self.toolbar == ToolbarMode::Toc && point_in(self.toc_panel_rect(), x, y)
+        if self.toolbar == ToolbarMode::Toc
+            || point_in(self.toolbar_rect(), x, y) && self.toolbar != ToolbarMode::Collapsed
+            || self.toolbar == ToolbarMode::Collapsed && point_in(self.collapsed_rect(), x, y)
         {
             return Ok(None);
         }
-        if self.tools.selecting {
-            if let Some(range) = self.hit_range(x, y, false) {
-                self.tools.drag = Some(range.clone());
-                self.tools.selection = Some(range);
-            }
-            return Ok(Some(true));
-        }
-        if let Some(link) = self.session.link_at(x, y) {
-            return Ok(Some(self.follow_body_link(link)?));
-        }
-        if let Some((_, index)) = self
-            .session
-            .frame()
-            .image_hits
-            .iter()
-            .find(|(rect, _)| point_in(*rect, x, y))
-            && let Some(image) = self.session.image(*index)
-        {
-            self.tools.zoom = Some(image);
-            self.tools.factor = 1.0;
-            self.tools.pan = (0, 0);
-            self.tools.mode = Mode::Zoom;
-            self.tools.status = "+/− 缩放；↑↓/滚轮垂直移动；Home/End 水平移动；Esc 返回".into();
-            return Ok(Some(true));
-        }
-        Ok(None)
+        Ok(Some(self.body_press(x, y)))
     }
     pub(super) fn tool_action(&mut self, action: Action) -> WindowResult<Option<bool>> {
         if self.tools.mode == Mode::External {
             return self.external_action(action).map(Some);
         }
         match action {
+            // Wheel/keyboard page changes while the button is held would invalidate
+            // selection coordinates. Finish or cancel the gesture before navigating.
+            Action::Next
+            | Action::Previous
+            | Action::First
+            | Action::Last
+            | Action::Larger
+            | Action::Smaller
+                if self.tools.drag.is_some() && self.tools.mode == Mode::None =>
+            {
+                Ok(Some(false))
+            }
             Action::Command(command) => {
                 self.tool_command(command)?;
                 Ok(Some(true))
@@ -510,7 +503,12 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 }
                 Ok(Some(true))
             }
-            Action::Close if self.tools.mode != Mode::None || self.tools.selecting => {
+            Action::Close
+                if self.tools.mode != Mode::None
+                    || self.tools.selecting
+                    || self.tools.selection.is_some()
+                    || self.tools.drag.is_some() =>
+            {
                 self.tools.mode = Mode::None;
                 self.tools.selecting = false;
                 self.tools.clear_selection();
@@ -521,6 +519,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     && !self.tools.selecting
                     && !self.tools.link_history.is_empty() =>
             {
+                self.tools.cancel_gesture();
                 Ok(Some(self.return_from_link()?))
             }
             Action::Back if self.tools.editing() => {
@@ -594,15 +593,12 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             Action::PointerMove { x, y } | Action::PointerRelease { x, y }
                 if self.tools.drag.is_some() =>
             {
-                if let (Some(anchor), Some(target)) =
-                    (self.tools.drag.clone(), self.hit_range(x, y, true))
-                {
-                    self.tools.selection =
-                        Some(anchor.start.min(target.start)..anchor.end.max(target.end));
-                }
-                if matches!(action, Action::PointerRelease { .. }) {
-                    self.tools.drag = None;
-                }
+                self.body_motion(x, y, matches!(action, Action::PointerRelease { .. }))
+                    .map(Some)
+            }
+            Action::PointerLeave if self.tools.drag.is_some() => {
+                self.tools.cancel_gesture();
+                self.pointer = None;
                 Ok(Some(true))
             }
             Action::PointerMove { x, y } if self.tools.mode != Mode::None => {
@@ -691,6 +687,8 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 }
             }
             if !self.tools.selecting
+                && self.tools.selection.is_none()
+                && self.tools.drag.is_none()
                 && (!self.tools.status.is_empty() || !self.tools.link_history.is_empty())
             {
                 let w = self.surface.width();

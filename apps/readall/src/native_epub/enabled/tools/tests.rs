@@ -150,6 +150,17 @@ fn image_overlay_zooms_and_escape_returns_without_closing_reader() {
             y: rect.y + 5,
         })
         .unwrap();
+    assert_eq!(
+        reader.tools.mode,
+        Mode::None,
+        "press must not open the image"
+    );
+    reader
+        .action(Action::PointerRelease {
+            x: rect.x + 5,
+            y: rect.y + 5,
+        })
+        .unwrap();
     assert_eq!(reader.tools.mode, Mode::Zoom);
     reader.action(Action::Larger).unwrap();
     assert!(reader.tools.factor > 1.0);

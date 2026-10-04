@@ -180,7 +180,12 @@ fn real_reader_links_and_external_cancel_work_through_async_mailbox() {
             self.0.surface()
         }
         fn title(&self) -> String {
-            format!("{}:{:?}", self.0.session.current_spine(), self.0.tools.mode)
+            format!(
+                "{}:{:?}:{}",
+                self.0.session.current_spine(),
+                self.0.tools.mode,
+                self.0.tools.selection.is_some()
+            )
         }
         fn close_requested(&self) -> bool {
             self.0.close_requested()
@@ -230,27 +235,94 @@ fn real_reader_links_and_external_cancel_work_through_async_mailbox() {
         let external = reader.session.link_regions().next().unwrap().0;
         reader.session.jump_to_locator(origin)?;
         reader.refresh_surface()?;
-        sender.send((internal, external)).unwrap();
+        let text_start = reader.session.frame().hits[0].rect;
+        let text_end = reader.session.frame().hits[3].rect;
+        sender
+            .send((internal, external, text_start, text_end))
+            .unwrap();
         bridge.serve(&mut LinkedReader(reader))?;
         Ok(Vec::new())
     });
     until(&mut w, |w| w.ready);
-    let (internal, external) = points.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (internal, external, text_start, text_end) =
+        points.recv_timeout(Duration::from_secs(1)).unwrap();
     let click = |rect: Rect| Action::Click {
         x: rect.x + rect.width as i32 / 2,
         y: rect.y + rect.height as i32 / 2,
     };
-    w.action(click(internal)).unwrap();
-    until(&mut w, |w| w.title == "1:None");
-    w.action(click(external)).unwrap();
-    until(&mut w, |w| w.title == "1:External");
+    let release = |rect: Rect| Action::PointerRelease {
+        x: rect.x + rect.width as i32 / 2,
+        y: rect.y + rect.height as i32 / 2,
+    };
+    w.action(click(text_start)).unwrap();
+    w.action(Action::PointerMove {
+        x: text_end.x + text_end.width as i32 / 2,
+        y: text_end.y + text_end.height as i32 / 2,
+    })
+    .unwrap();
+    w.action(release(text_end)).unwrap();
+    until(&mut w, |w| w.title == "0:None:true");
     w.action(Action::Close).unwrap();
-    until(&mut w, |w| w.title == "1:None");
+    until(&mut w, |w| w.title == "0:None:false");
+    assert!(!w.close);
+    w.action(click(internal)).unwrap();
+    w.action(release(internal)).unwrap();
+    until(&mut w, |w| w.title == "1:None:false");
+    w.action(click(external)).unwrap();
+    w.action(release(external)).unwrap();
+    until(&mut w, |w| w.title == "1:External:false");
+    w.action(Action::Close).unwrap();
+    until(&mut w, |w| w.title == "1:None:false");
     assert!(!w.close);
     assert!(!w.cancelling);
     w.action(Action::Back).unwrap();
-    until(&mut w, |w| w.title == "0:None");
+    until(&mut w, |w| w.title == "0:None:false");
     assert!(!w.close);
+}
+
+#[test]
+fn held_pointer_keeps_drag_evidence_and_reserved_release_when_input_is_full() {
+    let shared = Shared::new((640, 480));
+    shared.push(Action::Click { x: 0, y: 0 });
+    for x in 1..40 {
+        shared.push(Action::PointerMove { x, y: 0 });
+    }
+    for x in (0..40).rev() {
+        shared.push(Action::PointerMove { x, y: 0 });
+    }
+    {
+        let p = shared.pending.lock().unwrap();
+        assert_eq!(p.actions.len(), 3);
+        assert_eq!(p.actions[1], Action::PointerMove { x: 4, y: 0 });
+        assert_eq!(p.actions[2], Action::PointerMove { x: 0, y: 0 });
+    }
+    for _ in 0..200 {
+        shared.push(Action::Next);
+    }
+    assert!(shared.push(Action::PointerRelease { x: 0, y: 0 }));
+    assert!(shared.push(Action::Close));
+    let p = shared.pending.lock().unwrap();
+    assert_eq!(p.actions.len(), 130);
+    assert_eq!(p.actions[128], Action::PointerRelease { x: 0, y: 0 });
+    assert!(!p.motion.pressed());
+}
+
+#[test]
+fn busy_page_updates_do_not_drop_button_release() {
+    let mut w = window(|_| Ok(vec![]));
+    w.ready = true;
+    w.page = Some(w.surface.clone());
+    w.busy_since = Some(Instant::now() - Duration::from_millis(300));
+    w.shared.push(Action::Click { x: 40, y: 80 });
+    w.action(Action::PointerRelease { x: 80, y: 80 }).unwrap();
+    assert!(
+        w.shared
+            .pending
+            .lock()
+            .unwrap()
+            .actions
+            .contains(&Action::PointerRelease { x: 80, y: 80 })
+    );
 }
 
 #[test]

@@ -68,6 +68,7 @@ struct State {
     pointer_y: i32,
     scroll: i32,
     discrete: i32,
+    motion: super::window::MotionCoalescer,
     actions: [Option<Action>; 64],
     action_count: usize,
     fault: Option<&'static str>,
@@ -106,20 +107,20 @@ impl State {
             pointer_y: 0,
             scroll: 0,
             discrete: 0,
+            motion: super::window::MotionCoalescer::default(),
             actions: [None; 64],
             action_count: 0,
             fault: None,
         }
     }
     fn action(&mut self, action: Action) {
-        if matches!(action, Action::PointerMove { .. })
-            && self.action_count > 0
-            && matches!(
-                self.actions[self.action_count - 1],
-                Some(Action::PointerMove { .. })
-            )
+        if self.action_count > 0
+            && self
+                .motion
+                .may_replace(self.actions[self.action_count - 1], action)
         {
             self.actions[self.action_count - 1] = Some(action);
+            self.motion.accepted(action);
             return;
         }
         if self.action_count == self.actions.len() {
@@ -128,6 +129,7 @@ impl State {
         }
         self.actions[self.action_count] = Some(action);
         self.action_count += 1;
+        self.motion.accepted(action);
     }
 }
 // SAFETY: callers supply a live proxy and exactly the argument signature for its opcode.

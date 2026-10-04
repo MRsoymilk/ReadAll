@@ -29,6 +29,7 @@ struct Frame {
 struct Pending {
     size: Option<(u32, u32)>,
     actions: VecDeque<Action>,
+    motion: window::MotionCoalescer,
 }
 struct Shared {
     pending: Mutex<Pending>,
@@ -53,18 +54,23 @@ impl Shared {
     }
     fn push(&self, action: Action) -> bool {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        // Only adjacent motion events coalesce; never reorder click/drag boundaries.
-        if matches!(action, Action::PointerMove { .. } | Action::PointerLeave)
-            && pending
-                .actions
-                .back()
-                .is_some_and(|a| matches!(a, Action::PointerMove { .. } | Action::PointerLeave))
+        // Preserve the first threshold-crossing move in both input queues, so
+        // dragging out and back cannot turn into a link click after coalescing.
+        if pending
+            .motion
+            .may_replace(pending.actions.back().copied(), action)
         {
             pending.actions.pop_back();
         }
-        if pending.actions.len() >= 128 {
+        let boundary = action == Action::Close
+            || pending.motion.pressed()
+                && matches!(action, Action::PointerRelease { .. } | Action::PointerLeave);
+        // Two reserved termination slots keep a saturated queue from swallowing
+        // button-up/cancel and leaving selection stuck to a released pointer.
+        if pending.actions.len() >= if boundary { 130 } else { 128 } {
             return false;
         }
+        pending.motion.accepted(action);
         pending.actions.push_back(action);
         self.wake.notify_one();
         true
@@ -518,10 +524,7 @@ impl WindowHandler for AsyncWindow {
                 return Ok(true);
             }
             // Do not apply pointer coordinates from a stale layout after a resize.
-            if matches!(
-                action,
-                Action::Click { .. } | Action::PointerMove { .. } | Action::PointerRelease { .. }
-            ) {
+            if matches!(action, Action::Click { .. } | Action::PointerMove { .. }) {
                 return Ok(false);
             }
         }

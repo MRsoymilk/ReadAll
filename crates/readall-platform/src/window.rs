@@ -1,4 +1,6 @@
 //! Small safe boundary between the reader and native presentation.
+mod pointer;
+pub use pointer::{MotionCoalescer, POINTER_DRAG_THRESHOLD};
 use readall_render::Surface;
 use std::{error::Error, path::PathBuf, time::Duration};
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]

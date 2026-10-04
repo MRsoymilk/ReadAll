@@ -41,6 +41,12 @@ pub(super) fn click_link(reader: &mut ReaderWindow<'_, '_, '_, '_>, href: &str) 
             })
             .unwrap()
     );
+    reader
+        .action(Action::PointerRelease {
+            x: rect.x + (rect.width / 2) as i32,
+            y: rect.y + (rect.height / 2) as i32,
+        })
+        .unwrap();
 }
 pub(super) fn book(chapters: &[&str]) -> Vec<u8> {
     test_epub::make_epub_with_resources(chapters, vec![])
