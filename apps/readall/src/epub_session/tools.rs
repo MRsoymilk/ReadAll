@@ -39,7 +39,8 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
         Ok(self.book.search(query, false, SearchLimits::default())?)
     }
     pub(crate) fn jump_to_locator(&mut self, locator: EpubLocator) -> Result<bool> {
-        let (spine, offset) = self.book.restore(&locator)?;
+        let locator = self.book.normalize_locator(&locator)?;
+        let (spine, offset) = (locator.spine_index(), locator.utf8_offset() as usize);
         let mut options = self.options.clone();
         options.page = None;
         if spine == self.spine {

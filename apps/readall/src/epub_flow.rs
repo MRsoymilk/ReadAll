@@ -11,6 +11,8 @@ use crate::text_page::{GlyphCache, Options, RenderedPage, TextHit};
 mod box_layout;
 #[cfg(test)]
 mod box_tests;
+#[cfg(test)]
+mod whitespace_tests;
 mod wrapping;
 use box_layout::{BoxPaint, OpenBox};
 use wrapping::build;

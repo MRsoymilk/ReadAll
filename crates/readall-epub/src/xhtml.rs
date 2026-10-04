@@ -6,8 +6,12 @@ use crate::{
     xml::{self, Event, XmlLimits, local_name},
 };
 
-use crate::css::{BoxStyle, StyleSheet, TextStyle};
+use crate::css::{BoxStyle, StyleSheet, TextStyle, WhiteSpace};
+mod whitespace;
+#[cfg(test)]
+mod whitespace_tests;
 use std::ops::Range;
+use whitespace::Whitespace;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyleRun {
@@ -43,12 +47,15 @@ pub struct ChapterContent {
     pub blocks: Vec<BlockBoundary>,
     pub links: Vec<crate::ContentLink>,
     pub warnings: Vec<String>,
+    pub(crate) anchors: Vec<(String, usize)>,
+    pub(crate) legacy_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExtractedText {
     pub(crate) text: String,
-    anchors: Vec<(String, usize)>,
+    pub(crate) anchors: Vec<(String, usize)>,
+    pub(crate) legacy_text: Option<String>,
     pub(crate) runs: Vec<StyleRun>,
     pub(crate) images: Vec<ImageReference>,
     pub(crate) blocks: Vec<BlockBoundary>,
@@ -56,6 +63,7 @@ pub(crate) struct ExtractedText {
 }
 
 impl ExtractedText {
+    #[cfg(test)]
     pub(crate) fn anchor(&self, id: &str) -> Option<usize> {
         self.anchors
             .iter()
@@ -64,18 +72,28 @@ impl ExtractedText {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
-    Ok(extract_with_anchors(bytes, max_bytes)?.text)
+    Ok(extract_styled(bytes, max_bytes, Some(&mut StyleSheet::default()))?.text)
 }
 
 pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<ExtractedText> {
-    extract_styled(bytes, max_bytes, None)
+    extract_impl(bytes, max_bytes, None, false)
 }
 
 pub(crate) fn extract_styled(
     bytes: &[u8],
     max_bytes: usize,
+    sheet: Option<&mut StyleSheet>,
+) -> Result<ExtractedText> {
+    extract_impl(bytes, max_bytes, sheet, true)
+}
+
+fn extract_impl(
+    bytes: &[u8],
+    max_bytes: usize,
     mut sheet: Option<&mut StyleSheet>,
+    formatting: bool,
 ) -> Result<ExtractedText> {
     let events = xml::parse(
         bytes,
@@ -107,6 +125,8 @@ pub(crate) fn extract_styled(
     let mut suppressed_depth = None;
     let mut seen_body = false;
     let mut pending_space = false;
+    let mut whitespace = Whitespace::default();
+    let mut legacy_candidate = false;
     let mut styles = vec![TextStyle::default()];
     let mut runs: Vec<StyleRun> = Vec::new();
     let mut images = Vec::new();
@@ -128,6 +148,8 @@ pub(crate) fn extract_styled(
                     Some(sheet) => sheet.compute_with_box(element, parent)?,
                     None => (parent, BoxStyle::default()),
                 };
+                legacy_candidate |= formatting
+                    && (name == "pre" || name == "br" || style.white_space.preserves_breaks());
                 if sheet.is_some()
                     && name == "svg"
                     && body_depth.is_some()
@@ -159,10 +181,24 @@ pub(crate) fn extract_styled(
                     suppressed_depth = Some(current);
                 } else if body_depth.is_some() && suppressed_depth.is_none() {
                     if name == "br" {
-                        line_break(&mut output, max_bytes)?;
+                        if formatting {
+                            let start = output.len();
+                            whitespace.explicit_break(&mut output, max_bytes)?;
+                            let mut break_style = style;
+                            break_style.white_space = WhiteSpace::PreLine;
+                            if sheet.is_some() {
+                                record_run(&mut runs, start..output.len(), break_style)?;
+                            }
+                        } else {
+                            line_break(&mut output, max_bytes)?;
+                        }
                         pending_space = false;
-                    } else if is_block(name) {
-                        block_break(&mut output, max_bytes)?;
+                    } else if is_block(name) && (formatting || name != "pre") {
+                        if formatting {
+                            whitespace.block_break(&mut output, max_bytes)?;
+                        } else {
+                            block_break(&mut output, max_bytes)?;
+                        }
                         pending_space = false;
                     }
                 }
@@ -261,26 +297,24 @@ pub(crate) fn extract_styled(
             }
             Event::Text(text) if body_depth.is_some() && suppressed_depth.is_none() => {
                 let start = output.len();
-                append_collapsed(&mut output, text, &mut pending_space, max_bytes)?;
+                let text_style = *styles.last().unwrap_or(&TextStyle::default());
+                if formatting {
+                    whitespace.append(
+                        &mut output,
+                        text,
+                        text_style.white_space,
+                        &mut pending_space,
+                        max_bytes,
+                    )?;
+                } else {
+                    append_collapsed(&mut output, text, &mut pending_space, max_bytes)?;
+                }
                 if sheet.is_some() && output.len() > start {
-                    let mut style = *styles.last().unwrap_or(&TextStyle::default());
+                    let mut style = text_style;
                     if svg_capture.is_some() {
                         style.hidden = true;
                     }
-                    if let Some(last) = runs
-                        .last_mut()
-                        .filter(|last| last.range.end == start && last.style == style)
-                    {
-                        last.range.end = output.len();
-                    } else {
-                        if runs.len() >= 100_000 {
-                            return Err(EpubError::LimitExceeded("XHTML style runs"));
-                        }
-                        runs.push(StyleRun {
-                            range: start..output.len(),
-                            style,
-                        });
-                    }
+                    record_run(&mut runs, start..output.len(), style)?;
                 }
             }
             Event::Text(_) => {}
@@ -298,8 +332,13 @@ pub(crate) fn extract_styled(
                 let local = local_name(name);
                 if suppressed_depth == Some(depth) {
                     suppressed_depth = None;
-                } else if body_depth.is_some() && is_block(local) {
-                    block_break(&mut output, max_bytes)?;
+                } else if body_depth.is_some() && is_block(local) && (formatting || local != "pre")
+                {
+                    if formatting {
+                        whitespace.block_break(&mut output, max_bytes)?;
+                    } else {
+                        block_break(&mut output, max_bytes)?;
+                    }
                     pending_space = false;
                 }
                 if body_depth == Some(depth) && local == "body" {
@@ -326,7 +365,7 @@ pub(crate) fn extract_styled(
     if !seen_body {
         return Err(EpubError::Invalid("XHTML body element is absent"));
     }
-    while output.ends_with([' ', '\n']) {
+    while output.len() > whitespace.protected_end && output.ends_with([' ', '\n']) {
         output.pop();
     }
     // HTML fragment lookup prefers any matching id over legacy <a name>, even
@@ -348,14 +387,39 @@ pub(crate) fn extract_styled(
         boundary.offset = boundary.offset.min(output.len());
     }
     let links = links.finish(output.len());
+    let legacy_text = if legacy_candidate {
+        let legacy = extract_with_anchors(bytes, max_bytes)?.text;
+        (legacy != output).then_some(legacy)
+    } else {
+        None
+    };
     Ok(ExtractedText {
         text: output,
+        legacy_text,
         anchors,
         runs,
         images,
         blocks,
         links,
     })
+}
+
+fn record_run(runs: &mut Vec<StyleRun>, range: Range<usize>, style: TextStyle) -> Result<()> {
+    if range.is_empty() {
+        return Ok(());
+    }
+    if let Some(last) = runs
+        .last_mut()
+        .filter(|last| last.range.end == range.start && last.style == style)
+    {
+        last.range.end = range.end;
+    } else {
+        if runs.len() >= 100_000 {
+            return Err(EpubError::LimitExceeded("XHTML style runs"));
+        }
+        runs.push(StyleRun { range, style });
+    }
+    Ok(())
 }
 
 fn record_anchor(anchors: &mut Vec<(String, usize)>, id: &str, offset: usize) -> Result<()> {
@@ -408,6 +472,7 @@ pub(crate) fn is_block(name: &str) -> bool {
             | "nav"
             | "ol"
             | "p"
+            | "pre"
             | "section"
             | "table"
             | "tr"

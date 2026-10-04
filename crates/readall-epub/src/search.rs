@@ -106,12 +106,7 @@ impl EpubBook<'_> {
                     .nth(60)
                     .map_or(content.text.len(), |(i, _)| end + i);
                 report.hits.push(SearchHit {
-                    locator: EpubLocator {
-                        book_id: self.id(),
-                        spine_index: spine,
-                        utf8_offset: offset as u64,
-                        image_index: None,
-                    },
+                    locator: content.locator(self.id(), spine, offset, None)?,
                     end_offset: end,
                     excerpt: content.text[start_excerpt..end_excerpt].replace('\n', " "),
                 });

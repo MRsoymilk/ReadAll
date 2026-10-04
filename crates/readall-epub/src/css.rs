@@ -7,8 +7,10 @@ use crate::{
 
 mod boxes;
 mod fonts;
+mod whitespace;
 pub use boxes::{BoxLength, BoxStyle};
 pub use fonts::{FontFace, FontFamilies};
+pub use whitespace::WhiteSpace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
@@ -29,6 +31,7 @@ pub struct TextStyle {
     /// Computed first-line indentation in reader-base em units.
     pub indent: f32,
     pub line_height: f32,
+    pub white_space: WhiteSpace,
     pub hidden: bool,
     pub bold: bool,
     pub italic: bool,
@@ -44,6 +47,7 @@ impl Default for TextStyle {
             align: TextAlign::Left,
             indent: 0.0,
             line_height: 1.2,
+            white_space: WhiteSpace::Normal,
             hidden: false,
             bold: false,
             italic: false,
@@ -77,6 +81,7 @@ enum Value {
     Inherit,
     Auto,
     Families(u16),
+    WhiteSpace(WhiteSpace),
 }
 #[derive(Debug, Clone)]
 struct Declaration {
@@ -234,8 +239,8 @@ impl StyleSheet {
             return Err(EpubError::LimitExceeded("CSS selector work"));
         }
         type Priority = (bool, (bool, usize, usize, usize), usize, usize);
-        let mut selected: [Option<(Priority, Value)>; boxes::PROPERTIES] =
-            [None; boxes::PROPERTIES];
+        let mut selected: [Option<(Priority, Value)>; boxes::PROPERTIES + 1] =
+            [None; boxes::PROPERTIES + 1];
         let mut offer = |declaration: &Declaration, specificity, order, index| {
             let priority = (declaration.important, specificity, order, index);
             let slot = &mut selected[declaration.property];
@@ -259,6 +264,11 @@ impl StyleSheet {
             }
         }
         let mut style = parent;
+        // Paged-reader default: preserve code indentation and hard breaks while
+        // allowing long source lines to fit the viewport. Author rules can override.
+        if local_name(&element.name) == "pre" {
+            style.white_space = WhiteSpace::PreWrap;
+        }
         if matches!(
             local_name(&element.name),
             "b" | "strong" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
@@ -299,6 +309,8 @@ impl StyleSheet {
                 (6, Value::Hidden(bold)) => style.bold = bold,
                 (7, Value::Hidden(italic)) => style.italic = italic,
                 (33, Value::Families(families)) => style.families = families,
+                (34, Value::WhiteSpace(mode)) => style.white_space = mode,
+                (34, Value::Inherit) => style.white_space = parent.white_space,
                 _ => {}
             }
         }
@@ -306,7 +318,12 @@ impl StyleSheet {
             style.hidden = true;
         }
         let values = selected.map(|entry| entry.map(|(_, value)| value));
-        let mut layout = boxes::compute(&values, style);
+        let mut layout = boxes::compute(
+            &values[..boxes::PROPERTIES]
+                .try_into()
+                .expect("box property prefix"),
+            style,
+        );
         if crate::xhtml::is_block(local_name(&element.name))
             || matches!(local_name(&element.name), "body" | "html")
         {
@@ -351,9 +368,10 @@ fn declarations_with_families(text: &str, families: &mut FontFamilies) -> Vec<De
             "font-weight" => 6,
             "font-style" => 7,
             "font-family" => 33,
+            "white-space" => 34,
             _ => continue,
         };
-        let parsed = if value == "inherit" || property == 33 && value == "unset" {
+        let parsed = if value == "inherit" || matches!(property, 33 | 34) && value == "unset" {
             Some(Value::Inherit)
         } else {
             match property {
@@ -396,6 +414,7 @@ fn declarations_with_families(text: &str, families: &mut FontFamilies) -> Vec<De
                     "normal" => Some(Value::Hidden(false)),
                     _ => None,
                 },
+                34 => WhiteSpace::parse(value).map(Value::WhiteSpace),
                 33 => {
                     if value == "initial" {
                         Some(Value::Families(0))

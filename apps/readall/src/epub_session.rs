@@ -95,7 +95,8 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
                 if options.page.is_some() {
                     return Err("EPUB locator cannot be combined with a page number".into());
                 }
-                let (spine, offset) = book.restore(&locator)?;
+                let locator = book.normalize_locator(&locator)?;
+                let (spine, offset) = (locator.spine_index(), locator.utf8_offset() as usize);
                 (
                     spine,
                     chapter_document(book, spine)?,

@@ -112,7 +112,8 @@ impl EpubBook<'_> {
         Ok(self.archive.read(path)?)
     }
 
-    /// Retain styles and image positions without changing `epub-v1` text offsets.
+    /// Styled text preserves preformatted whitespace; legacy collapsed text is
+    /// retained only for chapters that require v1/v2 offset migration.
     pub fn read_spine_content(&self, index: usize) -> Result<ChapterContent> {
         let item = self
             .spine_item(index)
@@ -145,6 +146,8 @@ impl EpubBook<'_> {
                 font_families: Default::default(),
                 font_faces: Vec::new(),
                 text: String::new(),
+                anchors: Vec::new(),
+                legacy_text: None,
                 runs: Vec::new(),
                 blocks: Vec::new(),
                 links: Vec::new(),
@@ -211,6 +214,8 @@ impl EpubBook<'_> {
             font_families: sheet.families,
             font_faces: sheet.font_faces,
             text: extracted.text,
+            anchors: extracted.anchors,
+            legacy_text: extracted.legacy_text,
             runs: extracted.runs,
             images: extracted.images,
             blocks: extracted.blocks,

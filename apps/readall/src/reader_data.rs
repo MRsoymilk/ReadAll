@@ -193,18 +193,11 @@ impl Store {
         end: Option<usize>,
         text: String,
     ) -> io::Result<u64> {
-        let (spine, offset) = book
-            .restore(&locator)
+        let (locator, end) = book
+            .normalize_range(&locator, end)
             .map_err(|e| invalid(&e.to_string()))?;
         if text.len() > 8192 || text.contains('\0') {
             return Err(invalid("annotation text too large or contains NUL"));
-        }
-        if let Some(end) = end {
-            if end <= offset || locator.image_index().is_some() {
-                return Err(invalid("invalid highlight range"));
-            }
-            book.locator(spine, end)
-                .map_err(|e| invalid(&e.to_string()))?;
         }
         if kind == Kind::Highlight && end.is_none() {
             return Err(invalid("highlight requires an end offset"));
@@ -371,6 +364,27 @@ fn parse_annotations(text: Option<&str>, book: &EpubBook<'_>) -> io::Result<Vec<
             end,
             text,
         });
+    }
+    // Legacy code-block whitespace changes both ends of a stored range. Parse
+    // each annotated chapter once, never once per annotation; do not rewrite
+    // persistent data merely because a book was opened.
+    let mut chapters = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        chapters
+            .entry(row.locator.spine_index())
+            .or_default()
+            .push(index);
+    }
+    for (spine, indices) in chapters {
+        let content = book
+            .read_spine_content(spine)
+            .map_err(|e| invalid(&e.to_string()))?;
+        for index in indices {
+            let row = &mut rows[index];
+            (row.locator, row.end) = content
+                .normalize_range(&row.locator, row.end)
+                .map_err(|e| invalid(&e.to_string()))?;
+        }
     }
     Ok(rows)
 }

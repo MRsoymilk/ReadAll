@@ -81,6 +81,32 @@ fn span(
     Ok(())
 }
 
+fn blank_source_line(
+    builder: &mut Builder,
+    fonts: &mut Fonts<'_, '_>,
+    style: TextStyle,
+    offset: usize,
+    bytes: usize,
+) -> Result<()> {
+    let size = fonts.size(style);
+    let face = fonts.choose_cluster(" ", style);
+    let metrics = fonts.face(face).metrics();
+    let scale = size as f32 / f32::from(metrics.units_per_em);
+    let natural = (f32::from(metrics.ascender) - f32::from(metrics.descender)
+        + f32::from(metrics.line_gap.max(0)))
+        * scale;
+    let height = (natural.max(size as f32 * style.line_height) * fonts.line_spacing)
+        .max(natural)
+        .ceil();
+    builder.line(&mut PendingLine {
+        start: Some(offset),
+        end: offset + bytes,
+        height,
+        ascent: f32::from(metrics.ascender) * scale + (height - natural) / 2.0,
+        ..PendingLine::default()
+    })
+}
+
 pub(super) fn build(
     chapter: &Chapter<'_, '_>,
     options: &Options,
@@ -169,7 +195,8 @@ pub(super) fn build(
             )?;
             break;
         }
-        if matches!(ch, '\n' | '\u{2028}' | '\u{2029}') {
+        let break_style = chapter.style(offset);
+        if matches!(ch, '\n' | '\u{2028}' | '\u{2029}') && !break_style.hidden {
             if start < offset {
                 span(
                     chapter,
@@ -180,10 +207,12 @@ pub(super) fn build(
                     &mut paragraph,
                     &mut work,
                 )?;
+            } else if break_style.white_space.preserves_breaks() {
+                blank_source_line(&mut builder, fonts, break_style, offset, ch.len_utf8())?;
             } else {
                 builder.gap(options.size as f32 * 0.4);
             }
-            paragraph = previous_newline;
+            paragraph = previous_newline && !break_style.white_space.preserves_breaks();
             previous_newline = true;
             start = offset + ch.len_utf8();
         } else {
