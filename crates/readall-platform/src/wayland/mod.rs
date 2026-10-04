@@ -3,10 +3,9 @@
 //! is freed only AFTER all proxies and the connection. No state reference is
 //! held while dispatching. Callbacks only collect bounded events or marshal
 //! protocol replies; they never invoke application code or unwind into C.
+mod keyboard;
 mod protocol;
-use super::window::{
-    Action, WindowHandler, WindowOptions, WindowReport, WindowResult, physical_key, write_xrgb,
-};
+use super::window::{Action, WindowHandler, WindowOptions, WindowReport, WindowResult, write_xrgb};
 use protocol::*;
 use std::{
     ffi::{CStr, CString, c_void},
@@ -62,6 +61,8 @@ struct State {
     xrgb: bool,
     capabilities: u32,
     keyboard_focus: bool,
+    key_state: keyboard::Keyboard,
+    text_input: bool,
     pointer_focus: bool,
     pointer_x: i32,
     pointer_y: i32,
@@ -98,6 +99,8 @@ impl State {
             xrgb: false,
             capabilities: 0,
             keyboard_focus: false,
+            key_state: keyboard::Keyboard::default(),
+            text_input: false,
             pointer_focus: false,
             pointer_x: 0,
             pointer_y: 0,
@@ -109,10 +112,6 @@ impl State {
         }
     }
     fn action(&mut self, action: Action) {
-        if action == Action::Close {
-            self.closed = true;
-            return;
-        }
         if matches!(action, Action::PointerMove { .. })
             && self.action_count > 0
             && matches!(
@@ -207,13 +206,13 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                     b"wl_seat" => Some(3),
                     _ => None,
                 };
-                if let Some(i) = slot {
-                    if s.globals[i].name == 0 {
-                        s.globals[i] = Global {
-                            name: (*args).u,
-                            version: (*args.add(2)).u,
-                        };
-                    }
+                if let Some(i) = slot
+                    && s.globals[i].name == 0
+                {
+                    s.globals[i] = Global {
+                        name: (*args).u,
+                        version: (*args.add(2)).u,
+                    };
                 }
             }
             (REGISTRY, 1) => {
@@ -259,16 +258,31 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
             (KEYBOARD, 0) => {
                 let fd = (*args.add(1)).h;
                 if fd >= 0 {
-                    drop(OwnedFd::from_raw_fd(fd));
+                    let fd = OwnedFd::from_raw_fd(fd);
+                    if (*args).u == 1
+                        && s.key_state
+                            .keymap(fs::File::from(fd), (*args.add(2)).u)
+                            .is_err()
+                    {
+                        eprintln!(
+                            "ReadAll: compositor keymap unavailable; physical navigation remains enabled"
+                        );
+                    }
                 }
             }
             (KEYBOARD, 1) => s.keyboard_focus = (*args.add(1)).o == s.surface,
             (KEYBOARD, 2) => s.keyboard_focus = false,
             (KEYBOARD, 3) if s.keyboard_focus && (*args.add(3)).u == 1 => {
-                if let Some(action) = physical_key((*args.add(2)).u) {
+                if let Some(action) = s.key_state.action((*args.add(2)).u, s.text_input) {
                     s.action(action);
                 }
             }
+            (KEYBOARD, 4) => s.key_state.modifiers(
+                (*args.add(1)).u,
+                (*args.add(2)).u,
+                (*args.add(3)).u,
+                (*args.add(4)).u,
+            ),
             (POINTER, 0) => {
                 s.pointer_focus = (*args.add(1)).o == s.surface;
                 s.pointer_x = (*args.add(2)).i;
@@ -300,6 +314,12 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
             }
             (POINTER, 3) if s.pointer_focus && (*args.add(2)).u == 272 && (*args.add(3)).u == 1 => {
                 s.action(Action::Click {
+                    x: s.pointer_x / 256,
+                    y: s.pointer_y / 256,
+                });
+            }
+            (POINTER, 3) if s.pointer_focus && (*args.add(2)).u == 272 && (*args.add(3)).u == 0 => {
+                s.action(Action::PointerRelease {
                     x: s.pointer_x / 256,
                     y: s.pointer_y / 256,
                 });
@@ -465,16 +485,16 @@ impl Connection {
                     Arg { o: null_mut() },
                 ],
             )?;
-            if kind != 0 {
-                if let Err(e) = listen(p, kind, self.state) {
-                    wl_proxy_destroy(p);
-                    return Err(e);
-                }
+            if kind != 0
+                && let Err(e) = listen(p, kind, self.state)
+            {
+                wl_proxy_destroy(p);
+                return Err(e);
             }
             Ok(p)
         }
     }
-    fn initialize(&mut self) -> WindowResult<()> {
+    fn initialize(&mut self, minimum_size: (u32, u32)) -> WindowResult<()> {
         self.wait_sync()?;
         unsafe {
             (*self.state).compositor = self.bind(0, &raw const wl_compositor_interface, 4, 0)?;
@@ -511,7 +531,11 @@ impl Connection {
                     s: c"xin.soymilk.ReadAll".as_ptr(),
                 }],
             );
-            send(top, 8, &mut [Arg { i: 256 }, Arg { i: 256 }]);
+            let min_width = i32::try_from(minimum_size.0)
+                .map_err(|_| "minimum window width exceeds Wayland limits")?;
+            let min_height = i32::try_from(minimum_size.1)
+                .map_err(|_| "minimum window height exceeds Wayland limits")?;
+            send(top, 8, &mut [Arg { i: min_width }, Arg { i: min_height }]);
             send(top, 7, &mut [Arg { i: 4096 }, Arg { i: 4096 }]);
             send(surface, 6, &mut []); // Initial empty commit; wait for xdg_surface.configure.
         }
@@ -740,7 +764,7 @@ pub(super) fn run(
         handler.surface().width(),
         handler.surface().height(),
     )?;
-    connection.initialize()?;
+    connection.initialize(handler.minimum_size())?;
     let start = Instant::now();
     let mut report = WindowReport::default();
     let mut finishing = false;
@@ -785,7 +809,11 @@ pub(super) fn run(
             };
             let mut changed = resized;
             for action in actions.into_iter().take(count).flatten() {
-                changed |= handler.action(action)?;
+                let handled = handler.action(action)?;
+                if action == Action::Close && !handled {
+                    return Ok(report);
+                }
+                changed |= handled;
                 if handler.close_requested() {
                     return Ok(report);
                 }
@@ -796,10 +824,16 @@ pub(super) fn run(
                 changed |= handler.animation_tick()?;
                 last_animation = Instant::now();
             }
+            // Worker completions and cancellation can arrive without input events.
+            if handler.close_requested() {
+                return Ok(report);
+            }
             unsafe {
                 (*connection.state).dirty |= changed;
+                (*connection.state).text_input = handler.text_input_active();
             }
             if (dirty || changed) && connection.present(handler)? {
+                handler.frame_presented();
                 report.committed_frames = report.committed_frames.saturating_add(1);
                 report.width = width;
                 report.height = height;

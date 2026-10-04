@@ -224,7 +224,7 @@ fn push_hex(output: &mut String, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn decode_hex(text: &str) -> io::Result<Vec<u8>> {
-    if text.len() % 2 != 0 || text.len() > MAX_PATH_BYTES.saturating_mul(2) {
+    if !text.len().is_multiple_of(2) || text.len() > MAX_PATH_BYTES.saturating_mul(2) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid recent-books path encoding",

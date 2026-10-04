@@ -39,7 +39,7 @@ fn string(value: &str) -> Vec<u8> {
     let mut bytes = words(&[value.len() as u32 + 1]);
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(0);
     }
     bytes
@@ -381,6 +381,63 @@ fn animation_ticks_produce_frames_without_input_events() {
     assert_eq!(report.committed_frames, 2);
     assert!(handler.ticks >= 1);
     assert_eq!(observed.frames, 2);
+}
+
+struct CompletionHandler {
+    inner: Handler,
+    presented: usize,
+    done: bool,
+}
+impl WindowHandler for CompletionHandler {
+    fn resize(&mut self, w: u32, h: u32) -> WindowResult<bool> {
+        self.inner.resize(w, h)
+    }
+    fn action(&mut self, _: Action) -> WindowResult<bool> {
+        Ok(false)
+    }
+    fn surface(&self) -> &Surface {
+        self.inner.surface()
+    }
+    fn title(&self) -> String {
+        "ReadAll completion test".into()
+    }
+    fn frame_presented(&mut self) {
+        self.presented += 1;
+    }
+    fn animation_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(1))
+    }
+    fn animation_tick(&mut self) -> WindowResult<bool> {
+        self.done = self.presented > 0;
+        Ok(false)
+    }
+    fn close_requested(&self) -> bool {
+        self.done
+    }
+}
+#[test]
+fn worker_completion_closes_after_first_commit_without_any_input() {
+    let temp = Temp::new();
+    let socket = temp.0.join("display");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let thread = thread::spawn(move || serve(listener, false));
+    let mut handler = CompletionHandler {
+        inner: Handler::new(),
+        presented: 0,
+        done: false,
+    };
+    let report = run(
+        &mut handler,
+        WindowOptions {
+            display: Some(socket),
+            close_after_frames: None,
+        },
+    )
+    .unwrap();
+    let observed = thread.join().unwrap();
+    assert_eq!(handler.presented, 1);
+    assert_eq!(report.committed_frames, 1);
+    assert_eq!(observed.frames, 1);
 }
 
 #[test]

@@ -1,11 +1,11 @@
 [workspace]
-members = ["crates/readall-archive", "crates/readall-core", "crates/readall-epub", "crates/readall-font", "crates/readall-render", "crates/readall-platform", "apps/readall"]
+members = ["crates/readall-archive", "crates/readall-core", "crates/readall-epub", "crates/readall-font", "crates/readall-image", "crates/readall-render", "crates/readall-platform", "apps/readall"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 readall-archive = { path = "crates/readall-archive" }
@@ -13,6 +13,7 @@ readall-epub = { path = "crates/readall-epub" }
 readall-font = { path = "crates/readall-font" }
 readall-core = { path = "crates/readall-core" }
 readall-render = { path = "crates/readall-render" }
+readall-image = { path = "crates/readall-image" }
 readall-platform = { path = "crates/readall-platform" }
 
 [workspace.lints.rust]
@@ -21,6 +22,13 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 
+# Keep ordinary releases within modest build-memory budgets. Cross-crate LTO
+# remains opt-in; the reader still uses opt-level=3 in both release profiles.
 [profile.release]
+lto = false
+codegen-units = 16
+
+[profile.release-lto]
+inherits = "release"
 lto = "thin"
 codegen-units = 1

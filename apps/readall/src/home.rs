@@ -674,12 +674,19 @@ mod enabled {
                     }
                     Ok(false)
                 }
-                Action::Close => Ok(false),
+                Action::Close
+                | Action::Text(_)
+                | Action::Command(_)
+                | Action::PointerRelease { .. } => Ok(false),
             }
         }
     }
 
     impl WindowHandler for Home<'_> {
+        fn minimum_size(&self) -> (u32, u32) {
+            (680, 460)
+        }
+
         fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool> {
             if (width, height) == (self.surface.width(), self.surface.height()) {
                 return Ok(false);
@@ -718,7 +725,10 @@ mod enabled {
                 | Action::Last
                 | Action::Larger
                 | Action::Smaller
-                | Action::Close => Ok(false),
+                | Action::Close
+                | Action::Text(_)
+                | Action::Command(_)
+                | Action::PointerRelease { .. } => Ok(false),
             }
         }
 

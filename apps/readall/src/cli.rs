@@ -24,12 +24,28 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n  readall diagnostics\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFull EPUB styling, font shaping and PDF reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n  readall diagnostics\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--data-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nEPUB supports CSS text/block properties, PNG/JPEG/WebP/SVG, shaping/bidi, font fallback, static TrueType @font-face selection and epub-v1/v2 progress. Full EPUB styling, WOFF/obfuscated fonts and PDF reading remain unimplemented; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
+        )?;
+        writeln!(
+            output,
+            "\nReader tools:\n  readall search <book.epub> <query> [--case-sensitive]\n  readall annotations <book.epub> [--data-dir DIR]\n  readall bookmark <book.epub> <EPUB_LOCATOR> [label]\n  readall note <book.epub> <EPUB_LOCATOR> [text]\n  readall highlight <book.epub> <EPUB_LOCATOR> <end-utf8-offset> [text]\n  readall annotation-remove <book.epub> <ID>\n  readall settings [theme|size|margin|line-spacing VALUE] [--data-dir DIR]\nAll annotation commands accept --data-dir DIR. EPUB render/open accept repeated --fallback-font FILE.\nReader shortcuts: F2 search, F3 annotations, F4 bookmark, F5 settings, F6 theme, F7 note, F8 highlight, F9 text selection; Ctrl+C/Ctrl+V clipboard. Click an image for zoom/pan; Esc dismisses the active tool first. Native text input uses the compositor XKB keymap; IME composition is not integrated yet."
         )?;
         return Ok(());
     }
     let command = args[0].to_str().ok_or("command must be UTF-8")?;
+    if matches!(
+        command,
+        "search"
+            | "annotations"
+            | "bookmark"
+            | "note"
+            | "highlight"
+            | "annotation-remove"
+            | "settings"
+    ) {
+        return crate::reader_cli::run(command, &args[1..], output);
+    }
     if command == "licenses" {
         if args.len() != 1 {
             return Err("licenses takes no arguments".into());
@@ -125,7 +141,7 @@ struct ReadOptions {
 
 impl ReadOptions {
     fn parse(args: &[OsString]) -> Result<Self> {
-        if args.len() % 2 != 0 {
+        if !args.len().is_multiple_of(2) {
             return Err("each reading option requires a value".into());
         }
         let (mut columns, mut rows, mut page, mut at) = (None, None, None, None);

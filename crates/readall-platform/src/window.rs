@@ -9,6 +9,9 @@ use {
 pub type WindowResult<T> = Result<T, Box<dyn Error>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    Text(char),
+    Command(ReaderCommand),
+    PointerRelease { x: i32, y: i32 },
     Next,
     Previous,
     First,
@@ -21,6 +24,20 @@ pub enum Action {
     PointerLeave,
     Click { x: i32, y: i32 },
     Close,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderCommand {
+    Find,
+    Bookmarks,
+    Bookmark,
+    Settings,
+    Theme,
+    Note,
+    Highlight,
+    Select,
+    Copy,
+    Paste,
+    Delete,
 }
 #[derive(Debug, Clone, Default)]
 pub struct WindowOptions {
@@ -37,7 +54,14 @@ pub struct WindowReport {
 }
 pub trait WindowHandler {
     fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool>;
+    fn minimum_size(&self) -> (u32, u32) {
+        (256, 256)
+    }
     fn action(&mut self, action: Action) -> WindowResult<bool>;
+    /// Printable keys go to the editor rather than page-navigation bindings.
+    fn text_input_active(&self) -> bool {
+        false
+    }
     fn surface(&self) -> &Surface;
     fn title(&self) -> String;
     fn animation_interval(&self) -> Option<Duration> {
@@ -46,6 +70,9 @@ pub trait WindowHandler {
     fn animation_tick(&mut self) -> WindowResult<bool> {
         Ok(false)
     }
+    /// Called only after a pixel buffer has actually been committed. Loading
+    /// handlers can defer expensive work until their first status frame is visible.
+    fn frame_presented(&mut self) {}
     fn close_requested(&self) -> bool {
         false
     }
@@ -85,6 +112,15 @@ pub(crate) fn write_xrgb(surface: &Surface, output: &mut impl Write) -> io::Resu
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 pub(crate) fn physical_key(code: u32) -> Option<Action> {
     Some(match code {
+        60 => Action::Command(ReaderCommand::Find),
+        61 => Action::Command(ReaderCommand::Bookmarks),
+        62 => Action::Command(ReaderCommand::Bookmark),
+        63 => Action::Command(ReaderCommand::Settings),
+        64 => Action::Command(ReaderCommand::Theme),
+        65 => Action::Command(ReaderCommand::Note),
+        66 => Action::Command(ReaderCommand::Highlight),
+        67 => Action::Command(ReaderCommand::Select),
+        111 => Action::Command(ReaderCommand::Delete),
         1 => Action::Close,
         28 => Action::Activate,
         14 => Action::Back,
