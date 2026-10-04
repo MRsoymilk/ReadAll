@@ -120,7 +120,7 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
 
     writeln!(
         output,
-        "Rendered {} spine page (CSS text/block subset + PNG/JPEG/WebP/SVG; shaping/bidi/font fallback)\nTitle: {}\nSpine: {}/{}\nResource: {}\nPage: {}/{}\nEPUB locator: {}\nChapter locator: {}\nImage: {}x{}\nMissing characters: {}\nOutput: {:?}",
+        "Rendered {} spine page (CSS text/block subset + PNG/JPEG/WebP/GIF/SVG; shaping/bidi/font fallback)\nTitle: {}\nSpine: {}/{}\nResource: {}\nPage: {}/{}\nEPUB locator: {}\nChapter locator: {}\nImage: {}x{}\nMissing characters: {}\nOutput: {:?}",
         prepared.format.label(),
         book.title().unwrap_or("(untitled)"),
         spine + 1,

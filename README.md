@@ -112,7 +112,7 @@ ReadAll 当前自己处理：
 - XHTML 可见正文提取，并保留样式范围、图片位置和目录锚点
 - CSS 子集：级联、标题字号、粗斜体、颜色、对齐、缩进、行高及嵌套块盒模型
 - 书籍静态 TrueType 内嵌字体：`@font-face`、字体族列表、样式匹配和缺字回退
-- PNG（含 Adam7）、JPEG、WebP、SVG 的透明度合成、等比例缩放和图文分页
+- PNG（含 Adam7）、JPEG、WebP、GIF、SVG 的透明度合成、等比例缩放和图文分页
 - 常见 HTML / XHTML DOCTYPE
 - 常见 legacy XHTML 命名实体（如 `&nbsp;`、`&mdash;`、`&hellip;`、`&copy;`），固定映射且不加载外部 DTD
 - 跨 spine 连续阅读
@@ -164,7 +164,11 @@ CSS 从 XHTML 的 `<style>`、行内 `style` 和包内 `<link rel="stylesheet">`
 
 PNG 仍由 `readall-image` 自研解码，复用 ReadAll 的 DEFLATE。支持非交错和 Adam7 交错图像、灰度/RGB/索引色/alpha 的合法位深组合，校验 CRC、Adler-32 与资源预算。JPEG 通过独立的 `jpeg-decoder` 接入，涵盖基线、渐进、灰度、CMYK 及有界 EXIF 方向处理。图片按独立块排入正文、保留宽高比；缩放仍采用最近邻，没有完整色彩管理。
 
-WebP 使用 `image-webp = 0.2.4`，支持有损/无损/透明通道，动画只显示首帧。SVG 通过隔离的 `resvg` / `roxmltree` 路径渲染向量、变换、裁剪和文本；内联 SVG 与独立 SVG 章节也进入图片定位。SVG 的图片只允许受预算约束的 EPUB 包内栅格资源，不读取外部文件、网络、DTD 或递归 SVG。JPEG/WebP/SVG 使用独立 Rust 依赖，不启动外部转换进程，也不接入完整 EPUB 阅读引擎。
+WebP 使用 `image-webp = 0.2.4`，支持有损/无损/透明通道，动画只显示首帧。SVG 通过隔离的 `resvg` / `roxmltree` 路径渲染向量、变换、裁剪和文本；内联 SVG 与独立 SVG 章节也进入图片定位。SVG 的图片只允许受预算约束的 EPUB 包内栅格资源，不读取外部文件、网络、DTD 或递归 SVG。JPEG/WebP/GIF/SVG 使用独立 Rust 依赖，不启动外部转换进程，也不接入完整 EPUB 阅读引擎。
+
+GIF87a/89a 使用已由 `resvg` 引入的 `gif 0.14.2`，现由 `readall-image` 直接接入；不新增第三方包版本或外部程序。支持全局/局部调色板、透明索引、交错扫描和帧偏移，按逻辑画布显示首帧，未覆盖区域保持透明；动画 GIF 与 WebP 一样暂不播放。头部探测不解码像素，完整读取后检查容器边界、帧尺寸、块数、LZW 和输出预算，再进入原 LRU 缓存。
+
+SVG 中的 GIF（包括内联 SVG、独立 SVG 文件和 data URI）也使用同一有界解码器。内联 SVG 的图片路径相对所在章节解析，独立 SVG 的子资源相对 SVG 本身解析；支持包内相对路径和百分号编码文件名，不放开文件系统或网络。资源失败会报告具体 href 和底层原因（manifest/ZIP 缺失、路径限制、校验错误、解码错误或预算），不再统一显示 `SVG image resource missing, disallowed or over budget`。data URI 不会完整写入日志，子资源数量在加载前限制。
 
 图片和 CSS 只读取 EPUB manifest 中声明的包内资源，不下载远程 URI，不访问包外文件。单张栅格图片默认不超过 16 MiB / 8M 像素。分页进行有界头部探测（JPEG 可能需要扩展前缀，SVG 需要有界解析），绘制当前页才完整读取、校验并生成像素。ZIP 前缀只是未验证的尺寸提示，不能替代完整读取时的 CRC 校验。
 
@@ -177,7 +181,7 @@ RGBA 缓存使用 LRU，最多驻留 64 个资源且总量不超过 64 MiB。**6
 当前 EPUB **尚未完整渲染**：
 
 - 完整 CSS
-- GIF / AVIF 等其他图片格式、动画播放与完整色彩管理
+- AVIF 等其他图片格式、动画播放与完整色彩管理
 - MathML
 - WOFF/WOFF2、CFF/CFF2、可变字体及字体混淆的内嵌字体路径
 - DRM / 加密 EPUB
@@ -398,7 +402,7 @@ ReadAll/
 │   ├── readall-core/       # 文档、文本、locator、布局
 │   ├── readall-epub/       # EPUB container / OPF / XHTML
 │   ├── readall-font/       # TrueType / TTC / glyph outline
-│   ├── readall-image/      # PNG/JPEG/WebP/SVG dispatch / RGBA pixels
+│   ├── readall-image/      # PNG/JPEG/WebP/GIF/SVG dispatch / RGBA pixels
 │   ├── readall-mobi/       # PalmDB / PalmDOC / HUFF-CDIC / legacy HTML adapter
 │   ├── readall-render/     # CPU surface / glyph rasterizer
 │   └── readall-platform/   # 文件与原生窗口平台层
@@ -430,7 +434,7 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 - Windows / Android 窗口后端尚未实现
 - PDF 尚未实现
 - MOBI 支持未加密 MOBI6/7，AZW3 支持独立可重排 KF8；固定版式 KF8、KFX、DRM、字典专用索引和完整 Kindle 版式尚未实现
-- EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
+- EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/GIF/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
 - 已有 shaping / bidi / 字素断行 / 有界字体回退，但竖排、完整排版规范和更多语言仍需验收
 - 已有搜索、书签、高亮、笔记、设置和正文链接/脚注跳转；封面墙、弹出脚注、跨页选择尚未实现
 - Wayland 输入法组合协议、动画播放、完整色彩管理尚未实现
@@ -449,7 +453,7 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 ReadAll 项目源码目前**尚未声明统一的开源许可证**。在明确项目代码许可证之前，请不要假定项目源码可以按 MIT/Apache/GPL 等许可证再分发。
 
-JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。MOBI / KF8 实现参考 foliate-js 的 PalmDOC / HUFF-CDIC、INDX 与 KF8 重建格式，保留其 MIT 许可；HTML 实体处理使用固定版本 `html-escape = 0.2.13`（及间接依赖 `utf8-width`），不引入整个第三方电子书引擎。`readall licenses` 显示内置字体与 foliate-js 参考许可，不是所有 Cargo 依赖的完整许可清单。
+JPEG/WebP/GIF/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`gif`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。MOBI / KF8 实现参考 foliate-js 的 PalmDOC / HUFF-CDIC、INDX 与 KF8 重建格式，保留其 MIT 许可；HTML 实体处理使用固定版本 `html-escape = 0.2.13`（及间接依赖 `utf8-width`），不引入整个第三方电子书引擎。`readall licenses` 显示内置字体与 foliate-js 参考许可，不是所有 Cargo 依赖的完整许可清单。
 
 已捆绑的第三方资源分别遵循其自己的许可证：
 

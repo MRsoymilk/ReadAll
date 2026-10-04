@@ -172,10 +172,10 @@ impl<'book, 'archive> ImageStore<'book, 'archive> {
                 let spine = self.spine;
                 let reference = &self.sources[source].reference;
                 let inline = self.sources[source].inline.is_some();
-                readall_image::decode_svg_with_resources(&bytes, limits, fonts, &|href| {
+                readall_image::decode_svg_with_resource_loader(&bytes, limits, fonts, &|href| {
                     if inline {
                         book.read_spine_resource(spine, href, limits.max_file_bytes)
-                            .ok()
+                            .map_err(|error| error.to_string())
                     } else {
                         book.read_spine_nested_resource(
                             spine,
@@ -183,7 +183,7 @@ impl<'book, 'archive> ImageStore<'book, 'archive> {
                             href,
                             limits.max_file_bytes,
                         )
-                        .ok()
+                        .map_err(|error| error.to_string())
                     }
                 })?
             } else {

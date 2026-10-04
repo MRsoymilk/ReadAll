@@ -132,7 +132,7 @@ fn cli_search_and_help_match_the_shipped_capabilities() {
     ]);
     assert!(sensitive.contains("Matches: 0;"));
     let help = ok(&["--help"]);
-    assert!(help.contains("PNG/JPEG/WebP/SVG"));
+    assert!(help.contains("PNG/JPEG/WebP/GIF/SVG"));
     assert!(help.contains("shaping/bidi"));
     assert!(help.contains("F9 text selection"));
     assert!(!help.contains("font shaping and PDF reading are not implemented"));
