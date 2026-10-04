@@ -1,6 +1,14 @@
 //! Dependency-free EPUB container/package foundation.
 //! This validates an intentionally small, explicit subset; XHTML/CSS layout is not implemented here.
+mod content;
+mod search;
+mod svg_inline;
+pub use search::{SearchHit, SearchLimits, SearchReport};
+pub mod css;
 mod xhtml;
+pub use xhtml::{BlockBoundary, ChapterContent, ImageReference, StyleRun};
+mod links;
+pub use links::ContentLink;
 mod xml;
 
 use readall_archive::{ArchiveError, ZipArchive, ZipLimits};
@@ -86,6 +94,7 @@ pub struct EpubLocator {
     book_id: DocumentId,
     spine_index: usize,
     utf8_offset: u64,
+    image_index: Option<usize>,
 }
 
 impl EpubLocator {
@@ -98,15 +107,26 @@ impl EpubLocator {
     pub fn utf8_offset(&self) -> u64 {
         self.utf8_offset
     }
+    /// Image ordinal in the canonical chapter, when this is an epub-v2 image target.
+    pub fn image_index(&self) -> Option<usize> {
+        self.image_index
+    }
 }
 
 impl fmt::Display for EpubLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "epub-v1:{}:{}:{}",
-            self.book_id, self.spine_index, self.utf8_offset
-        )
+        match self.image_index {
+            Some(image) => write!(
+                f,
+                "epub-v2:{}:{}:{}:{image}",
+                self.book_id, self.spine_index, self.utf8_offset
+            ),
+            None => write!(
+                f,
+                "epub-v1:{}:{}:{}",
+                self.book_id, self.spine_index, self.utf8_offset
+            ),
+        }
     }
 }
 
@@ -115,9 +135,11 @@ impl FromStr for EpubLocator {
 
     fn from_str(text: &str) -> Result<Self> {
         let mut parts = text.split(':');
-        if parts.next() != Some("epub-v1") {
-            return Err(EpubError::InvalidLocator("unknown locator version"));
-        }
+        let image_target = match parts.next() {
+            Some("epub-v1") => false,
+            Some("epub-v2") => true,
+            _ => return Err(EpubError::InvalidLocator("unknown locator version")),
+        };
         let id = parts
             .next()
             .ok_or(EpubError::InvalidLocator("missing book ID"))?
@@ -129,6 +151,21 @@ impl FromStr for EpubLocator {
         let offset = parts
             .next()
             .ok_or(EpubError::InvalidLocator("missing UTF-8 offset"))?;
+        let image_index = if image_target {
+            let value = parts
+                .next()
+                .ok_or(EpubError::InvalidLocator("missing image index"))?;
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(EpubError::InvalidLocator("invalid image index"));
+            }
+            Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|_| EpubError::InvalidLocator("image index overflow"))?,
+            )
+        } else {
+            None
+        };
         if spine.is_empty()
             || offset.is_empty()
             || !spine.bytes().all(|byte| byte.is_ascii_digit())
@@ -141,6 +178,7 @@ impl FromStr for EpubLocator {
         }
         Ok(Self {
             book_id: id,
+            image_index,
             spine_index: spine
                 .parse()
                 .map_err(|_| EpubError::InvalidLocator("spine index overflow"))?,
@@ -309,9 +347,16 @@ impl<'a> EpubBook<'a> {
             .ok_or(EpubError::Invalid("spine index is out of range"))?;
         Ok(self.archive.read(item.path())?)
     }
-    /// Extracts the initial XHTML reading subset from one spine item.
-    /// CSS, images, SVG, MathML and scripting are intentionally not rendered here.
+    /// Canonical text used by stable locators. Presentation is kept separate;
+    /// a standalone SVG page has an empty canonical text stream.
     pub fn read_spine_text(&self, index: usize) -> Result<String> {
+        if self
+            .spine_item(index)
+            .is_some_and(|item| item.media_type() == "image/svg+xml")
+        {
+            self.read_spine_content(index)?;
+            return Ok(String::new());
+        }
         let item = self
             .spine_item(index)
             .ok_or(EpubError::Invalid("spine index is out of range"))?;
@@ -335,6 +380,7 @@ impl<'a> EpubBook<'a> {
             book_id: self.id,
             spine_index,
             utf8_offset: utf8_offset as u64,
+            image_index: None,
         })
     }
 
@@ -364,7 +410,23 @@ impl<'a> EpubBook<'a> {
             book_id: self.id,
             spine_index,
             utf8_offset: offset as u64,
+            image_index: None,
         }))
+    }
+
+    /// Preserve the old text locator while distinguishing adjacent image-only pages.
+    pub fn image_locator(&self, spine_index: usize, image_index: usize) -> Result<EpubLocator> {
+        let content = self.read_spine_content(spine_index)?;
+        let image = content
+            .images
+            .get(image_index)
+            .ok_or(EpubError::InvalidLocator("image index outside chapter"))?;
+        Ok(EpubLocator {
+            book_id: self.id,
+            spine_index,
+            utf8_offset: image.offset as u64,
+            image_index: Some(image_index),
+        })
     }
 
     pub fn restore(&self, locator: &EpubLocator) -> Result<(usize, usize)> {
@@ -380,6 +442,18 @@ impl<'a> EpubBook<'a> {
             return Err(EpubError::InvalidLocator(
                 "offset is outside the chapter or inside a UTF-8 character",
             ));
+        }
+        if let Some(index) = locator.image_index {
+            let content = self.read_spine_content(locator.spine_index)?;
+            if content
+                .images
+                .get(index)
+                .is_none_or(|image| image.offset != offset)
+            {
+                return Err(EpubError::InvalidLocator(
+                    "image index and canonical offset disagree",
+                ));
+            }
         }
         Ok((locator.spine_index, offset))
     }
@@ -993,14 +1067,11 @@ fn parse_ncx_document(
                     nav_label_depth = None;
                     label_text_depth = None;
                 }
-                if points
-                    .last()
-                    .is_some_and(|point| point.element_depth == depth && local == "navPoint")
+                if let Some(point) =
+                    points.pop_if(|point| point.element_depth == depth && local == "navPoint")
+                    && !point.emitted
                 {
-                    let point = points.pop().expect("checked above");
-                    if !point.emitted {
-                        return Err(EpubError::Invalid("NCX navPoint is missing content"));
-                    }
+                    return Err(EpubError::Invalid("NCX navPoint is missing content"));
                 }
                 if nav_map_depth == Some(depth) && local == "navMap" {
                     nav_map_depth = None;

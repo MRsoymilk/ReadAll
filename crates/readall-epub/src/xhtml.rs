@@ -6,10 +6,53 @@ use crate::{
     xml::{self, Event, XmlLimits, local_name},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crate::css::{BoxStyle, StyleSheet, TextStyle};
+use std::ops::Range;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleRun {
+    pub range: Range<usize>,
+    pub style: TextStyle,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageReference {
+    /// Offset in the unchanged canonical text stream, not an inserted character.
+    pub offset: usize,
+    pub source: String,
+    pub alt: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub inline_svg: Option<String>,
+}
+/// Source-ordered box boundaries, including image order at a shared text offset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockBoundary {
+    pub offset: usize,
+    pub images_before: usize,
+    /// Some opens a block; None closes the innermost open block.
+    pub style: Option<BoxStyle>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChapterContent {
+    pub font_families: crate::css::FontFamilies,
+    pub font_faces: Vec<crate::css::FontFace>,
+    pub text: String,
+    pub runs: Vec<StyleRun>,
+    pub images: Vec<ImageReference>,
+    pub blocks: Vec<BlockBoundary>,
+    pub links: Vec<crate::ContentLink>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExtractedText {
     pub(crate) text: String,
     anchors: Vec<(String, usize)>,
+    pub(crate) runs: Vec<StyleRun>,
+    pub(crate) images: Vec<ImageReference>,
+    pub(crate) blocks: Vec<BlockBoundary>,
+    pub(crate) links: Vec<crate::ContentLink>,
 }
 
 impl ExtractedText {
@@ -26,6 +69,14 @@ pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
 }
 
 pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<ExtractedText> {
+    extract_styled(bytes, max_bytes, None)
+}
+
+pub(crate) fn extract_styled(
+    bytes: &[u8],
+    max_bytes: usize,
+    mut sheet: Option<&mut StyleSheet>,
+) -> Result<ExtractedText> {
     let events = xml::parse(
         bytes,
         XmlLimits {
@@ -50,17 +101,56 @@ pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<Ext
     anchors
         .try_reserve(32)
         .map_err(|_| EpubError::AllocationFailed)?;
+    let mut named_anchors = Vec::new();
     let mut depth = 0_usize;
     let mut body_depth = None;
     let mut suppressed_depth = None;
     let mut seen_body = false;
     let mut pending_space = false;
+    let mut styles = vec![TextStyle::default()];
+    let mut runs: Vec<StyleRun> = Vec::new();
+    let mut images = Vec::new();
+    let mut blocks = Vec::new();
+    let mut open_blocks = Vec::new();
+    let mut links = crate::links::LinkCollector::default();
+    let mut svg_capture: Option<(usize, usize, String)> = None;
 
     for event in &events {
+        if let Some((_, _, buffer)) = &mut svg_capture {
+            crate::svg_inline::append(buffer, event, false, max_bytes)?;
+        }
         match event {
             Event::Start(element) => {
                 let current = depth + 1;
                 let name = local_name(&element.name);
+                let parent = *styles.last().unwrap_or(&TextStyle::default());
+                let (style, box_style) = match sheet.as_deref_mut() {
+                    Some(sheet) => sheet.compute_with_box(element, parent)?,
+                    None => (parent, BoxStyle::default()),
+                };
+                if sheet.is_some()
+                    && name == "svg"
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                    && !style.hidden
+                {
+                    if images.len() >= 1024 {
+                        return Err(EpubError::LimitExceeded("XHTML image references"));
+                    }
+                    let index = images.len();
+                    let mut buffer = String::new();
+                    crate::svg_inline::append(&mut buffer, event, true, max_bytes)?;
+                    images.push(ImageReference {
+                        offset: output.len(),
+                        source: format!("<inline-svg-{index}>"),
+                        alt: "SVG illustration".into(),
+                        width: None,
+                        height: None,
+                        inline_svg: None,
+                    });
+                    svg_capture = Some((current, index, buffer));
+                }
                 if name == "body" && body_depth.is_none() {
                     body_depth = Some(current);
                     seen_body = true;
@@ -76,6 +166,23 @@ pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<Ext
                         pending_space = false;
                     }
                 }
+                let boxed = sheet.is_some()
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                    && !style.hidden
+                    && (is_block(name) || name == "body")
+                    && box_style.active();
+                if boxed {
+                    if blocks.len() >= 100_000 {
+                        return Err(EpubError::LimitExceeded("XHTML block boundaries"));
+                    }
+                    blocks.push(BlockBoundary {
+                        offset: output.len(),
+                        images_before: images.len(),
+                        style: Some(box_style),
+                    });
+                }
                 if body_depth.is_some()
                     && suppressed_depth.is_none()
                     && !is_suppressed(name)
@@ -83,17 +190,111 @@ pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<Ext
                 {
                     record_anchor(&mut anchors, id, output.len())?;
                 }
+                if name == "a"
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && let Some(name) = element.attribute("name")
+                {
+                    record_anchor(&mut named_anchors, name, output.len())?;
+                }
+                if anchors.len().saturating_add(named_anchors.len()) > 16_384 {
+                    return Err(EpubError::LimitExceeded("XHTML anchor metadata"));
+                }
+                if sheet.is_some()
+                    && name == "img"
+                    && svg_capture.is_none()
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && !style.hidden
+                {
+                    if images.len() >= 1024 {
+                        return Err(EpubError::LimitExceeded("XHTML image references"));
+                    }
+                    images.push(ImageReference {
+                        offset: output.len(),
+                        inline_svg: None,
+                        source: element.attribute("src").unwrap_or("").to_owned(),
+                        alt: element
+                            .attribute("alt")
+                            .unwrap_or("Image")
+                            .chars()
+                            .take(256)
+                            .collect(),
+                        width: element
+                            .attribute("width")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|v| *v > 0),
+                        height: element
+                            .attribute("height")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|v| *v > 0),
+                    });
+                }
+                if sheet.is_some()
+                    && name == "a"
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                    && !style.hidden
+                {
+                    links.start(element, current, output.len(), images.len())?;
+                }
                 if !element.empty {
+                    styles.push(style);
+                    open_blocks.push(boxed);
                     depth = current;
-                } else if body_depth == Some(current) && name == "body" {
-                    body_depth = None;
+                } else {
+                    if boxed {
+                        blocks.push(BlockBoundary {
+                            offset: output.len(),
+                            images_before: images.len(),
+                            style: None,
+                        });
+                    }
+                    if body_depth == Some(current) && name == "body" {
+                        body_depth = None;
+                    }
+                    if suppressed_depth == Some(current) {
+                        suppressed_depth = None;
+                    }
                 }
             }
             Event::Text(text) if body_depth.is_some() && suppressed_depth.is_none() => {
+                let start = output.len();
                 append_collapsed(&mut output, text, &mut pending_space, max_bytes)?;
+                if sheet.is_some() && output.len() > start {
+                    let mut style = *styles.last().unwrap_or(&TextStyle::default());
+                    if svg_capture.is_some() {
+                        style.hidden = true;
+                    }
+                    if let Some(last) = runs
+                        .last_mut()
+                        .filter(|last| last.range.end == start && last.style == style)
+                    {
+                        last.range.end = output.len();
+                    } else {
+                        if runs.len() >= 100_000 {
+                            return Err(EpubError::LimitExceeded("XHTML style runs"));
+                        }
+                        runs.push(StyleRun {
+                            range: start..output.len(),
+                            style,
+                        });
+                    }
+                }
             }
             Event::Text(_) => {}
             Event::End(name) => {
+                if local_name(name) == "a" {
+                    links.end(depth, output.len(), images.len());
+                }
+                if open_blocks.pop() == Some(true) {
+                    blocks.push(BlockBoundary {
+                        offset: output.len(),
+                        images_before: images.len(),
+                        style: None,
+                    });
+                }
                 let local = local_name(name);
                 if suppressed_depth == Some(depth) {
                     suppressed_depth = None;
@@ -105,7 +306,21 @@ pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<Ext
                     body_depth = None;
                 }
                 depth = depth.saturating_sub(1);
+                if styles.len() > 1 {
+                    styles.pop();
+                }
             }
+        }
+        let closed_svg = svg_capture.as_ref().is_some_and(|(level, _, _)| {
+            *level == depth + 1
+                && match event {
+                    Event::End(name) => local_name(name) == "svg",
+                    Event::Start(element) => element.empty && local_name(&element.name) == "svg",
+                    _ => false,
+                }
+        });
+        if closed_svg && let Some((_, index, buffer)) = svg_capture.take() {
+            images[index].inline_svg = Some(buffer);
         }
     }
     if !seen_body {
@@ -114,12 +329,32 @@ pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<Ext
     while output.ends_with([' ', '\n']) {
         output.pop();
     }
+    // HTML fragment lookup prefers any matching id over legacy <a name>, even
+    // when a same-named legacy anchor appears earlier in document order.
+    for (name, offset) in named_anchors {
+        record_anchor(&mut anchors, &name, offset)?;
+    }
     for (_, offset) in &mut anchors {
         *offset = (*offset).min(output.len());
     }
+    for run in &mut runs {
+        run.range.end = run.range.end.min(output.len());
+    }
+    runs.retain(|run| !run.range.is_empty());
+    for image in &mut images {
+        image.offset = image.offset.min(output.len());
+    }
+    for boundary in &mut blocks {
+        boundary.offset = boundary.offset.min(output.len());
+    }
+    let links = links.finish(output.len());
     Ok(ExtractedText {
         text: output,
         anchors,
+        runs,
+        images,
+        blocks,
+        links,
     })
 }
 
@@ -146,7 +381,7 @@ fn is_suppressed(name: &str) -> bool {
     matches!(name, "script" | "style" | "template" | "head")
 }
 
-fn is_block(name: &str) -> bool {
+pub(crate) fn is_block(name: &str) -> bool {
     matches!(
         name,
         "address"
