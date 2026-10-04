@@ -1,16 +1,38 @@
 # ReadAll Android 开发入口
 
-这是 Android 第一阶段的原生宿主工程，复用现有 Rust 阅读代码。不是 WebView，也不是在手机上运行 Wayland 程序。桌面入口改为调用同一个 `readall` 库；暂不物理搬迁所有模块，避免为接入手机而重复一份排版实现。
+Android 与 Linux 现在复用同一个 `ReaderWindow` 阅读界面：不只是共用排版，还共用顶部进度、可收起工具栏、目录、设置、选区操作和翻页动画。不是 WebView，也不是在手机上运行 Wayland 程序。平台差异收敛到文件选择、触摸、输入法、剪贴板、浏览器和生命周期。
 
 ## 当前范围
 
 `apps/readall/src/mobile.rs` 提供有界消息队列、独立阅读线程、最新页面快照、加载阶段与取消。EPUB、MOBI、AZW3 仍使用原解析器、字体、图片、代码着色与分页；跨 JNI 只传递操作、状态和完成的像素帧。`crates/readall-android` 把句柄与异常边界单独隔离，不通过 Java 保存 Rust 裸指针。取消不在 Android 主线程等待解码线程退出；计入尚未完成退出的线程，最多允许四个阅读线程。
 
-手机界面使用 SDK 自带的 Java/Android API，以便只用已有 JDK、SDK 和 NDK 构建，不要求 Android Studio、Gradle、Kotlin 编译器或额外 AndroidX 依赖。已写入系统文件选择、加载状态、基础横向滑动/按钮翻页、目录跳转、字号、主题、添加书签和继续上次阅读入口。
+手机外壳使用 SDK 自带的 Java/Android API，不要求 Android Studio、Gradle、Kotlin 编译器或 AndroidX。书籍打开后隐藏独立 Java 按钮栏；`ReaderView` 展示包含完整共享 UI 的 Rust 页面，不再使用系统 AlertDialog 显示目录。首页的打开/继续、SAF 选择器、加载错误界面及系统键盘仍由 Android 管理，首页尚不是 Linux 的完整最近阅读列表。
 
-**第一阶段不代表桌面功能已全部移植。** Android 长按选字、选区手柄、链接/图片点击、搜索/标注列表、仿书动画、连续惯性滚动及系统剪贴板尚未接入。横向手势当前只触发整页切换，没有动画；点击正文不会翻页。最低 API 26，默认编译/目标 API 36，仅提供 ARM64 或 x86_64 单 ABI 调试包。
+最低 API 26，默认编译/目标 API 36，仅提供 ARM64 或 x86_64 单 ABI 调试包。共享 UI 已接入目录、搜索、标注列表、字号/边距/行距/主题/翻页模式、长按拖选和复制/高亮/笔记、书内链接返回、外链确认及图片查看。触摸选区拖动柄、双指缩放、跨页选择、完整可访问性语义树以及完整桌面首页仍未实现。仿书模式是与 Linux 一致的 2D 卷页，不是真实三维纸张模拟。
 
-已使用 API 36、Build Tools 36.0.0、NDK 29.0.14206865 和系统 Rust 1.97.1 完成 ARM64 原生库交叉编译、Java/D8 编译、APK 签名与对齐校验。产物为 `target/android/readall-android-debug-arm64-v8a.apk`，调试预览版；尚未完成手机安装、启动与交互验收。宿主机 JVM/JNI 测试与 APK 构建成功都不能替代真机验收。
+## 与 Linux 一致的操作
+
+底部三层浮动工具栏、展开/收起箭头及目录面板来自同一套 Rust 绘制与命中测试。点“目录”展开，再点可收起；目录内上下拖动只移动目录活动行，不翻书页。较矮窗口打开目录时暂时收起大工具栏，保留底部返回工具栏的箭头，防止横屏或键盘挤压导致重叠。顶部显示相同的章节、页码、总百分比，底部保留进度条。
+
+点工具栏的“设置”，在第五行“翻页模式”右侧加减按钮切换：
+
+| 模式 | 手机操作 | 与 Linux 共用的效果 |
+| --- | --- | --- |
+| 左右滑动 | 单指左右拖动、松手 | 页面平移；短拖动回弹 |
+| 仿书翻页 | 单指左右拖动、松手 | 纸背、折边与阴影的 2D 卷页 |
+| 上下平滑滚动 | 上下拖动，松手可继续惯性移动 | 前后页拼接、部分页位置与跨章缓存 |
+
+点按直到手指抬起才激活按钮、链接或图片；正文点击不会翻页。长按后拖动选择文字，松手使用共享“复制 / 高亮 / 笔记 / 取消”操作条。复制交给 Android 系统剪贴板；搜索和笔记通过 `BaseInputConnection` 接收包含中文组合输入的系统键盘文本，提交和删除仍作用于共享输入框。HTTP/HTTPS 链接仍先在共享面板确认，确认后才调用 Android 浏览器 Intent。
+
+系统返回先停止当前移动或关闭面板/选区，再返回书内链接来源，最后关闭图书回到首页；文件选择器和键盘遵循 Android 系统自身的返回行为。外接键盘保留主要 F2–F8、翻页键和 Ctrl+C/V 操作。
+
+## 帧调度与资源
+
+Rust 阅读线程接收有界有序输入，相邻的同类移动事件只保留最新位置，开始/结束/取消保留顺序和预留容量。标题滚动不阻止空闲预读；预读遇到新操作可以在检查点中断。只发布最新完成帧，界面合成复用 Linux 的相邻页缓存，不逐帧解码图书图片。
+
+Android 使用 Choreographer 申请显示回调，读取和像素传递在独立工作线程；最多一个像素复制任务，复用直接缓冲区与已经退出显示的 Bitmap。ReaderView 使用软件画布避免将仍被 RenderThread 使用的 Bitmap 交回缓冲池。按屏幕密度计算有界的阅读逻辑尺寸，并进行同样的绘制与触摸坐标变换；这不是整页按物理屏幕像素字号缩小。窗口旋转、IME 显示和后台切换会停止当前触摸、重排或暂停动画并保存内容锚点。实际设备帧率仍需真机测量，缓存未命中或大章节排版仍可能暂时等待。
+
+已使用 API 36、Build Tools 36.0.0、NDK 29.0.14206865 和系统 Rust 1.97.1 完成 ARM64 原生库交叉编译、Java/D8 编译、APK 签名与对齐校验。产物为 `target/android/readall-android-debug-arm64-v8a.apk`，调试预览版。用户已确认前一基础 APK 在手机上可打开 EPUB；本轮共享界面改造已做宿主回归与 APK 构建验证，尚未进行本轮真机视觉、触摸和帧率验收。
 
 ## 文件与状态
 
@@ -95,18 +117,20 @@ target/android/readall-android-debug-arm64-v8a.apk
 /usr/bin/python3 apps/android/tools/build.py host-test
 ```
 
-`host-test` 使用真实 JNI 动态库和 JDK `-Xcheck:jni`，不是模拟 JNI。测试原创 EPUB/字体样本、RGBA 像素传递、无效参数、过期帧拒绝、翻页、目录、重排、主题、书签及关闭后恢复。样本和状态全部位于 `target/android-host`，不会读写用户真实最近阅读或手机文件；每次运行有独立目录。该测试不依赖 Android SDK，也不能验证 Activity、SAF、Android Bitmap 或 APK 包装。
+`host-test` 使用真实 JNI 动态库和 JDK `-Xcheck:jni`，不是模拟 JNI。测试原创 EPUB/字体样本、RGBA 像素传递、无效参数、过期帧拒绝、工具栏展开/收起、共享目录、三种模式、UTF-8 输入、系统效果队列、重排、主题、书签及关闭后恢复；并执行独立 Java TouchRouter 手势测试。Rust 测试额外逐像素对比 Linux 和移动端 presenter 的工具栏/目录/设置，验证矮屏目录布局、长按选区、取消、列表滚动不翻页和模式持久化。样本和状态全部位于 `target/android-host`，不会读写用户真实最近阅读或手机文件；每次运行有独立目录。该测试不依赖 Android SDK，也不能验证 Activity、SAF、Android Bitmap 或 APK 包装。
 
 缓存只读的受限构建环境可通过 `--vendor /absolute/vendor --offline` 使用已校验的依赖目录；这只是 Cargo 的命令参数，不修改全局配置或环境变量。普通宿主机无需该选项。
 
 ## 后续真机验收
 
-ARM64 APK 已通过真实 SDK/NDK 构建，签名 v2/v3、ELF 三个 LOAD 段 16 KiB 对齐、APK ZIP 对齐、JNI 导出和基础包结构已检查。下一步用授权设备测试安装、中文首屏、GIF/SVG、跨章、目录、旋转、后台恢复、读取取消和错误界面。随后独立推进触摸选字/复制、链接/图片查看及三种翻页模式，不把宿主机测试结果当成手机帧率或视觉验收。
+ARM64 APK 已通过真实 SDK/NDK 构建，签名 v2/v3、ELF 三个 LOAD 段 16 KiB 对齐、APK ZIP 对齐、JNI 导出和基础包结构已检查。下一步用授权设备测试安装、中文首屏、GIF/SVG、跨章、目录、旋转、后台恢复、读取取消和错误界面。重点验收本轮共享工具栏/目录、三种翻页模式、长按选区、中文输入法、剪贴板和链接交互；不把宿主机测试结果当成手机帧率或视觉验收。
 
 ## 官方参考
 
 - Android SAF：https://developer.android.com/training/data-storage/shared/documents-files
 - JNI：https://developer.android.com/training/articles/perf-jni
+- Choreographer：https://developer.android.com/reference/android/view/Choreographer
+- InputConnection：https://developer.android.com/reference/android/view/inputmethod/BaseInputConnection
 - AAPT2：https://developer.android.com/tools/aapt2
 - D8：https://developer.android.com/tools/d8
 - APK 签名：https://developer.android.com/tools/apksigner
