@@ -24,6 +24,21 @@ class BuildTests(unittest.TestCase):
         self.assertIn('--offline',options)
         self.assertFalse(any('env.' in value or 'ANDROID_HOME' in value or 'JAVA_HOME' in value for value in options))
 
+    def test_android_sysroot_is_target_only_and_retains_page_alignment(self):
+        flags=build.android_flags(Path('/project/target/rust-android'))
+        self.assertEqual(flags[-2:],['--sysroot','/project/target/rust-android'])
+        self.assertIn('link-arg=-Wl,-z,max-page-size=16384',flags)
+        self.assertNotIn('--sysroot',build.android_flags())
+        args=argparse.Namespace(rustc=Path('/usr/bin/rustc'),offline=True,vendor=None)
+        self.assertNotIn('--sysroot',build.cargo_options(args))
+
+    def test_java_lambda_stubs_precede_android_boot_classes(self):
+        found={'lambda_stubs':Path('/sdk/build-tools/36.0.0/core-lambda-stubs.jar'),'platform':Path('/sdk/platforms/android-36/android.jar')}
+        self.assertEqual(build.java_bootclasspath(found),'/sdk/build-tools/36.0.0/core-lambda-stubs.jar:/sdk/platforms/android-36/android.jar')
+
+    def test_explicit_rust_download_is_not_silently_used_offline(self):
+        with self.assertRaises(build.BuildError): build.prepare_rust(argparse.Namespace(offline=True))
+
     def test_installed_numeric_versions(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

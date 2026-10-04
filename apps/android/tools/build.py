@@ -6,7 +6,8 @@ Examples:
   /usr/bin/python3 apps/android/tools/build.py build --sdk /opt/android-sdk
   /usr/bin/python3 apps/android/tools/build.py host-test --vendor /absolute/vendor
 
-No automatic SDK downloads, license acceptance, Rust installation, or device changes.
+No automatic SDK downloads, license acceptance, system Rust changes, or device changes.
+Only `prepare-rust` downloads the exact matching target into the project target directory.
 Only the explicit `install` command installs the resulting debug APK on a device.
 """
 from __future__ import annotations
@@ -25,6 +26,7 @@ import tempfile
 import tomllib
 import zipfile
 import xml.etree.ElementTree as ET
+import rust_target
 
 ROOT = Path(__file__).resolve().parents[3]
 APP = ROOT / "apps/android"
@@ -74,6 +76,21 @@ def cargo_options(args: argparse.Namespace) -> list[str]:
         values.extend(["--config", 'source.crates-io.replace-with="android-vendor"', "--config", f"source.android-vendor.directory={json.dumps(str(args.vendor))}"])
     return values
 
+def android_flags(sysroot: Path | None = None) -> list[str]:
+    flags = ["-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
+    if sysroot is not None:
+        flags += ["--sysroot", str(sysroot)]
+    return flags
+
+def java_bootclasspath(found: dict[str, Path]) -> str:
+    return os.pathsep.join(str(found[key]) for key in ["lambda_stubs", "platform"])
+
+def prepare_rust(args: argparse.Namespace) -> int:
+    if args.offline:
+        raise BuildError("prepare-rust needs an explicit online download; build remains offline-capable")
+    rust_target.prepare(ROOT, executable(args.rustc), TARGETS[args.abi][0])
+    return 0
+
 def tools(args: argparse.Namespace) -> dict[str, Path]:
     if not args.sdk.is_dir():
         raise BuildError(f"SDK root is not visible in this execution environment: {args.sdk}. In EndlessVibe this can mean a missing read-only toolchain mount, not a missing host installation.")
@@ -85,10 +102,22 @@ def tools(args: argparse.Namespace) -> dict[str, Path]:
     llvm = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin"
     triple, clang_target, _ = TARGETS[args.abi]
     linker = executable(llvm / f"{clang_target}{args.min_api}-clang")
-    rustlibs = run([executable(args.rustc), "--print", "target-libdir", "--target", triple], capture=True).stdout.strip()
+    sysroot = getattr(args, "rust_sysroot", None)
+    query = [executable(args.rustc), "--print", "target-libdir", "--target", triple]
+    rustlibs = run([*query, *(["--sysroot", sysroot] if sysroot else [])], capture=True).stdout.strip()
+    if not list(Path(rustlibs).glob("libstd-*.rlib")) and sysroot is None:
+        sysroot = rust_target.prepared(ROOT, args.rustc, triple)
+        if sysroot:
+            rustlibs = run([*query, "--sysroot", sysroot], capture=True).stdout.strip()
     if not list(Path(rustlibs).glob("libstd-*.rlib")):
-        raise BuildError(f"Rust Android standard library missing for {triple}: {rustlibs}. Supply --rustc/--cargo for an Android-enabled toolchain; the system Rust installation is left unchanged.")
+        raise BuildError(f"Rust Android standard library missing for {triple}: {rustlibs}. Run the explicit prepare-rust command to add the matching target inside this project, or supply --rust-sysroot. The system Rust installation is left unchanged.")
     result = {"aapt2": executable(build / "aapt2"), "zipalign": executable(build / "zipalign"), "linker": linker, "platform": platform, "java": executable(args.java / "bin/java"), "javac": executable(args.java / "bin/javac"), "keytool": executable(args.java / "bin/keytool"), "ndk": ndk, "build_tools": build}
+    if sysroot:
+        result["rust_sysroot"] = sysroot
+    lambda_stubs = build / "core-lambda-stubs.jar"
+    if not lambda_stubs.is_file():
+        raise BuildError(f"SDK Java 8 lambda stubs missing: {lambda_stubs}")
+    result["lambda_stubs"] = lambda_stubs
     for key, name in [("d8", "d8.jar"), ("apksigner", "apksigner.jar")]:
         path = build / "lib" / name
         if not path.is_file():
@@ -131,7 +160,7 @@ def doctor(args: argparse.Namespace) -> int:
         found = tools(args)
         for key, path in found.items():
             print(key + ":", path)
-    except BuildError as error:
+    except (BuildError, rust_target.TargetError) as error:
         errors.append(str(error))
     try:
         devices = adb_devices().strip()
@@ -198,7 +227,7 @@ def build(args: argparse.Namespace) -> int:
     output.mkdir(parents=True, exist_ok=True)
     triple, _, machine = TARGETS[args.abi]
     rust_target = output / "rust"
-    flags = ["-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
+    flags = android_flags(found.get("rust_sysroot"))
     run([executable(args.cargo), "build", "-p", "readall-android", "--release", "--target", triple, "--target-dir", rust_target, *cargo_options(args), "--config", f"target.{triple}.linker={json.dumps(str(found['linker']))}", "--config", f"target.{triple}.rustflags={json.dumps(flags)}"])
     native = rust_target / triple / "release/libreadall_android.so"
     alignments = elf_alignment(native, machine)
@@ -217,7 +246,10 @@ def build(args: argparse.Namespace) -> int:
         manifest = configured_manifest(stage / "AndroidManifest.xml", args.min_api, args.api)
         run([found["aapt2"], "link", "-o", base, "--manifest", manifest, "-I", found["platform"], compiled, "-A", assets, "--java", generated, "--min-sdk-version", str(args.min_api), "--target-sdk-version", str(args.api), "--version-name", version_name, "--replace-version"])
         sources = sorted((APP / "src").rglob("*.java")) + sorted(generated.rglob("*.java"))
-        run([found["javac"], "-encoding", "UTF-8", "-source", "8", "-target", "8", "-bootclasspath", found["platform"], "-d", classes, *sources])
+        # android.jar's LambdaMetafactory is intentionally not javac's bootstrap
+        # implementation. Supply SDK stubs first; D8 desugars lambdas afterwards.
+        bootclasspath = java_bootclasspath(found)
+        run([found["javac"], "-encoding", "UTF-8", "-source", "8", "-target", "8", "-bootclasspath", bootclasspath, "-d", classes, *sources])
         jar = stage / "classes.jar"
         with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(classes.rglob("*.class")):
@@ -241,7 +273,7 @@ def build(args: argparse.Namespace) -> int:
         run([found["zipalign"], "-c", "-P", "16", "4", signed])
         apk = output / f"readall-android-debug-{args.abi}.apk"
         os.replace(signed, apk)
-        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "debug_only": True}, indent=2)+"\n")
+        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True}, indent=2)+"\n")
         print("APK:", apk)
     return 0
 
@@ -287,12 +319,13 @@ def install(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["doctor", "build", "host-test", "install"])
+    parser.add_argument("command", choices=["doctor", "prepare-rust", "build", "host-test", "install"])
     parser.add_argument("--sdk", type=absolute, default=Path("/opt/android-sdk"))
     parser.add_argument("--ndk", type=absolute)
     parser.add_argument("--java", type=absolute, default=Path("/usr/lib/jvm/openjdk-17"))
     parser.add_argument("--cargo", type=absolute, default=Path("/usr/bin/cargo"))
     parser.add_argument("--rustc", type=absolute, default=Path("/usr/bin/rustc"))
+    parser.add_argument("--rust-sysroot", type=absolute)
     parser.add_argument("--font", type=absolute)
     parser.add_argument("--vendor", type=absolute)
     parser.add_argument("--adb", type=absolute)
@@ -308,8 +341,8 @@ def main() -> int:
     if args.build_tools and not re.fullmatch(r"\d+(\.\d+)*", args.build_tools):
         parser.error("--build-tools must be a numeric SDK package version")
     try:
-        return {"doctor": doctor, "build": build, "host-test": host_test, "install": install}[args.command](args)
-    except (OSError, BuildError, subprocess.TimeoutExpired) as error:
+        return {"doctor": doctor, "prepare-rust": prepare_rust, "build": build, "host-test": host_test, "install": install}[args.command](args)
+    except (OSError, BuildError, rust_target.TargetError, subprocess.SubprocessError) as error:
         print("ReadAll Android:", error, file=sys.stderr)
         return 1
 
