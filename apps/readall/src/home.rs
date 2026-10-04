@@ -10,6 +10,9 @@ pub(crate) fn run(_: &mut impl Write) -> Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
+    mod recent_rows;
+    #[cfg(test)]
+    mod recent_tests;
     use super::*;
     use crate::{
         recent::RecentStore,
@@ -22,6 +25,7 @@ mod enabled {
         window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
     };
     use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
+    use recent_rows::RecentRowView;
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -222,6 +226,7 @@ mod enabled {
         None,
         OpenCard,
         RecentRow(usize),
+        RecentDelete(usize),
         BrowserBack,
         BrowserRow(usize),
     }
@@ -231,6 +236,9 @@ mod enabled {
         ui_font: &'font UiFont,
         mode: Mode,
         recent: Vec<PathBuf>,
+        recent_store: Option<RecentStore>,
+        recent_rows: Vec<RecentRowView>,
+        pending_recent_delete: Option<PathBuf>,
         selected_book: Option<PathBuf>,
         close_requested: bool,
         pointer: Option<(i32, i32)>,
@@ -239,14 +247,19 @@ mod enabled {
 
     impl<'font> Home<'font> {
         fn new(width: u32, height: u32, ui_font: &'font UiFont) -> WindowResult<Self> {
-            let recent = RecentStore::from_environment()
-                .and_then(|store| store.load())
+            let recent_store = RecentStore::from_environment().ok();
+            let recent = recent_store
+                .as_ref()
+                .and_then(|store| store.load().ok())
                 .unwrap_or_default();
             let mut home = Self {
                 surface: Surface::new(width, height, RenderLimits::default())?,
                 ui_font,
                 mode: Mode::Library,
                 recent,
+                recent_store,
+                recent_rows: Vec::new(),
+                pending_recent_delete: None,
                 selected_book: None,
                 close_requested: false,
                 pointer: None,
@@ -265,6 +278,8 @@ mod enabled {
         }
 
         fn open_browser(&mut self) -> WindowResult<bool> {
+            self.pending_recent_delete = None;
+            self.recent_rows.clear();
             self.mode = Mode::Browser(Browser::load(Self::default_directory())?);
             self.status = "选择 EPUB / MOBI / AZW3 图书".into();
             self.paint()?;
@@ -315,7 +330,10 @@ mod enabled {
                     if point_in(card, x, y) {
                         return HoverTarget::OpenCard;
                     }
-                    for index in 0..self.recent.len().min(RECENT_VISIBLE) {
+                    for index in 0..self.visible_recent_count() {
+                        if point_in(self.recent_delete_rect(index), x, y) {
+                            return HoverTarget::RecentDelete(index);
+                        }
                         if point_in(self.recent_row_rect(index), x, y) {
                             return HoverTarget::RecentRow(index);
                         }
@@ -349,6 +367,12 @@ mod enabled {
             let before = self.hover_target();
             self.pointer = pointer;
             let after = self.hover_target();
+            let delete_cancelled = self.pending_recent_delete.as_ref().is_some_and(|path| {
+                !matches!(after, HoverTarget::RecentDelete(index) if self.recent.get(index) == Some(path))
+            });
+            if delete_cancelled {
+                self.pending_recent_delete = None;
+            }
             // Pointer and keyboard/wheel navigation share one active row. Do this
             // even within the same hover target: navigation may have moved it.
             let selection_changed = if let (HoverTarget::BrowserRow(index), Mode::Browser(browser)) =
@@ -361,7 +385,7 @@ mod enabled {
             } else {
                 false
             };
-            if before == after && !selection_changed {
+            if before == after && !selection_changed && !delete_cancelled {
                 return Ok(false);
             }
             self.paint()?;
@@ -472,25 +496,17 @@ mod enabled {
 
             let info_y = 328;
             self.surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(250, info_y, content_w.min(650), 158),
+                rect: Rect::new(
+                    250,
+                    info_y,
+                    content_w.min(650),
+                    self.surface
+                        .height()
+                        .saturating_sub(info_y as u32 + 54)
+                        .min(158),
+                ),
                 color: PANEL,
             }])?;
-            let hover = self.hover_target();
-            for index in 0..self.recent.len().min(RECENT_VISIBLE) {
-                let row = self.recent_row_rect(index);
-                let hovered = hover == HoverTarget::RecentRow(index);
-                self.surface.draw(&[
-                    DrawCommand::FillRect {
-                        rect: row,
-                        color: if hovered { HOVER_SOFT } else { PANEL },
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(row.x, row.y, if hovered { 4 } else { 2 }, row.height),
-                        color: if hovered { ACCENT } else { BORDER },
-                    },
-                ])?;
-            }
-
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
             text.draw(282, 148, 24, "打开电子书", INK)?;
@@ -499,25 +515,13 @@ mod enabled {
             text.draw(282, info_y + 20, 17, "最近阅读", INK)?;
             if self.recent.is_empty() {
                 text.draw(282, info_y + 62, 14, "暂无最近阅读", MUTED)?;
-                text.draw(282, info_y + 96, 13, "成功关闭图书后会自动记录", MUTED)?;
-            } else {
-                for (index, path) in self.recent.iter().take(RECENT_VISIBLE).enumerate() {
-                    let name = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy())
-                        .unwrap_or_else(|| path.as_os_str().to_string_lossy());
-                    let name = text.fit(14, &name, content_w.saturating_sub(110).min(560))?;
-                    text.draw(
-                        286,
-                        RECENT_TOP + index as i32 * RECENT_ROW_HEIGHT + 7,
-                        14,
-                        &name,
-                        INK,
-                    )?;
+                if info_y + 112 < footer_y - 8 {
+                    text.draw(282, info_y + 96, 13, "成功关闭图书后会自动记录", MUTED)?;
                 }
             }
             let status = text.fit(14, &self.status, content_w.saturating_sub(24))?;
             text.draw(250, footer_y, 14, &status, MUTED)?;
+            self.paint_recent_rows(std::time::Instant::now())?;
             Ok(())
         }
 
@@ -701,6 +705,7 @@ mod enabled {
                 return Err("ReadAll main window requires at least 680x460".into());
             }
             self.surface = Surface::new(width, height, RenderLimits::default())?;
+            self.pending_recent_delete = None;
             self.paint()?;
             Ok(true)
         }
@@ -712,16 +717,20 @@ mod enabled {
             match action {
                 Action::Activate => self.open_browser(),
                 Action::Click { x, y } => {
-                    if point_in(self.open_card_rect(), x, y) {
-                        return self.open_browser();
-                    }
-                    for index in 0..self.recent.len().min(RECENT_VISIBLE) {
-                        if point_in(self.recent_row_rect(index), x, y) {
-                            return self.activate_recent(index);
+                    self.pending_recent_delete = None;
+                    self.pointer = Some((x, y));
+                    match self.hover_target() {
+                        HoverTarget::OpenCard => self.open_browser(),
+                        HoverTarget::RecentDelete(index) => {
+                            self.pending_recent_delete = self.recent.get(index).cloned();
+                            self.paint_recent_rows(std::time::Instant::now())?;
+                            Ok(true)
                         }
+                        HoverTarget::RecentRow(index) => self.activate_recent(index),
+                        _ => Ok(false),
                     }
-                    Ok(false)
                 }
+                Action::PointerRelease { x, y } => self.release_recent_delete(x, y),
                 Action::Back => Ok(false),
                 Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
                 Action::PointerLeave => self.pointer_changed(None),
@@ -734,7 +743,6 @@ mod enabled {
                 | Action::Close
                 | Action::Text(_)
                 | Action::Command(_)
-                | Action::PointerRelease { .. }
                 | Action::Scroll { .. }
                 | Action::PanStart { .. }
                 | Action::PanEnd { .. } => Ok(false),
@@ -752,6 +760,14 @@ mod enabled {
                     format!("ReadAll — 打开图书 — {}", browser.directory.display())
                 }
             }
+        }
+
+        fn animation_interval(&self) -> Option<std::time::Duration> {
+            self.recent_animation_interval()
+        }
+
+        fn animation_tick(&mut self) -> WindowResult<bool> {
+            self.tick_recent_rows(std::time::Instant::now())
         }
 
         fn close_requested(&self) -> bool {
