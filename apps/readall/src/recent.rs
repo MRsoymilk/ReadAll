@@ -97,12 +97,7 @@ impl RecentStore {
             if entries.iter().any(|existing| existing == &path) {
                 continue;
             }
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
-            {
+            if path.is_file() && crate::publication::path_format(&path).is_some() {
                 entries.push(path);
             }
         }
@@ -116,14 +111,10 @@ impl RecentStore {
                 "recent EPUB path must be an existing absolute file",
             ));
         }
-        if !path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
-        {
+        if crate::publication::path_format(path).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "recent EPUB path must have .epub extension",
+                "recent book path must have an EPUB or MOBI-compatible extension",
             ));
         }
         let raw = path.as_os_str().as_bytes();
@@ -284,7 +275,7 @@ mod tests {
         fs::create_dir(&books).unwrap();
         let first = books.join("first.epub");
         fs::write(&first, b"x").unwrap();
-        let second = books.join(OsString::from_vec(b"second-\xff.epub".to_vec()));
+        let second = books.join(OsString::from_vec(b"second-\xff.MOBI".to_vec()));
         fs::write(&second, b"y").unwrap();
 
         let store = RecentStore::new(root);

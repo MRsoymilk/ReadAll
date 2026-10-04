@@ -13,6 +13,8 @@ mod enabled {
     mod async_reader;
     #[cfg(test)]
     mod loading_tests;
+    #[cfg(test)]
+    mod mobi_tests;
     mod motion;
     #[cfg(test)]
     mod selection_tests;
@@ -1016,8 +1018,11 @@ mod enabled {
                     "读取文档字节",
                 )
                 .map_err(|error| boxed_stage("read EPUB bytes", error))?;
+                let prepared = crate::publication::prepare(epub_bytes, &epub_path)
+                    .map_err(|error| boxed_stage("prepare EPUB/MOBI publication", error))?;
+                writeln!(output, "Input format: {}", prepared.format.label())?;
                 crate::loading::stage("校验文档与解析目录结构")?;
-                let book = EpubBook::parse(&epub_bytes, epub_limits)
+                let book = EpubBook::parse(&prepared.bytes, epub_limits)
                     .epub_stage("parse EPUB ZIP/container/OPF")?;
                 crate::loading::stage("恢复阅读位置")?;
                 let explicit_position =
@@ -1149,7 +1154,7 @@ mod enabled {
 
                 writeln!(
                     output,
-                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nF5 settings select slide, book (2D paper curl) or continuous vertical scroll; the mode is saved. Wheel/touchpad and right-button drag navigate; left-button drag selects text. Esc stops ongoing motion first. Page navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
+                    "Native Wayland publication reader (EPUB / unencrypted MOBI6/7; CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nF5 settings select slide, book (2D paper curl) or continuous vertical scroll; the mode is saved. Wheel/touchpad and right-button drag navigate; left-button drag selects text. Esc stops ongoing motion first. Page navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
                 )?;
                 output.flush()?;
 

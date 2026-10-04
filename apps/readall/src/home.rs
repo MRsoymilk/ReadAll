@@ -83,12 +83,8 @@ mod enabled {
                     Err(_) => continue,
                 };
                 let directory = kind.is_dir();
-                let epub = kind.is_file()
-                    && item
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
+                let epub =
+                    kind.is_file() && crate::publication::path_format(&item.path()).is_some();
                 if directory || epub {
                     entries.push(FileEntry {
                         name,
@@ -176,7 +172,8 @@ mod enabled {
         };
         if size > PREVIEW_MAX_EPUB_BYTES {
             return format!(
-                "EPUB · {:.1} MiB · 元数据预览已跳过（预览上限 16 MiB）",
+                "{} · {:.1} MiB · 元数据预览已跳过（预览上限 16 MiB）",
+                crate::publication::path_format(path).map_or("图书", |f| f.label()),
                 size as f64 / (1024.0 * 1024.0)
             );
         }
@@ -185,6 +182,17 @@ mod enabled {
         let parsed = (|| -> Result<String> {
             let mut source = LocalFileSource::open(path)?;
             let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
+            if readall_mobi::is_mobi(&bytes) {
+                let book =
+                    readall_mobi::MobiBook::parse(&bytes, readall_mobi::MobiLimits::default())?;
+                let meta = book.metadata();
+                return Ok(format!(
+                    "《{}》 · {} · {} · MOBI",
+                    meta.title,
+                    meta.author.as_deref().unwrap_or("作者未知"),
+                    meta.language.as_deref().unwrap_or("语言未知")
+                ));
+            }
             let book = EpubBook::parse(&bytes, limits)?;
             let title = book.title().unwrap_or("(未命名)");
             let creator = book.creator().unwrap_or("作者未知");
@@ -241,7 +249,7 @@ mod enabled {
                 selected_book: None,
                 close_requested: false,
                 pointer: None,
-                status: "已支持 EPUB 文本阅读，点击“打开图书”开始".into(),
+                status: "支持 EPUB / MOBI，点击“打开图书”开始".into(),
             };
             home.paint()?;
             Ok(home)
@@ -257,7 +265,7 @@ mod enabled {
 
         fn open_browser(&mut self) -> WindowResult<bool> {
             self.mode = Mode::Browser(Browser::load(Self::default_directory())?);
-            self.status = "选择一个 EPUB 文件".into();
+            self.status = "选择 EPUB / MOBI 图书".into();
             self.paint()?;
             Ok(true)
         }
@@ -365,13 +373,13 @@ mod enabled {
                 Mode::Library => None,
             };
             let Some(selected) = selected else {
-                self.status = "当前目录没有可打开的 EPUB 文件".into();
+                self.status = "当前目录没有可打开的 EPUB / MOBI 图书".into();
                 self.paint()?;
                 return Ok(true);
             };
             if selected.directory {
                 self.mode = Mode::Browser(Browser::load(selected.path)?);
-                self.status = "选择一个 EPUB 文件".into();
+                self.status = "选择 EPUB / MOBI 图书".into();
                 self.paint()?;
                 return Ok(true);
             }
@@ -388,11 +396,11 @@ mod enabled {
             match parent {
                 Some(parent) => {
                     self.mode = Mode::Browser(Browser::load(parent)?);
-                    self.status = "选择一个 EPUB 文件".into();
+                    self.status = "选择 EPUB / MOBI 图书".into();
                 }
                 None => {
                     self.mode = Mode::Library;
-                    self.status = "已支持 EPUB 文本阅读，点击“打开图书”开始".into();
+                    self.status = "支持 EPUB / MOBI，点击“打开图书”开始".into();
                 }
             }
             self.paint()?;
@@ -484,25 +492,13 @@ mod enabled {
 
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(282, 148, 24, "打开 EPUB 图书", INK)?;
-            text.draw(
-                282,
-                190,
-                15,
-                "浏览本地目录，选择 EPUB 后直接进入阅读",
-                MUTED,
-            )?;
+            text.draw(282, 148, 24, "打开 EPUB / MOBI 图书", INK)?;
+            text.draw(282, 190, 15, "浏览本地目录，选择 EPUB / MOBI 后阅读", MUTED)?;
             text.draw(282, 230, 14, "点击卡片或按 Enter", ACCENT)?;
             text.draw(282, info_y + 20, 17, "最近阅读", INK)?;
             if self.recent.is_empty() {
                 text.draw(282, info_y + 62, 14, "暂无最近阅读", MUTED)?;
-                text.draw(
-                    282,
-                    info_y + 96,
-                    13,
-                    "成功关闭一本 EPUB 后会自动记录",
-                    MUTED,
-                )?;
+                text.draw(282, info_y + 96, 13, "成功关闭图书后会自动记录", MUTED)?;
             } else {
                 for (index, path) in self.recent.iter().take(RECENT_VISIBLE).enumerate() {
                     let name = path
@@ -525,7 +521,7 @@ mod enabled {
         }
 
         fn paint_browser(&mut self, browser: &Browser) -> WindowResult<()> {
-            self.paint_shell("打开 EPUB")?;
+            self.paint_shell("打开图书")?;
             let top_w = self.surface.width().saturating_sub(278);
             let hover = self.hover_target();
             self.surface.draw(&[
@@ -594,7 +590,11 @@ mod enabled {
                     270,
                     y + 13,
                     13,
-                    if entry.directory { "文件夹" } else { "EPUB" },
+                    if entry.directory {
+                        "文件夹"
+                    } else {
+                        crate::publication::path_format(&entry.path).map_or("图书", |f| f.label())
+                    },
                     if entry.directory { MUTED } else { ACCENT },
                 )?;
                 let name = text.fit(15, &entry.name, row_width.saturating_sub(120))?;
@@ -602,7 +602,13 @@ mod enabled {
             }
 
             if browser.entries.is_empty() {
-                text.draw(272, LIST_TOP + 30, 15, "当前目录没有 EPUB 文件", MUTED)?;
+                text.draw(
+                    272,
+                    LIST_TOP + 30,
+                    15,
+                    "当前目录没有 EPUB / MOBI 文件",
+                    MUTED,
+                )?;
             }
             if let Some(preview) = &browser.preview {
                 let preview = text.fit(13, preview, footer_width)?;
@@ -742,7 +748,7 @@ mod enabled {
             match &self.mode {
                 Mode::Library => "ReadAll — 书库".into(),
                 Mode::Browser(browser) => {
-                    format!("ReadAll — 打开 EPUB — {}", browser.directory.display())
+                    format!("ReadAll — 打开图书 — {}", browser.directory.display())
                 }
             }
         }
@@ -771,7 +777,7 @@ mod enabled {
                 )?;
                 return Ok(());
             };
-            writeln!(output, "正在打开 EPUB: {:?}", book)?;
+            writeln!(output, "正在打开图书: {:?}", book)?;
             output.flush()?;
             match crate::native_epub::open_path(&book, output) {
                 Ok(()) => {
@@ -782,7 +788,7 @@ mod enabled {
                     }
                 }
                 Err(error) => {
-                    writeln!(output, "无法打开 EPUB: {error}")?;
+                    writeln!(output, "无法打开图书: {error}")?;
                     match crate::diagnostics::log_epub_failure(&book, error.as_ref()) {
                         Ok(path) => writeln!(output, "错误日志: {}", path.display())?,
                         Err(log_error) => writeln!(
@@ -840,13 +846,19 @@ mod enabled {
             fs::write(temp.0.join("中文图书.epub"), b"x").unwrap();
             fs::write(temp.0.join("a.txt"), b"x").unwrap();
             fs::write(temp.0.join("A.EPUB"), b"x").unwrap();
+            fs::write(temp.0.join("B.MOBI"), b"x").unwrap();
+            fs::write(temp.0.join("c.azw"), b"x").unwrap();
+            fs::write(temp.0.join("d.azw3"), b"x").unwrap();
             let browser = Browser::load(temp.0.clone()).unwrap();
             let names: Vec<_> = browser
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, ["中文目录", "A.EPUB", "中文图书.epub"]);
+            assert_eq!(
+                names,
+                ["中文目录", "A.EPUB", "B.MOBI", "c.azw", "中文图书.epub"]
+            );
         }
 
         #[test]
@@ -861,6 +873,21 @@ mod enabled {
             let invalid = temp.0.join("invalid.epub");
             fs::write(&invalid, b"not an epub").unwrap();
             assert_eq!(epub_preview(&invalid), "元数据预览不可用，仍可尝试打开");
+        }
+
+        #[test]
+        fn mobi_preview_uses_metadata_without_decompressing_text() {
+            let temp = Temp::new();
+            let path = temp.0.join("book.MOBI");
+            let mut bytes = crate::test_mobi::make_mobi("<html><body>AAAA</body></html>");
+            // Break the text record only; metadata preview should still succeed.
+            let start = u32::from_be_bytes(bytes[86..90].try_into().unwrap()) as usize;
+            bytes[start] = 8;
+            bytes.truncate(start + 1);
+            fs::write(&path, &bytes).unwrap();
+            let preview = epub_preview(&path);
+            assert!(preview.contains("ReadAll MOBI 中文") && preview.contains("ReadAll Tests"));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
         }
 
         #[test]

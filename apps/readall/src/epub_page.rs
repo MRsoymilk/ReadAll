@@ -64,7 +64,8 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let epub_limits = EpubLimits::default();
     let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
     let bytes = read_bounded(&mut source, epub_limits.zip.max_archive_bytes)?;
-    let book = EpubBook::parse(&bytes, epub_limits)?;
+    let prepared = crate::publication::prepare(bytes, std::path::Path::new(&args[0]))?;
+    let book = EpubBook::parse(&prepared.bytes, epub_limits)?;
     let (spine, restored_offset) = if let Some(locator) = &epub_at {
         let (spine, offset) = book.restore(locator)?;
         (spine, Some(offset))
@@ -119,7 +120,8 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
 
     writeln!(
         output,
-        "Rendered EPUB spine page (CSS text/block subset + PNG/JPEG/WebP/SVG; shaping/bidi/font fallback)\nTitle: {}\nSpine: {}/{}\nResource: {}\nPage: {}/{}\nEPUB locator: {}\nChapter locator: {}\nImage: {}x{}\nMissing characters: {}\nOutput: {:?}",
+        "Rendered {} spine page (CSS text/block subset + PNG/JPEG/WebP/SVG; shaping/bidi/font fallback)\nTitle: {}\nSpine: {}/{}\nResource: {}\nPage: {}/{}\nEPUB locator: {}\nChapter locator: {}\nImage: {}x{}\nMissing characters: {}\nOutput: {:?}",
+        prepared.format.label(),
         book.title().unwrap_or("(untitled)"),
         spine + 1,
         book.spine().len(),
