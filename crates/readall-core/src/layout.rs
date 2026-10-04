@@ -1,8 +1,22 @@
-//! Measured, scalar-by-scalar wrapping with source locators. The caller supplies
-//! real advances; this module has no dependency on a font or window backend.
-//! This is NOT a shaping, bidi, grapheme, or Unicode line-breaking implementation.
+//! Measured Unicode line wrapping with source locators and grapheme-safe emergency breaks.
+//! Segmentation and break opportunities are separate from shaping and bidi.
 use crate::{DocumentId, Error, TextDocument, TextLocator};
 use std::{fmt, ops::Range};
+use unicode_segmentation::UnicodeSegmentation;
+
+/// Extended grapheme clusters with UAX #14 legal break opportunities.
+/// The pinned linebreak table and segmentation versions are documented in Cargo.lock.
+pub fn clusters(text: &str) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
+    let mut breaks = unicode_linebreak::linebreaks(text).peekable();
+    text.grapheme_indices(true).map(move |(start, cluster)| {
+        let end = start + cluster.len();
+        let mut allowed = false;
+        while breaks.peek().is_some_and(|(offset, _)| *offset <= end) {
+            allowed |= breaks.next().is_some_and(|(offset, _)| offset == end);
+        }
+        (start..end, allowed)
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutConfig {
@@ -79,49 +93,78 @@ impl MeasuredLayout {
         {
             return Err(Error::InvalidLayout("invalid measured layout configuration").into());
         }
-        let mut lines = Vec::new();
-        let (mut start, mut x) = (0, 0.0_f32);
-        for (count, (offset, ch)) in document.text().char_indices().enumerate() {
-            if count >= config.max_scalars {
-                return Err(Error::InvalidLayout("measured scalar budget exceeded").into());
-            }
-            if ch == '\n' {
-                push(&mut lines, start..offset, offset + 1, x, config.max_lines)?;
-                start = offset + 1;
-                x = 0.0;
-                continue;
-            }
-            let mut advance = if ch == '\t' {
-                tab_advance(x, config.tab_width)
-            } else {
-                measure(ch).map_err(LayoutError::Measurement)?
-            };
-            if !advance.is_finite() || advance < 0.0 {
-                return Err(Error::InvalidLayout("invalid glyph advance").into());
-            }
-            if x > 0.0 && x + advance > config.width {
-                push(&mut lines, start..offset, offset, x, config.max_lines)?;
-                start = offset;
-                x = 0.0;
-                if ch == '\t' {
-                    advance = config.tab_width;
-                }
-            }
-            if advance > config.width {
-                return Err(
-                    Error::InvalidLayout("glyph or tab is wider than the content area").into(),
-                );
-            }
-            x += advance;
+        if document.text().chars().count() > config.max_scalars {
+            return Err(Error::InvalidLayout("measured scalar budget exceeded").into());
         }
-        if start < document.text().len() || lines.is_empty() {
-            push(
-                &mut lines,
-                start..document.text().len(),
-                document.text().len(),
-                x,
-                config.max_lines,
-            )?;
+        let mut lines = Vec::new();
+        let (mut base, mut work) = (0_usize, 0_usize);
+        for part in document.text().split_inclusive('\n') {
+            let body = part.strip_suffix('\n').unwrap_or(part);
+            let units: Vec<_> = clusters(body).collect();
+            if units.is_empty() {
+                push(
+                    &mut lines,
+                    base..base,
+                    base + part.len(),
+                    0.0,
+                    config.max_lines,
+                )?;
+            }
+            let mut start = 0;
+            while start < units.len() {
+                let (mut end, mut width, mut opportunity) = (start, 0.0_f32, None);
+                while end < units.len() {
+                    let mut advance = 0.0;
+                    for ch in body[units[end].0.clone()].chars() {
+                        work += 1;
+                        if work > config.max_scalars.saturating_mul(3) {
+                            return Err(
+                                Error::InvalidLayout("measured work budget exceeded").into()
+                            );
+                        }
+                        let amount = if ch == '\t' {
+                            tab_advance(width + advance, config.tab_width)
+                        } else {
+                            measure(ch).map_err(LayoutError::Measurement)?
+                        };
+                        if !amount.is_finite() || amount < 0.0 {
+                            return Err(Error::InvalidLayout("invalid glyph advance").into());
+                        }
+                        advance += amount;
+                    }
+                    if advance > config.width {
+                        return Err(Error::InvalidLayout(
+                            "grapheme or tab is wider than the content area",
+                        )
+                        .into());
+                    }
+                    if end > start && width + advance > config.width {
+                        if let Some((at, w)) = opportunity {
+                            end = at;
+                            width = w;
+                        }
+                        break;
+                    }
+                    width += advance;
+                    end += 1;
+                    if units[end - 1].1 {
+                        opportunity = Some((end, width));
+                    }
+                }
+                let first = base + units[start].0.start;
+                let last = base + units[end - 1].0.end;
+                let next = if end == units.len() {
+                    base + part.len()
+                } else {
+                    last
+                };
+                push(&mut lines, first..last, next, width, config.max_lines)?;
+                start = end;
+            }
+            base += part.len();
+        }
+        if lines.is_empty() {
+            push(&mut lines, 0..0, 0, 0.0, config.max_lines)?;
         }
         Ok(Self {
             document_id: document.id(),
@@ -200,6 +243,28 @@ mod tests {
             tab_width: 8.0,
             ..LayoutConfig::default()
         }
+    }
+    #[test]
+    fn word_boundaries_and_graphemes_are_preserved() {
+        let document = doc("Hello world");
+        let layout = MeasuredLayout::build(&document, config(28.0), measure).unwrap();
+        assert_eq!(
+            &document.text()[layout.page(0).unwrap()[0].text_range.clone()],
+            "Hello "
+        );
+        assert_eq!(
+            &document.text()[layout.page(1).unwrap()[0].text_range.clone()],
+            "world"
+        );
+        let ranges: Vec<_> = clusters("a\u{301}👩‍💻中，文").collect();
+        assert_eq!(ranges.len(), 5);
+        assert_eq!(ranges[0].0, 0..3);
+        assert_eq!(ranges[1].0, 3..14);
+        assert!(!ranges[2].1, "do not break before a closing CJK comma");
+        let document = doc("a\u{301}b\u{301}");
+        let layout = MeasuredLayout::build(&document, config(8.0), measure).unwrap();
+        assert_eq!(layout.lines.len(), 2);
+        assert_eq!(layout.lines[0].text_range, 0..3);
     }
     #[test]
     fn real_advances_drive_wrapping_and_reflow_locations() {
