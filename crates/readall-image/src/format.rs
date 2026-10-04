@@ -5,6 +5,7 @@ use crate::{ImageError, ImageLimits, Result, RgbaImage, be32, crc32, decode_png,
 pub enum ImageFormat {
     Png,
     WebP,
+    Gif,
     Jpeg,
     Svg,
 }
@@ -44,6 +45,9 @@ pub fn probe(prefix: &[u8], resource_bytes: usize, limits: ImageLimits) -> Resul
     let xml_prefix = prefix.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(prefix);
     if xml_prefix.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'<') {
         return crate::svg::header(prefix, resource_bytes, limits);
+    }
+    if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+        return crate::gif_decode::header(prefix, resource_bytes, limits);
     }
     if prefix.starts_with(&[0xff, 0xd8]) {
         return crate::jpeg::header(prefix, resource_bytes, limits).map(|(info, _)| info);
@@ -103,7 +107,7 @@ pub fn probe(prefix: &[u8], resource_bytes: usize, limits: ImageLimits) -> Resul
         .checked(limits);
     }
     Err(ImageError::Unsupported(
-        "supported image signatures are PNG, WebP, JPEG and SVG",
+        "supported image signatures are PNG, WebP, JPEG, GIF and SVG",
     ))
 }
 
@@ -114,6 +118,7 @@ pub fn decode(bytes: &[u8], limits: ImageLimits) -> Result<RgbaImage> {
         ImageFormat::Png => decode_png(bytes, limits),
         ImageFormat::WebP => decode_webp(bytes, limits),
         ImageFormat::Jpeg => crate::decode_jpeg(bytes, limits),
+        ImageFormat::Gif => crate::decode_gif(bytes, limits),
         ImageFormat::Svg => crate::decode_svg_with_resources(bytes, limits, &[], &|_| None),
     }
 }

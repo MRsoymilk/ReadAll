@@ -3,10 +3,14 @@
 #[cfg(test)]
 mod adam7_tests;
 mod format;
+mod gif_decode;
+#[cfg(test)]
+mod gif_tests;
+pub use gif_decode::decode_gif;
 mod jpeg;
 mod svg;
 pub use jpeg::decode_jpeg;
-pub use svg::decode_svg_with_resources;
+pub use svg::{decode_svg_with_resource_loader, decode_svg_with_resources};
 mod webp;
 pub use format::{ImageFormat, ImageInfo, decode, probe};
 use readall_archive::{crc32, zlib};
@@ -37,6 +41,8 @@ pub enum ImageError {
     Deflate(readall_archive::ArchiveError),
     WebP(image_webp::DecodingError),
     Jpeg(jpeg_decoder::Error),
+    Gif(gif::DecodingError),
+    SvgResource { reference: String, reason: String },
     IncompleteHeader,
 }
 impl fmt::Display for ImageError {
@@ -49,6 +55,10 @@ impl fmt::Display for ImageError {
             Self::Deflate(e) => write!(f, "PNG zlib decode: {e}"),
             Self::WebP(e) => write!(f, "WebP decode: {e}"),
             Self::Jpeg(e) => write!(f, "JPEG decode: {e}"),
+            Self::Gif(e) => write!(f, "GIF decode: {e}"),
+            Self::SvgResource { reference, reason } => {
+                write!(f, "SVG resource {reference:?}: {reason}")
+            }
             Self::IncompleteHeader => f.write_str("image header requires a larger bounded read"),
         }
     }
@@ -59,6 +69,7 @@ impl Error for ImageError {
             Self::Deflate(error) => Some(error),
             Self::WebP(error) => Some(error),
             Self::Jpeg(error) => Some(error),
+            Self::Gif(error) => Some(error),
             _ => None,
         }
     }

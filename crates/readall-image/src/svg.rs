@@ -3,8 +3,8 @@
 use crate::{ImageError, ImageFormat, ImageInfo, ImageLimits, Result, RgbaImage, decode, probe};
 use resvg::{tiny_skia, usvg};
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 fn source(bytes: &[u8], full_len: usize, limits: ImageLimits) -> Result<&str> {
     if full_len > limits.max_file_bytes.min(4 * 1024 * 1024) {
@@ -105,59 +105,108 @@ pub fn decode_svg_with_resources(
     fonts: &[&[u8]],
     resource: &(dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync),
 ) -> Result<RgbaImage> {
+    decode_svg_with_resource_loader(bytes, limits, fonts, &|href| {
+        resource(href).ok_or_else(|| "resource loader returned no data".into())
+    })
+}
+
+/// Checked loader variant: preserve the publication's missing-resource, path-policy,
+/// CRC and size errors rather than turning them all into an ambiguous boolean.
+pub fn decode_svg_with_resource_loader(
+    bytes: &[u8],
+    limits: ImageLimits,
+    fonts: &[&[u8]],
+    resource: &(dyn Fn(&str) -> std::result::Result<Vec<u8>, String> + Send + Sync),
+) -> Result<RgbaImage> {
     let info = header(bytes, bytes.len(), limits)?;
     let text = source(bytes, bytes.len(), limits)?;
     let budget = AtomicUsize::new(0);
+    let input_bytes = AtomicUsize::new(0);
     let resources = AtomicUsize::new(0);
-    let failed = AtomicBool::new(false);
-    let normalize = |data: &[u8]| -> Option<usvg::ImageKind> {
-        if resources.fetch_add(1, Ordering::Relaxed) >= 32 {
-            failed.store(true, Ordering::Relaxed);
-            return None;
+    let failure: Mutex<Option<ImageError>> = Mutex::new(None);
+    let fail = |reference: &str, reason: String| {
+        let mut error = failure.lock().unwrap_or_else(|e| e.into_inner());
+        if error.is_none() {
+            *error = Some(ImageError::SvgResource {
+                reference: reference.chars().take(512).collect(),
+                reason: reason
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(1024)
+                    .collect(),
+            });
         }
+    };
+    let claim = |reference: &str| {
+        if failure.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return false;
+        }
+        if resources.fetch_add(1, Ordering::Relaxed) >= 32 {
+            fail(reference, "SVG child resource count exceeds 32".into());
+            return false;
+        }
+        true
+    };
+    let normalize = |reference: &str, data: &[u8]| -> Option<usvg::ImageKind> {
         let normalized = (|| -> Result<Vec<u8>> {
             if !(data.starts_with(b"\x89PNG\r\n\x1a\n")
                 || data.starts_with(&[255, 216])
-                || data.starts_with(b"RIFF"))
+                || data.starts_with(b"RIFF")
+                || data.starts_with(b"GIF87a")
+                || data.starts_with(b"GIF89a"))
             {
                 return Err(ImageError::Unsupported(
-                    "nested SVG resources must be PNG, JPEG or WebP",
+                    "nested SVG resources must be PNG, JPEG, WebP or GIF",
                 ));
+            }
+            let previous = input_bytes.fetch_add(data.len(), Ordering::Relaxed);
+            if previous.saturating_add(data.len()) > 64 * 1024 * 1024 {
+                return Err(ImageError::Budget);
             }
             let image_info = probe(data, data.len(), limits)?;
             let size = image_info.rgba_bytes()?;
             let previous = budget.fetch_add(size, Ordering::Relaxed);
-            if previous.saturating_add(size) > 64 * 1024 * 1024 {
+            if previous.saturating_add(size) > limits.max_decoded_bytes.min(64 * 1024 * 1024) {
                 return Err(ImageError::Budget);
             }
-            let image = decode(data, limits)?;
-            encode_png(&image)
+            encode_png(&decode(data, limits)?)
         })();
         match normalized {
             Ok(data) => Some(usvg::ImageKind::PNG(Arc::new(data))),
-            Err(_) => {
-                failed.store(true, Ordering::Relaxed);
+            Err(error) => {
+                fail(reference, error.to_string());
                 None
             }
         }
     };
     let mut options = usvg::Options {
         image_href_resolver: usvg::ImageHrefResolver {
-            resolve_data: Box::new(|_, data, _| normalize(&data)),
+            resolve_data: Box::new(|_, data, _| {
+                // Never print full data URIs (possibly huge or sensitive) in diagnostics.
+                let reference = "<embedded data image>";
+                claim(reference)
+                    .then(|| normalize(reference, &data))
+                    .flatten()
+            }),
             resolve_string: Box::new(|href, _| {
+                if !claim(href) {
+                    return None;
+                }
                 if href.len() > 4096
                     || href.starts_with('/')
-                    || href.starts_with("//")
                     || href.contains(':')
                     || href.contains('\\')
                 {
-                    failed.store(true, Ordering::Relaxed);
+                    fail(
+                        href,
+                        "non-local or invalid SVG resource URI is disallowed".into(),
+                    );
                     return None;
                 }
                 match resource(href) {
-                    Some(data) => normalize(&data),
-                    None => {
-                        failed.store(true, Ordering::Relaxed);
+                    Ok(data) => normalize(href, &data),
+                    Err(error) => {
+                        fail(href, error);
                         None
                     }
                 }
@@ -188,10 +237,8 @@ pub fn decode_svg_with_resources(
     }
     let tree = usvg::Tree::from_str(text, &options)
         .map_err(|_| ImageError::Invalid("invalid SVG tree"))?;
-    if failed.load(Ordering::Relaxed) {
-        return Err(ImageError::Invalid(
-            "SVG image resource missing, disallowed or over budget",
-        ));
+    if let Some(error) = failure.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        return Err(error);
     }
     if tree.size().to_int_size().width() != info.width
         || tree.size().to_int_size().height() != info.height
