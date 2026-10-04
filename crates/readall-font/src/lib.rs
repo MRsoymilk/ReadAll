@@ -3,6 +3,8 @@
 mod binary;
 mod cmap;
 mod outline;
+mod storage;
+use storage::FontData;
 
 use binary::{i16_at, offset_at, reserve, slice, u16_at, u32_at};
 use cmap::Cmap;
@@ -63,14 +65,17 @@ pub struct HorizontalMetrics {
     pub left_side_bearing: i16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Font<'a> {
+    bytes: FontData<'a>,
+    face_index: u32,
+    mac_style: u16,
     glyph_count: u16,
     metrics_count: u16,
     metrics: FontMetrics,
-    hmtx: &'a [u8],
-    loca: &'a [u8],
-    glyf: &'a [u8],
+    hmtx: FontData<'a>,
+    loca: FontData<'a>,
+    glyf: FontData<'a>,
     long_loca: bool,
     cmap: Cmap<'a>,
     limits: FontLimits,
@@ -203,12 +208,15 @@ impl<'a> Font<'a> {
         let glyf = table(b"glyf")?;
         let cmap = Cmap::parse(table(b"cmap")?, glyph_count)?;
         let font = Self {
+            bytes: FontData::Borrowed(bytes),
+            face_index,
+            mac_style: u16_at(head, 44)?,
             glyph_count,
             metrics_count,
             metrics,
-            hmtx,
-            loca,
-            glyf,
+            hmtx: FontData::Borrowed(hmtx),
+            loca: FontData::Borrowed(loca),
+            glyf: FontData::Borrowed(glyf),
             long_loca,
             cmap,
             limits,
@@ -222,6 +230,18 @@ impl<'a> Font<'a> {
             previous = position;
         }
         Ok(font)
+    }
+    pub fn data(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn face_index(&self) -> u32 {
+        self.face_index
+    }
+    pub fn is_bold(&self) -> bool {
+        self.mac_style & 1 != 0
+    }
+    pub fn is_italic(&self) -> bool {
+        self.mac_style & 2 != 0
     }
     pub fn glyph_count(&self) -> u16 {
         self.glyph_count
@@ -243,7 +263,7 @@ impl<'a> Font<'a> {
         }
         let index = usize::from(glyph);
         let count = usize::from(self.metrics_count);
-        let advance_width = u16_at(self.hmtx, index.min(count - 1) * 4)?;
+        let advance_width = u16_at(&self.hmtx, index.min(count - 1) * 4)?;
         let bearing_at = if index < count {
             index * 4 + 2
         } else {
@@ -251,7 +271,7 @@ impl<'a> Font<'a> {
         };
         Ok(HorizontalMetrics {
             advance_width,
-            left_side_bearing: i16_at(self.hmtx, bearing_at)?,
+            left_side_bearing: i16_at(&self.hmtx, bearing_at)?,
         })
     }
     pub fn glyph(&self, glyph: u16) -> Result<Glyph> {
@@ -259,18 +279,18 @@ impl<'a> Font<'a> {
     }
     fn glyph_offset(&self, index: usize) -> Result<usize> {
         if self.long_loca {
-            offset_at(self.loca, index * 4)
+            offset_at(&self.loca, index * 4)
         } else {
-            Ok(usize::from(u16_at(self.loca, index * 2)?) * 2)
+            Ok(usize::from(u16_at(&self.loca, index * 2)?) * 2)
         }
     }
-    fn glyph_bytes(&self, glyph: u16) -> Result<&'a [u8]> {
+    fn glyph_bytes(&self, glyph: u16) -> Result<&[u8]> {
         if glyph >= self.glyph_count {
             return Err(FontError::Invalid("glyph index out of range"));
         }
         let start = self.glyph_offset(usize::from(glyph))?;
         let end = self.glyph_offset(usize::from(glyph) + 1)?;
-        slice(self.glyf, start, end - start)
+        slice(&self.glyf, start, end - start)
     }
 }
 

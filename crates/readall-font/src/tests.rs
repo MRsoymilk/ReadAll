@@ -124,7 +124,7 @@ fn font_with(mut glyphs: Vec<Vec<u8>>, cmap: Vec<u8>, short_loca: bool) -> Vec<u
     put32(&mut bytes, 0, 0x10000);
     put16(&mut bytes, 4, tables.len() as u16);
     for (i, (tag, data)) in tables.into_iter().enumerate() {
-        while bytes.len() % 4 != 0 {
+        while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         let at = 12 + i * 16;
@@ -136,7 +136,7 @@ fn font_with(mut glyphs: Vec<Vec<u8>>, cmap: Vec<u8>, short_loca: bool) -> Vec<u
     }
     bytes
 }
-fn fixture() -> Vec<u8> {
+pub(super) fn fixture() -> Vec<u8> {
     font_with(
         vec![
             simple_triangle(),
