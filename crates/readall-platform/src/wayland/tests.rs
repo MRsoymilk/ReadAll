@@ -11,6 +11,103 @@ use std::{
     thread,
 };
 
+#[test]
+fn precise_axes_preserve_subpixels_and_do_not_double_count_wheel_detents() {
+    let mut state = State::new(640, 480);
+    state.pointer_focus = true;
+    state.precise_scroll = true;
+    // SAFETY: these fixed pointer-event signatures touch State only, not a proxy.
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            4,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { i: 128 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            4,
+            [Arg { u: 0 }, Arg { u: 1 }, Arg { i: -64 }].as_mut_ptr(),
+        );
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+    }
+    assert_eq!(state.actions[0], Some(Action::Scroll { dx: -64, dy: 128 }));
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            4,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { i: 2560 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            8,
+            [Arg { u: 0 }, Arg { i: 1 }].as_mut_ptr(),
+        );
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+    }
+    assert_eq!(
+        state.actions[1],
+        Some(Action::Scroll {
+            dx: 0,
+            dy: 64 * 256
+        })
+    );
+    assert_eq!(state.action_count, 2);
+}
+#[test]
+fn legacy_wheel_actions_and_new_right_drag_remain_separate_from_left_selection() {
+    let mut state = State::new(640, 480);
+    state.pointer_focus = true;
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            8,
+            [Arg { u: 0 }, Arg { i: 1 }].as_mut_ptr(),
+        );
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+    }
+    assert_eq!(state.actions[0], Some(Action::Next));
+    state.precise_scroll = true;
+    state.pointer_x = 40 * 256;
+    state.pointer_y = 80 * 256;
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { u: 273 }, Arg { u: 1 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { u: 273 }, Arg { u: 0 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { u: 272 }, Arg { u: 1 }].as_mut_ptr(),
+        );
+    }
+    assert_eq!(state.actions[1], Some(Action::PanStart { x: 40, y: 80 }));
+    assert_eq!(state.actions[2], Some(Action::PanEnd { x: 40, y: 80 }));
+    assert_eq!(state.actions[3], Some(Action::Click { x: 40, y: 80 }));
+}
+
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {

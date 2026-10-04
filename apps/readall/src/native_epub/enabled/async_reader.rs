@@ -38,6 +38,7 @@ struct Shared {
     result: Mutex<Option<Result<Vec<u8>, String>>>,
     size: Mutex<(u32, u32)>,
     busy: AtomicBool,
+    prefetch_interrupt: Arc<AtomicBool>,
     tracker: Tracker,
 }
 impl Shared {
@@ -49,11 +50,26 @@ impl Shared {
             result: Mutex::new(None),
             size: Mutex::new(size),
             busy: AtomicBool::new(true),
+            prefetch_interrupt: Arc::new(AtomicBool::new(false)),
             tracker: Tracker::default(),
         })
     }
     fn push(&self, action: Action) -> bool {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(action, Action::PointerMove { .. } | Action::PointerLeave) {
+            self.prefetch_interrupt.store(true, Ordering::Release);
+        }
+        if let Action::Scroll { dx, dy } = action
+            && let Some(Action::Scroll {
+                dx: old_x,
+                dy: old_y,
+            }) = pending.actions.back_mut()
+        {
+            *old_x = old_x.saturating_add(dx).clamp(-262144, 262144);
+            *old_y = old_y.saturating_add(dy).clamp(-262144, 262144);
+            self.wake.notify_one();
+            return true;
+        }
         // Preserve the first threshold-crossing move in both input queues, so
         // dragging out and back cannot turn into a link click after coalescing.
         if pending
@@ -62,7 +78,7 @@ impl Shared {
         {
             pending.actions.pop_back();
         }
-        let boundary = action == Action::Close
+        let boundary = matches!(action, Action::Close | Action::PanEnd { .. })
             || pending.motion.pressed()
                 && matches!(action, Action::PointerRelease { .. } | Action::PointerLeave);
         // Two reserved termination slots keep a saturated queue from swallowing
@@ -76,11 +92,13 @@ impl Shared {
         true
     }
     fn resize(&self, width: u32, height: u32) {
+        self.prefetch_interrupt.store(true, Ordering::Release);
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = (width, height);
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).size = Some((width, height));
         self.wake.notify_one();
     }
     fn cancel(&self) {
+        self.prefetch_interrupt.store(true, Ordering::Release);
         self.tracker.cancel();
         self.wake.notify_all();
     }
@@ -108,6 +126,26 @@ impl Bridge {
             if self.shared.tracker.is_cancelled() {
                 return Ok(());
             }
+            let idle = {
+                let p = self
+                    .shared
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let idle = p.size.is_none() && p.actions.is_empty();
+                if idle {
+                    self.shared
+                        .prefetch_interrupt
+                        .store(false, Ordering::Release);
+                }
+                idle
+            };
+            if idle {
+                let _scope = loading::speculate(Arc::clone(&self.shared.prefetch_interrupt));
+                if handler.idle_tick()? {
+                    self.publish(handler);
+                }
+            }
             let (size, action) = {
                 let mut p = self
                     .shared
@@ -117,7 +155,13 @@ impl Bridge {
                 if p.size.is_none() && p.actions.is_empty() {
                     let wait = handler
                         .animation_interval()
-                        .unwrap_or(Duration::from_millis(250))
+                        .map_or(Duration::from_millis(250), |interval| {
+                            // Rendering/publication time is part of the frame budget,
+                            // not extra latency added before another full interval.
+                            interval
+                                .saturating_sub(tick.elapsed())
+                                .max(Duration::from_millis(1))
+                        })
                         .min(Duration::from_millis(250));
                     p = self
                         .shared
@@ -159,8 +203,8 @@ impl Bridge {
                 .animation_interval()
                 .is_some_and(|interval| tick.elapsed() >= interval)
             {
-                changed |= handler.animation_tick()?;
                 tick = Instant::now();
+                changed |= handler.animation_tick()?;
             }
             if handler.close_requested() {
                 self.publish_close(handler);
@@ -524,7 +568,10 @@ impl WindowHandler for AsyncWindow {
                 return Ok(true);
             }
             // Do not apply pointer coordinates from a stale layout after a resize.
-            if matches!(action, Action::Click { .. } | Action::PointerMove { .. }) {
+            if matches!(
+                action,
+                Action::Click { .. } | Action::PointerMove { .. } | Action::PanStart { .. }
+            ) {
                 return Ok(false);
             }
         }
@@ -550,8 +597,11 @@ impl WindowHandler for AsyncWindow {
     fn text_input_active(&self) -> bool {
         self.ready && self.editing && !self.cancelling
     }
+    fn precise_scroll(&self) -> bool {
+        true
+    }
     fn animation_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(40))
+        Some(Duration::from_millis(if self.ready { 16 } else { 40 }))
     }
     fn animation_tick(&mut self) -> WindowResult<bool> {
         // A slow compositor handshake must not start book work before a buffer commit.

@@ -13,7 +13,23 @@ pub type WindowResult<T> = Result<T, Box<dyn Error>>;
 pub enum Action {
     Text(char),
     Command(ReaderCommand),
-    PointerRelease { x: i32, y: i32 },
+    PointerRelease {
+        x: i32,
+        y: i32,
+    },
+    /// Signed Wayland 24.8 logical-pixel deltas; detented wheels are scaled once.
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
+    PanStart {
+        x: i32,
+        y: i32,
+    },
+    PanEnd {
+        x: i32,
+        y: i32,
+    },
     Next,
     Previous,
     First,
@@ -22,9 +38,15 @@ pub enum Action {
     Smaller,
     Activate,
     Back,
-    PointerMove { x: i32, y: i32 },
+    PointerMove {
+        x: i32,
+        y: i32,
+    },
     PointerLeave,
-    Click { x: i32, y: i32 },
+    Click {
+        x: i32,
+        y: i32,
+    },
     Close,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +86,14 @@ pub trait WindowHandler {
     fn text_input_active(&self) -> bool {
         false
     }
+    /// Legacy windows keep wheel-to-action navigation. Readers can opt into raw deltas.
+    fn precise_scroll(&self) -> bool {
+        false
+    }
+    /// Optional bounded prefetch, called on the reader worker only when input is idle.
+    fn idle_tick(&mut self) -> WindowResult<bool> {
+        Ok(false)
+    }
     fn surface(&self) -> &Surface;
     fn title(&self) -> String;
     fn animation_interval(&self) -> Option<Duration> {
@@ -102,7 +132,11 @@ pub(crate) fn write_xrgb(surface: &Surface, output: &mut impl Write) -> io::Resu
     for pixels in surface.pixels().chunks_exact(surface.width() as usize) {
         row.clear();
         for &pixel in pixels {
-            let c = pixel.over(Color::WHITE);
+            let c = if pixel.a == 255 {
+                pixel
+            } else {
+                pixel.over(Color::WHITE)
+            };
             row.extend_from_slice(
                 &((u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)).to_ne_bytes(),
             );

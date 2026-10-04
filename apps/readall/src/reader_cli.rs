@@ -1,5 +1,5 @@
 //! Search and persistent annotations share the native reader's data model.
-use crate::reader_data::{Kind, Store, Theme};
+use crate::reader_data::{Kind, PageMode, Store, Theme};
 use readall_core::read_bounded;
 use readall_epub::{EpubBook, EpubLimits, SearchLimits};
 use readall_platform::LocalFileSource;
@@ -35,7 +35,9 @@ pub(crate) fn run(command: &str, args: &[OsString], output: &mut impl Write) -> 
     };
     if command == "settings" {
         if !values.is_empty() && values.len() != 2 {
-            return Err("settings [theme|size|margin|line-spacing VALUE] [--data-dir DIR]".into());
+            return Err(
+                "settings [theme|size|margin|line-spacing|page-mode VALUE] [--data-dir DIR]".into(),
+            );
         }
         let store = store()?;
         let mut settings = store.settings()?;
@@ -45,17 +47,19 @@ pub(crate) fn run(command: &str, args: &[OsString], output: &mut impl Write) -> 
                 "size" => settings.size = value(1)?.parse()?,
                 "margin" => settings.margin = value(1)?.parse()?,
                 "line-spacing" => settings.line_spacing = value(1)?.parse()?,
+                "page-mode" => settings.page_mode = PageMode::parse(value(1)?)?,
                 _ => return Err("unknown reader setting".into()),
             }
             store.save_settings(settings)?;
         }
         writeln!(
             output,
-            "theme={}\nsize={}\nmargin={}\nline-spacing={}\ndata={}",
+            "theme={}\nsize={}\nmargin={}\nline-spacing={}\npage-mode={}\ndata={}",
             settings.theme.name(),
             settings.size,
             settings.margin,
             settings.line_spacing,
+            settings.page_mode.name(),
             store.root().display()
         )?;
         return Ok(());

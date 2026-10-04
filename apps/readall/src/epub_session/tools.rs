@@ -18,6 +18,16 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
     }
     pub(crate) fn apply_settings(&mut self, settings: Settings) -> Result<bool> {
         settings.validate()?;
+        let current = self.settings();
+        if current.theme == settings.theme
+            && current.size == settings.size
+            && current.margin == settings.margin
+            && current.line_spacing == settings.line_spacing
+        {
+            self.preferences = settings;
+            self.paging.view = None;
+            return Ok(current != settings);
+        }
         let mut options = self.options.clone();
         options.size = settings.size;
         options.margin = settings.margin;
@@ -31,6 +41,7 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
             renderer.render_with_image(&self.chapter, &options, self.anchor.image_index())?;
         self.options = options;
         self.renderer = renderer;
+        self.clear_paging();
         self.frame = frame;
         self.preferences = settings;
         Ok(true)
@@ -49,6 +60,7 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
                 self.renderer
                     .render_with_image(&self.chapter, &options, locator.image_index())?;
             self.options = options;
+            self.clear_paging();
             self.frame = frame;
             self.anchor = locator;
             return Ok(true);
@@ -61,6 +73,7 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
         self.chapter = chapter;
         self.spine = spine;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         self.anchor = locator;
         Ok(true)
@@ -68,7 +81,7 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
     pub(crate) fn link_regions(
         &self,
     ) -> impl Iterator<Item = (readall_render::Rect, &readall_epub::ContentLink)> {
-        self.frame
+        self.frame()
             .hits
             .iter()
             .filter_map(|hit| {
@@ -76,7 +89,7 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
                     .text_link(hit.start..hit.end)
                     .map(|link| (hit.rect, link))
             })
-            .chain(self.frame.image_hits.iter().filter_map(|(rect, index)| {
+            .chain(self.frame().image_hits.iter().filter_map(|(rect, index)| {
                 self.chapter.image_link(*index).map(|link| (*rect, link))
             }))
     }
@@ -108,7 +121,7 @@ impl<'book, 'archive, 'font, 'data> EpubSession<'book, 'archive, 'font, 'data> {
             .collect()
     }
     pub(crate) fn selected_locator(&self, offset: usize) -> Result<EpubLocator> {
-        Ok(self.book.locator(self.spine, offset)?)
+        self.chapter.epub_locator(offset, None)
     }
     pub(crate) fn grapheme_range(&self, range: Range<usize>) -> Range<usize> {
         let mut start = range.start;
@@ -159,6 +172,7 @@ mod tests {
             size: 26,
             margin: 28,
             line_spacing: 1.25,
+            page_mode: Default::default(),
         };
         session.apply_settings(settings).unwrap();
         assert_eq!(session.anchor(), &hit);

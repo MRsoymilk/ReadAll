@@ -1,5 +1,7 @@
 //! Bounded reader settings and annotations. Atomic writes, explicit corruption errors,
 //! and a cooperative lock prevent two ReadAll windows from losing each other's edits.
+mod page_mode;
+pub(crate) use page_mode::PageMode;
 use readall_epub::{EpubBook, EpubLocator};
 use std::{
     fs::{self, File, OpenOptions},
@@ -77,6 +79,7 @@ pub(crate) struct Settings {
     pub size: u32,
     pub margin: u32,
     pub line_spacing: f32,
+    pub page_mode: PageMode,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -85,6 +88,7 @@ impl Default for Settings {
             size: 24,
             margin: 40,
             line_spacing: 1.0,
+            page_mode: PageMode::default(),
         }
     }
 }
@@ -174,11 +178,12 @@ impl Store {
         atomic(
             &self.root.join("settings.conf"),
             &format!(
-                "readall-settings-v1\ntheme={}\nsize={}\nmargin={}\nline-spacing={}\n",
+                "readall-settings-v1\ntheme={}\nsize={}\nmargin={}\nline-spacing={}\npage-mode={}\n",
                 settings.theme.name(),
                 settings.size,
                 settings.margin,
-                settings.line_spacing
+                settings.line_spacing,
+                settings.page_mode.name()
             ),
         )
     }
@@ -300,6 +305,7 @@ fn parse_settings(text: Option<&str>) -> io::Result<Settings> {
         }
         match key {
             "theme" => settings.theme = Theme::parse(value)?,
+            "page-mode" => settings.page_mode = PageMode::parse(value)?,
             "size" => settings.size = value.parse().map_err(|_| invalid("invalid font size"))?,
             "margin" => settings.margin = value.parse().map_err(|_| invalid("invalid margin"))?,
             "line-spacing" => {
@@ -541,6 +547,7 @@ mod tests {
             size: 28,
             margin: 36,
             line_spacing: 1.25,
+            page_mode: PageMode::Scroll,
         };
         store.save_settings(settings).unwrap();
         assert_eq!(store.settings().unwrap(), settings);

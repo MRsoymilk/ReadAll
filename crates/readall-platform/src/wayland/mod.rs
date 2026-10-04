@@ -66,8 +66,9 @@ struct State {
     pointer_focus: bool,
     pointer_x: i32,
     pointer_y: i32,
-    scroll: i32,
-    discrete: i32,
+    scroll: [i32; 2],
+    discrete: [i32; 2],
+    precise_scroll: bool,
     motion: super::window::MotionCoalescer,
     actions: [Option<Action>; 64],
     action_count: usize,
@@ -105,8 +106,9 @@ impl State {
             pointer_focus: false,
             pointer_x: 0,
             pointer_y: 0,
-            scroll: 0,
-            discrete: 0,
+            scroll: [0; 2],
+            discrete: [0; 2],
+            precise_scroll: false,
             motion: super::window::MotionCoalescer::default(),
             actions: [None; 64],
             action_count: 0,
@@ -301,8 +303,8 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                     s.action(Action::PointerLeave);
                 }
                 s.pointer_focus = false;
-                s.scroll = 0;
-                s.discrete = 0;
+                s.scroll = [0; 2];
+                s.discrete = [0; 2];
             }
             (POINTER, 2) => {
                 s.pointer_x = (*args.add(1)).i;
@@ -326,32 +328,60 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                     y: s.pointer_y / 256,
                 });
             }
-            (POINTER, 4) if s.pointer_focus && (*args.add(1)).u == 0 => {
-                s.scroll = s
-                    .scroll
-                    .saturating_add((*args.add(2)).i)
-                    .clamp(-61440, 61440)
+            (POINTER, 3) if s.pointer_focus && s.precise_scroll && (*args.add(2)).u == 273 => {
+                let (x, y) = (s.pointer_x / 256, s.pointer_y / 256);
+                s.action(if (*args.add(3)).u == 1 {
+                    Action::PanStart { x, y }
+                } else {
+                    Action::PanEnd { x, y }
+                });
             }
-            (POINTER, 8) if s.pointer_focus && (*args).u == 0 => {
-                s.discrete = s.discrete.saturating_add((*args.add(1)).i).clamp(-64, 64)
+            (POINTER, 4) if s.pointer_focus && (*args.add(1)).u < 2 => {
+                let axis = (*args.add(1)).u as usize;
+                s.scroll[axis] = s.scroll[axis]
+                    .saturating_add((*args.add(2)).i)
+                    .clamp(-262144, 262144);
+            }
+            (POINTER, 8) if s.pointer_focus && (*args).u < 2 => {
+                let axis = (*args).u as usize;
+                s.discrete[axis] = s.discrete[axis]
+                    .saturating_add((*args.add(1)).i)
+                    .clamp(-16, 16);
             }
             (POINTER, 5) => {
-                let direction = if s.discrete != 0 {
-                    s.discrete.signum()
-                } else if s.scroll.abs() >= 2560 {
-                    s.scroll.signum()
-                } else {
-                    0
-                };
-                if direction != 0 {
-                    s.action(if direction > 0 {
-                        Action::Next
-                    } else {
-                        Action::Previous
+                if s.precise_scroll {
+                    let delta = std::array::from_fn::<_, 2, _>(|axis| {
+                        if s.discrete[axis] != 0 {
+                            s.discrete[axis] * 64 * 256
+                        } else {
+                            s.scroll[axis]
+                        }
                     });
-                    s.scroll = 0;
+                    if delta != [0, 0] {
+                        s.action(Action::Scroll {
+                            dx: delta[1],
+                            dy: delta[0],
+                        });
+                    }
+                    s.scroll = [0; 2];
+                } else {
+                    let direction = if s.discrete[0] != 0 {
+                        s.discrete[0].signum()
+                    } else if s.scroll[0].abs() >= 2560 {
+                        s.scroll[0].signum()
+                    } else {
+                        0
+                    };
+                    if direction != 0 {
+                        s.action(if direction > 0 {
+                            Action::Next
+                        } else {
+                            Action::Previous
+                        });
+                        s.scroll = [0; 2];
+                    }
                 }
-                s.discrete = 0;
+                s.discrete = [0; 2];
             }
             (BUFFER, 0) => {
                 if let Some(slot) = s.buffers.iter_mut().find(|slot| **slot == target) {
@@ -823,8 +853,10 @@ pub(super) fn run(
             if let Some(interval) = handler.animation_interval()
                 && last_animation.elapsed() >= interval
             {
-                changed |= handler.animation_tick()?;
+                // Schedule start-to-start; frame preparation and SHM presentation
+                // count towards the interval rather than being added after it.
                 last_animation = Instant::now();
+                changed |= handler.animation_tick()?;
             }
             // Worker completions and cancellation can arrive without input events.
             if handler.close_requested() {
@@ -833,6 +865,7 @@ pub(super) fn run(
             unsafe {
                 (*connection.state).dirty |= changed;
                 (*connection.state).text_input = handler.text_input_active();
+                (*connection.state).precise_scroll = handler.precise_scroll();
             }
             if (dirty || changed) && connection.present(handler)? {
                 handler.frame_presented();

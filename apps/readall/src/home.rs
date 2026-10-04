@@ -673,7 +673,10 @@ mod enabled {
                 Action::Close
                 | Action::Text(_)
                 | Action::Command(_)
-                | Action::PointerRelease { .. } => Ok(false),
+                | Action::PointerRelease { .. }
+                | Action::Scroll { .. }
+                | Action::PanStart { .. }
+                | Action::PanEnd { .. } => Ok(false),
             }
         }
     }
@@ -724,7 +727,10 @@ mod enabled {
                 | Action::Close
                 | Action::Text(_)
                 | Action::Command(_)
-                | Action::PointerRelease { .. } => Ok(false),
+                | Action::PointerRelease { .. }
+                | Action::Scroll { .. }
+                | Action::PanStart { .. }
+                | Action::PanEnd { .. } => Ok(false),
             }
         }
 

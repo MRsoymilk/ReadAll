@@ -1,6 +1,7 @@
 //! Transactional EPUB reading state over the current XHTML text subset.
 use crate::epub_flow::{Chapter, EpubRenderer as PageRenderer};
 use crate::reader_data::Settings;
+mod paging;
 mod tools;
 use crate::text_page::{Options, RenderedPage};
 use readall_epub::{EpubBook, EpubError, EpubLocator};
@@ -45,6 +46,7 @@ pub(crate) struct EpubSession<'book, 'archive, 'font, 'font_bytes> {
     frame: RenderedPage,
     anchor: EpubLocator,
     preferences: Settings,
+    paging: paging::Paging<'book, 'archive, 'font, 'font_bytes>,
 }
 
 impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'font_bytes> {
@@ -136,11 +138,12 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
             frame,
             anchor,
             preferences,
+            paging: paging::Paging::default(),
         })
     }
 
     pub(crate) fn frame(&self) -> &RenderedPage {
-        &self.frame
+        self.paging.view.as_ref().unwrap_or(&self.frame)
     }
 
     pub(crate) fn anchor(&self) -> &EpubLocator {
@@ -165,6 +168,9 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
     }
 
     pub(crate) fn overall_progress(&self) -> f32 {
+        if let Some(progress) = self.scroll_progress() {
+            return progress;
+        }
         let chapters = self.book.spine().len().max(1) as f32;
         let chapter_fraction = (self.frame.page + 1) as f32 / self.frame.pages.max(1) as f32;
         ((self.spine as f32 + chapter_fraction) / chapters).clamp(0.0, 1.0)
@@ -266,6 +272,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         self.chapter = chapter;
         self.spine = spine;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         self.anchor = anchor;
         Ok(true)
@@ -315,6 +322,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
                 renderer.render_with_image(&self.chapter, &options, self.anchor.image_index())?;
             self.renderer = renderer;
             self.options = options;
+            self.clear_paging();
             self.frame = frame;
             return Ok(true);
         }
@@ -323,6 +331,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
             self.renderer
                 .render_with_image(&self.chapter, &options, self.anchor.image_index())?;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         Ok(true)
     }
@@ -394,6 +403,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         let frame = self.renderer.render(&self.chapter, &options)?;
         let anchor = page_anchor(self.book, self.spine, &self.chapter, &frame)?;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         self.anchor = anchor;
         Ok(true)
@@ -418,6 +428,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         self.chapter = chapter;
         self.spine = spine;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         self.anchor = anchor;
         Ok(true)
@@ -482,16 +493,13 @@ fn readable_chapter<'book, 'archive>(
 }
 
 fn page_anchor(
-    book: &EpubBook<'_>,
-    spine: usize,
+    _book: &EpubBook<'_>,
+    _spine: usize,
     chapter: &Chapter<'_, '_>,
     frame: &RenderedPage,
 ) -> Result<EpubLocator> {
     let offset = chapter.restore(&frame.locator)?;
-    match frame.image_index {
-        Some(image) => Ok(book.image_locator(spine, image)?),
-        None => Ok(book.locator(spine, offset)?),
-    }
+    chapter.epub_locator(offset, frame.image_index)
 }
 
 fn first_readable<'book, 'archive>(

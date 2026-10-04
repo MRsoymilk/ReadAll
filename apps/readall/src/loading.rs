@@ -62,7 +62,33 @@ impl Drop for Guard {
         });
     }
 }
-thread_local! { static CURRENT: RefCell<Option<Tracker>> = const { RefCell::new(None) }; }
+thread_local! {
+    static CURRENT: RefCell<Option<Tracker>> = const { RefCell::new(None) };
+    static SPECULATIVE: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+/// User input preempts idle prefetch without cancelling the reading session.
+pub(crate) struct SpeculationGuard(Option<Arc<AtomicBool>>);
+impl Drop for SpeculationGuard {
+    fn drop(&mut self) {
+        SPECULATIVE.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+pub(crate) fn speculate(interrupt: Arc<AtomicBool>) -> SpeculationGuard {
+    SpeculationGuard(SPECULATIVE.with(|slot| slot.replace(Some(interrupt))))
+}
+#[derive(Debug)]
+struct Preempted;
+impl fmt::Display for Preempted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("idle prefetch preempted by reader input")
+    }
+}
+impl Error for Preempted {}
+pub(crate) fn preempted(error: &(dyn Error + 'static)) -> bool {
+    error.is::<Preempted>()
+}
 #[derive(Debug)]
 struct Cancelled;
 impl fmt::Display for Cancelled {
@@ -72,6 +98,13 @@ impl fmt::Display for Cancelled {
 }
 impl Error for Cancelled {}
 pub(crate) fn check() -> Result<()> {
+    if SPECULATIVE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }) {
+        return Err(Box::new(Preempted));
+    }
     CURRENT.with(|slot| {
         if slot.borrow().as_ref().is_some_and(Tracker::is_cancelled) {
             Err(Box::new(Cancelled) as Box<dyn Error>)
@@ -82,6 +115,9 @@ pub(crate) fn check() -> Result<()> {
 }
 pub(crate) fn step(phase: &'static str, done: usize, total: usize) -> Result<()> {
     check()?;
+    if SPECULATIVE.with(|slot| slot.borrow().is_some()) {
+        return Ok(());
+    }
     CURRENT.with(|slot| {
         if let Some(tracker) = slot.borrow().as_ref() {
             let mut state = tracker.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -153,6 +189,23 @@ mod tests {
         let other = Tracker::default();
         let _guard = other.install();
         assert!(check().is_ok());
+    }
+    #[test]
+    fn prefetch_is_preemptible_without_cancelling_or_changing_visible_progress() {
+        let tracker = Tracker::default();
+        let _guard = tracker.install();
+        stage("当前页面").unwrap();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        {
+            let _scope = speculate(Arc::clone(&interrupt));
+            stage("预读").unwrap();
+            assert_eq!(tracker.snapshot().phase, "当前页面");
+            interrupt.store(true, Ordering::Release);
+            assert!(preempted(check().unwrap_err().as_ref()));
+            assert!(!tracker.is_cancelled());
+        }
+        assert!(check().is_ok());
+        stage("处理输入").unwrap();
     }
     #[test]
     fn observed_read_keeps_bounds_and_cancel_semantics() {

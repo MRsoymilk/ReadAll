@@ -299,6 +299,7 @@ pub(crate) struct TextHit {
     pub start: usize,
     pub end: usize,
 }
+#[derive(Clone)]
 pub(crate) struct RenderedPage {
     pub surface: Surface,
     pub page: usize,

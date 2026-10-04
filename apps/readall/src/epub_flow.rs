@@ -109,6 +109,25 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
             .get(index)
             .filter(|link| link.images.contains(&image))
     }
+    pub(crate) fn epub_locator(
+        &self,
+        offset: usize,
+        image: Option<usize>,
+    ) -> Result<readall_epub::EpubLocator> {
+        let offset = match image {
+            Some(index) => {
+                self.content
+                    .images
+                    .get(index)
+                    .ok_or("image index outside chapter")?
+                    .offset
+            }
+            None => offset,
+        };
+        Ok(self
+            .content
+            .locator(self.identity.0, self.identity.1, offset, image)?)
+    }
     pub(crate) fn is_readable(&self) -> bool {
         !self.text().trim().is_empty() || !self.content.images.is_empty()
     }

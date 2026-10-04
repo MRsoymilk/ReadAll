@@ -64,6 +64,7 @@ fn initial_render_uses_saved_preferences_without_second_layout() {
         size: 28,
         margin: 44,
         line_spacing: 1.4,
+        page_mode: Default::default(),
     };
     let session =
         EpubSession::new_with_preferences(&book, &font, options, Start::Beginning, &[], settings)

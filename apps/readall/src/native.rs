@@ -71,7 +71,10 @@ mod enabled {
                 Action::Close
                 | Action::Text(_)
                 | Action::Command(_)
-                | Action::PointerRelease { .. } => return Ok(false),
+                | Action::PointerRelease { .. }
+                | Action::Scroll { .. }
+                | Action::PanStart { .. }
+                | Action::PanEnd { .. } => return Ok(false),
             };
             match Session::action(&mut self.session, action) {
                 Ok(changed) => {

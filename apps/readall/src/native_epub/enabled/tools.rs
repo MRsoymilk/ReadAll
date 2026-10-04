@@ -67,6 +67,9 @@ impl Tools {
     pub(super) fn cancel_gesture(&mut self) {
         self.drag = None;
     }
+    pub(super) fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
     pub(super) fn clear_selection(&mut self) {
         self.selection = None;
         self.drag = None;
@@ -155,7 +158,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         match self.tools.mode {
             Mode::Search => self.tools.hits.len(),
             Mode::Annotations => self.tools.annotations.len(),
-            Mode::Settings => 4,
+            Mode::Settings => 5,
             _ => 0,
         }
     }
@@ -273,12 +276,15 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 settings.line_spacing =
                     (settings.line_spacing + direction as f32 * 0.1).clamp(0.8, 2.0)
             }
+            4 => settings.page_mode = settings.page_mode.step(direction),
             _ => {}
         }
         self.apply_tool_settings(settings)
     }
     fn apply_tool_settings(&mut self, settings: Settings) -> WindowResult<()> {
+        self.freeze_motion()?;
         self.session.apply_settings(settings)?;
+        self.reset_motion()?;
         self.tools.clear_selection();
         self.save_progress();
         if let Some(store) = &self.tools.store {
@@ -831,6 +837,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     format!("字号：{} px", s.size),
                     format!("页边距：{} px", s.margin),
                     format!("行距：{:.1} 倍", s.line_spacing),
+                    format!("翻页模式：{}", s.page_mode.label()),
                 ]
                 .into_iter()
                 .enumerate()

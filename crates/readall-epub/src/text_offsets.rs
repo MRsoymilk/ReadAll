@@ -8,7 +8,9 @@ impl ChapterContent {
         self.legacy_text.is_some()
     }
 
-    pub(crate) fn locator(
+    /// Construct a checked locator from an already loaded chapter, avoiding ZIP/CSS
+    /// reparsing on every animation or page boundary. The caller supplies its identity.
+    pub fn locator(
         &self,
         book_id: DocumentId,
         spine_index: usize,

@@ -13,6 +13,7 @@ mod enabled {
     mod async_reader;
     #[cfg(test)]
     mod loading_tests;
+    mod motion;
     #[cfg(test)]
     mod selection_tests;
     mod tools;
@@ -70,6 +71,7 @@ mod enabled {
         title_marquee_span: u32,
         close_requested: bool,
         tools: tools::Tools,
+        motion: motion::Motion,
     }
 
     fn point_in(rect: Rect, x: i32, y: i32) -> bool {
@@ -123,8 +125,10 @@ mod enabled {
                 title_marquee_span: 0,
                 close_requested: false,
                 tools: tools::Tools::default(),
+                motion: motion::Motion::default(),
             };
             reader.sync_toc_selection();
+            reader.reset_motion()?;
             reader.refresh_surface()?;
             Ok(reader)
         }
@@ -242,6 +246,7 @@ mod enabled {
             self.surface = self.session.frame().surface.clone();
             self.draw_link_marks()?;
             self.draw_marks()?;
+            self.draw_page_motion()?;
             let width = self.surface.width();
             let height = self.surface.height();
             let (background, theme_ink) = self.session.settings().theme.colors();
@@ -566,7 +571,9 @@ mod enabled {
             else {
                 return Ok(false);
             };
+            self.freeze_motion()?;
             let changed = self.session.jump_to_toc_target(spine, offset)?;
+            self.reset_motion()?;
             self.tools.clear_selection();
             self.toc_selected = index;
             self.keep_toc_selected_visible();
@@ -595,6 +602,10 @@ mod enabled {
         }
 
         fn perform_reader_action(&mut self, action: ReaderAction) -> WindowResult<bool> {
+            self.animated_page_action(action)
+        }
+
+        fn perform_reader_action_instant(&mut self, action: ReaderAction) -> WindowResult<bool> {
             match EpubSession::action(&mut self.session, action) {
                 Ok(changed) => {
                     if changed {
@@ -739,10 +750,12 @@ mod enabled {
     impl WindowHandler for ReaderWindow<'_, '_, '_, '_> {
         fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool> {
             if (width, height) != (self.surface.width(), self.surface.height()) {
+                self.freeze_motion()?;
                 self.tools.cancel_gesture();
             }
             let changed = EpubSession::resize(&mut self.session, width, height)?;
             if changed {
+                self.reset_motion()?;
                 self.refresh_surface()?;
             }
             Ok(changed)
@@ -751,10 +764,29 @@ mod enabled {
         fn text_input_active(&self) -> bool {
             self.tools.editing()
         }
+        fn precise_scroll(&self) -> bool {
+            true
+        }
+        fn idle_tick(&mut self) -> WindowResult<bool> {
+            self.prefetch_page()
+        }
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if let Some(changed) = self.motion_action(action)? {
+                if changed {
+                    self.refresh_surface()?;
+                }
+                return Ok(changed);
+            }
+            let previous_anchor = self.session.anchor().clone();
+            let previous_mode = self.session.settings().page_mode;
             match self.tool_action(action) {
                 Ok(Some(changed)) => {
                     if changed {
+                        if previous_anchor != *self.session.anchor()
+                            || previous_mode != self.session.settings().page_mode
+                        {
+                            self.reset_motion()?;
+                        }
                         self.refresh_surface()?;
                     }
                     return Ok(changed);
@@ -812,7 +844,10 @@ mod enabled {
                 Action::Close
                 | Action::Text(_)
                 | Action::Command(_)
-                | Action::PointerRelease { .. } => Ok(false),
+                | Action::PointerRelease { .. }
+                | Action::Scroll { .. }
+                | Action::PanStart { .. }
+                | Action::PanEnd { .. } => Ok(false),
             }
         }
 
@@ -825,12 +860,17 @@ mod enabled {
         }
 
         fn animation_interval(&self) -> Option<Duration> {
+            if self.motion.active() {
+                return Some(Duration::from_millis(16));
+            }
             (self.title_marquee_span != 0 || self.tools.pending())
                 .then_some(Duration::from_millis(40))
         }
 
         fn animation_tick(&mut self) -> WindowResult<bool> {
-            let clipboard_changed = self.poll_clipboard() | self.poll_external_link();
+            let motion_changed = self.tick_page_motion(std::time::Instant::now())?;
+            let clipboard_changed =
+                self.poll_clipboard() | self.poll_external_link() | motion_changed;
             if self.title_marquee_span == 0 {
                 if clipboard_changed {
                     self.refresh_surface()?;
@@ -1109,7 +1149,7 @@ mod enabled {
 
                 writeln!(
                     output,
-                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nPage navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
+                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nF5 settings select slide, book (2D paper curl) or continuous vertical scroll; the mode is saved. Wheel/touchpad and right-button drag navigate; left-button drag selects text. Esc stops ongoing motion first. Page navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
                 )?;
                 output.flush()?;
 
