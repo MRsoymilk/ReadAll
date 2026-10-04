@@ -2,6 +2,7 @@
 //! Channels use straight-alpha, byte-space source-over compositing (not linear-light color management).
 
 pub mod glyph;
+mod image;
 
 use std::{
     fmt,

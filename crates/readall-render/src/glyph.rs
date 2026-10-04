@@ -283,6 +283,64 @@ fn rasterize_contours<'a>(
 }
 
 impl Surface {
+    /// Synthetic emphasis is used only when the requested real font variant is absent.
+    /// Pixel work and clipping remain bounded; this does not claim typographic hinting.
+    pub fn draw_glyph_emphasis(
+        &mut self,
+        mask: &GlyphMask,
+        baseline: (i32, i32),
+        color: Color,
+        clip: Rect,
+        bold: u32,
+        italic: bool,
+    ) -> Result<()> {
+        if bold == 0 && !italic {
+            return self.draw_glyph(mask, baseline, color, clip);
+        }
+        if bold > 8 {
+            return Err(RenderError::InvalidGeometry("synthetic bold width"));
+        }
+        let work = u64::from(mask.width) * u64::from(mask.height) * u64::from(bold + 1);
+        if work > self.limits.max_blended_pixels {
+            return Err(RenderError::BudgetExceeded("synthetic glyph work"));
+        }
+        let clip = clip.intersection(Rect::new(0, 0, self.width, self.height));
+        for row in 0..mask.height {
+            let y = i64::from(baseline.1) + i64::from(mask.top) + i64::from(row);
+            if y < i64::from(clip.y) || y >= i64::from(clip.y) + i64::from(clip.height) {
+                continue;
+            }
+            let skew = if italic {
+                ((i64::from(baseline.1) - y) as f32 * 0.2).round() as i64
+            } else {
+                0
+            };
+            for column in 0..mask.width {
+                let alpha = ((u16::from(color.a)
+                    * u16::from(mask.coverage[(row * mask.width + column) as usize])
+                    + 127)
+                    / 255) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                for extra in 0..=bold {
+                    let x = i64::from(baseline.0)
+                        + i64::from(mask.left)
+                        + i64::from(column)
+                        + i64::from(extra)
+                        + skew;
+                    if x < i64::from(clip.x) || x >= i64::from(clip.x) + i64::from(clip.width) {
+                        continue;
+                    }
+                    let destination =
+                        &mut self.pixels[y as usize * self.width as usize + x as usize];
+                    *destination = Color { a: alpha, ..color }.over(*destination);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Blits a validated mask at an integer baseline. Clips both to `clip` and surface bounds.
     /// All checks happen before pixels are modified. Placement currently snaps to whole pixels.
     pub fn draw_glyph(
@@ -350,6 +408,33 @@ mod tests {
             point(x + w, y + h, true),
             point(x, y + h, true),
         ]
+    }
+    #[test]
+    fn synthetic_emphasis_is_clipped_and_bounded() {
+        let mask = mask(&[rectangle(0.0, 0.0, 3.0, 4.0)]);
+        let mut surface = Surface::new(16, 16, RenderLimits::default()).unwrap();
+        surface
+            .draw_glyph_emphasis(&mask, (2, 8), Color::WHITE, Rect::new(3, 3, 3, 5), 2, true)
+            .unwrap();
+        for y in 0..16 {
+            for x in 0..16 {
+                if !(3..6).contains(&x) || !(3..8).contains(&y) {
+                    assert_eq!(surface.pixel(x, y), Some(Color::default()));
+                }
+            }
+        }
+        assert!(
+            surface
+                .draw_glyph_emphasis(
+                    &mask,
+                    (0, 0),
+                    Color::WHITE,
+                    Rect::new(0, 0, 16, 16),
+                    9,
+                    true
+                )
+                .is_err()
+        );
     }
     #[test]
     fn solid_rectangle_preserves_baseline_and_negative_bearing() {
