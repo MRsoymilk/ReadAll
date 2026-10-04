@@ -71,6 +71,7 @@ ReadAll 当前自己处理：
 - 自动跳过空 XHTML 和当前不可读 spine；缺失或暂不支持的图片显示占位提示
 - 稳定文本定位：`epub-v1:<book-sha256>:<spine>:<utf8-offset>`
 - 精确图片定位：`epub-v2:<book-sha256>:<spine>:<utf8-offset>:<image-index>`；仍读取旧 v1 进度
+- 保留代码空白后的章节使用 `epub-v3:<book-sha256>:<spine>:<utf8-offset>:<image-index-or->`；旧 v1/v2 偏移自动转换
 
 ### CSS 子集与图文排版
 
@@ -86,6 +87,7 @@ CSS 从 XHTML 的 `<style>`、行内 `style` 和包内 `<link rel="stylesheet">`
 | `text-align` | left / center / right；当前为从左到右排版 |
 | `text-indent` | `px` / `em` 正首行缩进；最多占可用宽度的一半 |
 | `line-height` | normal / 有限范围的无单位倍数 |
+| `white-space` | normal / nowrap / pre / pre-wrap / pre-line / break-spaces 的空白处理；继承、initial、unset、`!important` |
 | `display` | none；隐藏内容保留原文本偏移，但不参与可见绘制 |
 | `font-weight` / `font-style` | normal / bold / 数字字重、normal / italic / oblique；优先真实字形变体，无匹配时有限合成 |
 | `margin` / `padding` | 正长度、百分比、四边简写/单边；横向 auto 边距可居中 |
@@ -95,6 +97,10 @@ CSS 从 XHTML 的 `<style>`、行内 `style` 和包内 `<link rel="stylesheet">`
 | `break-before` / `break-after` | page / auto，兼容 page-break-before/after 的 always |
 
 默认区分 h1–h6 字号层级。块盒模型对 section、div、p 等块元素和 body 生效，包含嵌套内容宽度、边距、内边距、纯色背景与实线边框；跨页时延续背景和侧边框，不在切分处重复顶底装饰。极端装饰长度会受页面可用范围限制。尚无 margin collapsing、浮动、定位、负边距、完整表格布局、复杂选择器、`@import` / `@media`、完整字体简写和可变字体匹配；这不是完整浏览器 CSS 引擎。
+
+代码块 `<pre>` / `<pre><code>` 默认保留换行、连续空格、Tab、空行和末尾空白，并作为独立块排版；语法高亮的嵌套 `<span>` 继承这些规则。`white-space` 可来自包内 CSS、`<style>` 或行内样式；`pre-line` 只保留换行并折叠空格。连续 `<br>` 不再合并成一个换行。XHTML 按 XML 内容处理，保留 `<pre>` 开头的源换行，CRLF / CR 规范化为 LF。普通正文和未声明预格式化的行内 `<code>` 仍折叠空白，不从 `#define` / 分号猜测源码断行。
+
+代码空行使用完整行高；Tab 参与缩进定位。为避免分页阅读器中长代码被裁掉，默认 `<pre>` 使用 pre-wrap；显式 pre / nowrap 的过长行也执行视口内安全软换行，尚不提供水平滚动，因而不是完整浏览器 white-space 溢出实现。复制、搜索和 `epub-text` 使用保留空白的逻辑文本，视觉软换行不会额外写入复制结果。语法颜色只保留作者已有样式，不新增代码语法分析器。
 
 PNG 仍由 `readall-image` 自研解码，复用 ReadAll 的 DEFLATE。支持非交错和 Adam7 交错图像、灰度/RGB/索引色/alpha 的合法位深组合，校验 CRC、Adler-32 与资源预算。JPEG 通过独立的 `jpeg-decoder` 接入，涵盖基线、渐进、灰度、CMYK 及有界 EXIF 方向处理。图片按独立块排入正文、保留宽高比；缩放仍采用最近邻，没有完整色彩管理。
 
@@ -106,7 +112,7 @@ RGBA 缓存使用 LRU，最多驻留 64 个资源且总量不超过 64 MiB。**6
 
 损坏、缺失、暂不支持的图片显示占位块，不阻断后续正文。失败状态与 RGBA 缓存分开，同一资源在当前章节实例内只报告一次；大量失败时限制终端日志数量。回翻不会反复解码同一损坏资源，也不会因前面有 64 张失败图片而跳过后面的有效图片。
 
-样式、盒模型和图片注释不向规范化文本插入占位字符。文本位置仍使用 `epub-v1`；图片页新增 `epub-v2`，包含章节内的图片序号，解决连续无文字图片共用偏移的问题。重排、重启和图片书签会保留图片目标；旧 v1 进度继续兼容。页码会随字号与窗口变化，保存的是内容锚点，不是固定页码。
+盒模型和图片注释不向文本插入占位字符。未改变空白的章节继续使用 `epub-v1` 文本定位和 `epub-v2` 图片定位。代码空白或连续显式换行改变文本偏移时，使用 `epub-v3`；最后一段 `-` 表示文本位置，数字表示图片序号。旧 v1/v2 在旧折叠文本与新文本之间按字符顺序转换，不直接把旧数字当成新偏移；图片仍按序号精确恢复。旧高亮/笔记的两端一起转换，读取时仅更新内存，明确编辑标注后才原子写回；不修改 EPUB。旧版已经丢失的同一空白序列内精细位置无法完全恢复，会就近映射，非空白内容位置保持对应。页码会随字号与窗口变化，保存的是内容锚点，不是固定页码。
 
 当前 EPUB **尚未完整渲染**：
 
@@ -117,7 +123,7 @@ RGBA 缓存使用 LRU，最多驻留 64 个资源且总量不超过 64 MiB。**6
 - DRM / 加密 EPUB
 - Fixed-layout EPUB
 
-目录面板优先使用 EPUB 3 Navigation Document；没有 EPUB 3 nav 时会尝试 EPUB 2 NCX，再没有可用目录资源时才回退为从可读 spine 正文首行推断标题。两种正式目录都会保留嵌套层级；`href/src#fragment` 会解析到目标 XHTML 元素的 `id/xml:id`，再映射到规范化正文 UTF-8 offset，因此同一 XHTML 内的子目录也可以精确跳转，并继续复用 `epub-v1` locator 保持重排后的内容位置。fragment 缺失或无法解析时回退到目标 spine 开头。为兼容旧 XHTML，ReadAll 内置少量固定的常见命名字符实体；未知自定义实体、内部 DTD 子集和外部实体仍然拒绝，不会下载或展开外部 DTD。
+目录面板优先使用 EPUB 3 Navigation Document；没有 EPUB 3 nav 时会尝试 EPUB 2 NCX，再没有可用目录资源时才回退为从可读 spine 正文首行推断标题。两种正式目录都会保留嵌套层级；`href/src#fragment` 会解析到目标 XHTML 元素的 `id/xml:id`，再映射到规范化正文 UTF-8 offset，因此同一 XHTML 内的子目录也可以精确跳转，并使用对应文本版本的 locator 保持重排后的内容位置。fragment 缺失或无法解析时回退到目标 spine 开头。为兼容旧 XHTML，ReadAll 内置少量固定的常见命名字符实体；未知自定义实体、内部 DTD 子集和外部实体仍然拒绝，不会下载或展开外部 DTD。
 
 ### TXT / 字体 / 渲染
 
@@ -148,7 +154,7 @@ EPUB 正文支持未加密的静态 TrueType 字体（TTF、采用 glyf 轮廓�
 
 只加载当前章节可见正文实际引用的字体族。单字体最多 16 MiB，每章最多 16 个成功读取的不同字体文件、64 MiB 累计字体输入、64 次来源读取尝试，最多 32 个字体声明；失败内容也计入输入预算。超预算或加载失败不会把阅读器默认字体替换掉。所有来源必须出现在 EPUB manifest 中，并完整验证 ZIP CRC。字体解析结果及字形缓存共享只读存储，不反复复制整份字体；切换章节会清除旧的字体选择和字形缓存，避免同名族跨章节串用。
 
-内嵌字体会参与实际字宽测量、shaping 和分页，而不是只给文字换样式。`epub-v1` / `epub-v2` 仍记录原内容锚点，字体变化不修改规范化文本。字体混淆（IDPF / Adobe）、WOFF/WOFF2、CFF/CFF2、可变字体与 DRM 仍不支持；含 `encryption.xml` 的书籍仍按原有策略拒绝，不把混淆字体误称为已支持。
+内嵌字体会参与实际字宽测量、shaping 和分页，而不是只给文字换样式。`epub-v1` / `epub-v2` / `epub-v3` 记录内容锚点，字体变化不修改规范化文本。字体混淆（IDPF / Adobe）、WOFF/WOFF2、CFF/CFF2、可变字体与 DRM 仍不支持；含 `encryption.xml` 的书籍仍按原有策略拒绝，不把混淆字体误称为已支持。
 
 ### 搜索、标注与阅读设置
 
