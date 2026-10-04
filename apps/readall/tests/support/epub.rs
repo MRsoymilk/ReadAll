@@ -137,9 +137,9 @@ pub fn make_epub_with_empty_spines() -> Vec<u8> {
     build_epub(vec![
         (
             "cover",
-            "cover.svg",
-            "image/svg+xml",
-            br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="cover.jpg"/></svg>"#.to_vec(),
+            "cover.bin",
+            "application/octet-stream",
+            b"unsupported spine format".to_vec(),
         ),
         (
             "one",
@@ -152,7 +152,8 @@ pub fn make_epub_with_empty_spines() -> Vec<u8> {
             "blank.xhtml",
             "application/xhtml+xml",
             b"<html><body> 
-	 </body></html>".to_vec(),
+	 </body></html>"
+                .to_vec(),
         ),
         (
             "two",
@@ -164,10 +165,99 @@ pub fn make_epub_with_empty_spines() -> Vec<u8> {
             "end",
             "end.xhtml",
             "application/xhtml+xml",
-            br#"<html><body><svg xmlns="http://www.w3.org/2000/svg"><image href="end.jpg"/></svg></body></html>"#
-                .to_vec(),
+            b"<html><body><!-- empty trailing chapter --></body></html>".to_vec(),
         ),
     ])
+}
+
+#[allow(dead_code)]
+pub fn make_epub_with_svg_spine(svg: &str, resources: Vec<(&str, &str, Vec<u8>)>) -> Vec<u8> {
+    let ids: Vec<_> = (0..resources.len()).map(|i| format!("image{i}")).collect();
+    let resources = resources
+        .into_iter()
+        .enumerate()
+        .map(|(i, (path, mime, bytes))| (ids[i].as_str(), path, mime, bytes))
+        .collect();
+    build_epub_all(
+        "SVG publication",
+        vec![("svg", "cover.svg", "image/svg+xml", svg.as_bytes().to_vec())],
+        None,
+        None,
+        resources,
+    )
+}
+
+#[allow(dead_code)]
+pub fn make_epub_with_resources(
+    chapters: &[&str],
+    resources: Vec<(&str, &str, Vec<u8>)>,
+) -> Vec<u8> {
+    let ids: Vec<_> = (0..chapters.len()).map(|i| format!("chapter{i}")).collect();
+    let paths: Vec<_> = (0..chapters.len())
+        .map(|i| format!("chapter{i}.xhtml"))
+        .collect();
+    let resource_ids: Vec<_> = (0..resources.len())
+        .map(|i| format!("resource{i}"))
+        .collect();
+    let spines = chapters
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            (
+                ids[i].as_str(),
+                paths[i].as_str(),
+                "application/xhtml+xml",
+                body.as_bytes().to_vec(),
+            )
+        })
+        .collect();
+    let resources = resources
+        .into_iter()
+        .enumerate()
+        .map(|(i, (path, media, bytes))| (resource_ids[i].as_str(), path, media, bytes))
+        .collect();
+    build_epub_all("ReadAll Styled Test", spines, None, None, resources)
+}
+
+#[allow(dead_code)]
+pub fn make_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], bytes: &[u8]) {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(&crc32(&out[start..]).to_be_bytes());
+    }
+    let mut row = vec![0];
+    for _ in 0..width {
+        row.extend_from_slice(&rgba);
+    }
+    let raw = row.repeat(height as usize);
+    let mut z = vec![0x78, 0x01];
+    let chunks = raw.chunks(65535);
+    let count = chunks.len();
+    for (index, part) in chunks.enumerate() {
+        let n = part.len() as u16;
+        z.push(u8::from(index + 1 == count));
+        z.extend_from_slice(&n.to_le_bytes());
+        z.extend_from_slice(&(!n).to_le_bytes());
+        z.extend_from_slice(part);
+    }
+    let (mut a, mut b) = (1_u32, 0_u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend_from_slice(&(b << 16 | a).to_be_bytes());
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend_from_slice(&width.to_be_bytes());
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    chunk(&mut bytes, b"IHDR", &header);
+    chunk(&mut bytes, b"IDAT", &z);
+    chunk(&mut bytes, b"IEND", &[]);
+    bytes
 }
 
 fn build_epub(spines: Vec<(&str, &str, &str, Vec<u8>)>) -> Vec<u8> {
@@ -192,12 +282,22 @@ fn build_epub_named_with_navigation_resources(
     navigation: Option<Vec<u8>>,
     ncx: Option<Vec<u8>>,
 ) -> Vec<u8> {
+    build_epub_all(title, spines, navigation, ncx, Vec::new())
+}
+
+fn build_epub_all(
+    title: &str,
+    spines: Vec<(&str, &str, &str, Vec<u8>)>,
+    navigation: Option<Vec<u8>>,
+    ncx: Option<Vec<u8>>,
+    resources: Vec<(&str, &str, &str, Vec<u8>)>,
+) -> Vec<u8> {
     const CONTAINER: &[u8] = br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
 
     let mut package = format!(
         r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>{title}</dc:title></metadata><manifest>"#,
     );
-    for (id, href, media_type, _) in &spines {
+    for (id, href, media_type, _) in spines.iter().chain(resources.iter()) {
         package.push_str(&format!(
             r#"<item id="{id}" href="{href}" media-type="{media_type}"/>"#
         ));
@@ -232,7 +332,7 @@ fn build_epub_named_with_navigation_resources(
     if let Some(ncx) = ncx {
         entries.push(("OEBPS/toc.ncx".into(), ncx));
     }
-    for (_, href, _, data) in spines {
+    for (_, href, _, data) in spines.into_iter().chain(resources) {
         entries.push((format!("OEBPS/{href}"), data));
     }
 
