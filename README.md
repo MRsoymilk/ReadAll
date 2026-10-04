@@ -2,16 +2,16 @@
 
 ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
-> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/TXT；Windows、Android 和 PDF 仍在后续路线中。**
+> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/MOBI/TXT；Windows、Android 和 PDF 仍在后续路线中。**
 
 ## v0.1.0 已实现
 
 ### 原生 Linux 阅读界面
 
 - 零参数启动原生书库：`./readall`
-- 内置文件浏览器，可直接选择 `.epub`
-- 选中 EPUB 时按需预览 OPF 书名 / 作者 / 语言，解析失败不阻止打开
-- 持久化最近阅读列表，成功关闭 EPUB 后自动记录，可从首页直接继续打开
+- 内置文件浏览器，可直接选择 `.epub` / `.mobi`（及使用 BOOKMOBI 容器的旧式 `.azw` / `.prc`）
+- 选中 EPUB / MOBI 时按需预览书名 / 作者 / 语言；MOBI 预览不解压正文，解析失败不阻止尝试打开
+- 持久化最近阅读列表，成功关闭 EPUB / MOBI 后自动记录，可从首页直接继续打开
 - 中文文件名、中文界面和中文正文
 - 内置 **LXGW WenKai Lite Regular / 霞鹜文楷轻便版**
 - 鼠标 hover 高亮，不需要先点击
@@ -31,9 +31,9 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 - HTTP/HTTPS 外链确认后交给默认浏览器；取消或启动失败不改变阅读位置
 - 纸色 / 护眼 / 深色主题，字号、边距和行距设置持久化
 
-### EPUB 加载状态与响应性
+### EPUB / MOBI 加载状态与响应性
 
-打开 EPUB 时先创建窗口并提交加载页，再开始读取文档；文件读取、章节解析、字体加载、排版与图片解码由单独的阅读工作线程执行。Wayland 事件处理留在窗口线程，加载期间仍能显示状态、接收窗口调整和取消操作。完成后在同一窗口切换正文，不再等全书目录和初始排版全部结束才出现阅读窗口。
+打开 EPUB / MOBI 时先创建窗口并提交加载页，再开始读取文档；文件读取、章节解析、字体加载、排版与图片解码由单独的阅读工作线程执行。Wayland 事件处理留在窗口线程，加载期间仍能显示状态、接收窗口调整和取消操作。完成后在同一窗口切换正文，不再等全书目录和初始排版全部结束才出现阅读窗口。
 
 加载页显示文件名、当前阶段、阶段耗时和进度条。读取按实际字节数推进，章节排版按正文位置推进，页面绘制按项目数推进；无法准确计数的阶段显示活动条，不用定时器制造百分比。百分比是**当前阶段**的进度，不是整本书加载完成百分比。点击“取消加载”或按 Esc 可协作式取消；取消检查在文件块读取、章节排版和绘制等边界执行，不强杀正在处理的数据。
 
@@ -42,6 +42,29 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 耗时的翻页、目录、搜索与窗口重排也在工作线程中处理；同尺寸更新保留上一帧并显示状态。窗口调整合并到最新尺寸，连续鼠标移动合并，输入队列和最新图像交换槽均有界，避免旧帧和重复排版积压。失败保留错误界面，支持“重试”和“返回 / 关闭”，不再仅在终端报错后消失。终端还会记录页面准备耗时。
 
 当前仍按章节完成排版，不承诺任意大章节立即可读；单次底层解码或阻塞文件 I/O 的取消要等到下一个检查点。`--frames 1` 是首个**加载帧**的窗口协议测试，不代表已完成 EPUB 解码。TXT 的原生打开路径尚未迁移到这套 EPUB 工作线程流程。
+
+### MOBI
+
+新增原生 Rust `readall-mobi`，支持未加密的 **MOBI6/7**。PalmDB 必须有 `BOOKMOBI` 文件签名，扩展名本身不能证明格式兼容；普通 Palm PRC 数据库、独立 KF8/AZW3、KFX 和受 DRM 保护的图书会给出明确错误。双格式 MOBI/KF8 使用其中的 MOBI6/7 兼容部分，并提示未导入 KF8 专有布局。
+
+支持未压缩、PalmDOC LZ77 和 HUFF/CDIC 正文，UTF-8 / Windows-1252 编码。UTF-8 在记录拼接后解码，避免中文字符恰好跨压缩记录时乱码。读取书名、作者、语言、EXTH 封面；`recindex` 图片转换为包内资源引用，`filepos` 链接以原始编码的字节偏移转换，避免中文和 HTML 实体改变跳转位置。识别 guide 指定的正文目录，否则从标题或章节生成目录。保留代码块换行/缩进，并兼容常见未加引号属性、大小写标签、未闭合段落和旧式 font/align 样式。
+
+MOBI HTML 在内存中整理为有界 XHTML/EPUB 适配数据，复用已有的文字排版、图片解码、三种翻页模式、选字复制、链接返回、搜索、书签/高亮/笔记以及加载状态；**不修改原书，不在磁盘写中间 EPUB，不调用 Calibre、Kindle 工具或 WebView**。原文件名与路径仍用于文件浏览和最近阅读。适配数据包含源文件 SHA-256，生成顺序和时间字段固定，相同源文件的重复打开可恢复同一组阅读记录。进度内部复用 `epub-v1/v2/v3`，不是原始 MOBI 字节位置或 Kindle 同步位置；将来改变适配算法时需要显式迁移这套内部定位。
+
+读取 MOBI 时会显示“解压 MOBI 正文 / 整理 MOBI 章节与链接 / 准备 MOBI 图片资源”等阶段。首次显示前仍需完成有界正文解压和适配，像素解码由原图片缓存按需执行；不声称直接随机分页解码 MOBI。默认限制：输入 128 MiB、正文 32 MiB、单图片 16 MiB、内存适配包 192 MiB、1024 个章节。压缩字典、递归、符号工作量、标签数量/深度也有上限，异常文件报错而不是无限递归或分配。脚本、iframe/object/embed 不执行，图片只来自原书记录，不下载远程内容。
+
+MOBI6/7 HTML 是兼容子集，不保证还原所有出版工具生成的旧标签、复杂表格、字典/索引和嵌入字体；独立二进制 INDX/NCX 目录、音视频及 KF8 内容重建尚未接入。部分书会得到基于正文目录/标题的扁平目录，而非原始层级。图片格式的支持范围与原 EPUB 引擎相同，无法解码的图片显示占位。不能把“支持 MOBI”理解成支持所有 Kindle 文件。
+
+```bash
+./target/release/readall /path/to/book.mobi
+./target/release/readall open-mobi /path/to/book.mobi
+./target/release/readall mobi-info /path/to/book.mobi
+./target/release/readall mobi-text /path/to/book.mobi --spine 2
+./target/release/readall render-mobi /path/to/book.mobi new-page.ppm --font /path/to/font.ttf
+./target/release/readall search /path/to/book.mobi '查询内容'
+```
+
+`mobi-info` 仅读取元数据；`mobi-text --spine N` 导出第 N 个适配章节，N 从 1 开始，独立封面可能占首个章节。`open` 也会按识别出的文档扩展名转到共同阅读入口；无 GUI 构建仍可运行元数据、文本、渲染和搜索命令。仅指定文件打开 GUI 时默认使用捆绑的中文字体。
 
 ### EPUB
 
@@ -349,6 +372,7 @@ ReadAll/
 │   ├── readall-epub/       # EPUB container / OPF / XHTML
 │   ├── readall-font/       # TrueType / TTC / glyph outline
 │   ├── readall-image/      # PNG/JPEG/WebP/SVG dispatch / RGBA pixels
+│   ├── readall-mobi/       # PalmDB / PalmDOC / HUFF-CDIC / legacy HTML adapter
 │   ├── readall-render/     # CPU surface / glyph rasterizer
 │   └── readall-platform/   # 文件与原生窗口平台层
 ├── res/
@@ -378,6 +402,7 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 - Linux 原生 GUI 当前只实现 Wayland
 - Windows / Android 窗口后端尚未实现
 - PDF 尚未实现
+- MOBI 支持未加密 MOBI6/7；独立 KF8/AZW3、KFX、DRM、字典专用索引和完整 MOBI 版式尚未实现
 - EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
 - 已有 shaping / bidi / 字素断行 / 有界字体回退，但竖排、完整排版规范和更多语言仍需验收
 - 已有搜索、书签、高亮、笔记、设置和正文链接/脚注跳转；封面墙、弹出脚注、跨页选择尚未实现
@@ -397,12 +422,14 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 ReadAll 项目源码目前**尚未声明统一的开源许可证**。在明确项目代码许可证之前，请不要假定项目源码可以按 MIT/Apache/GPL 等许可证再分发。
 
-JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。`readall licenses` 当前显示内置字体许可，不是所有 Cargo 依赖的完整许可清单。
+JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。MOBI 实现参考 foliate-js 的 PalmDOC / HUFF-CDIC 算法，保留其 MIT 许可；HTML 实体处理使用固定版本 `html-escape = 0.2.13`（及间接依赖 `utf8-width`），不引入整个第三方电子书引擎。`readall licenses` 显示内置字体与 foliate-js 参考许可，不是所有 Cargo 依赖的完整许可清单。
 
 已捆绑的第三方资源分别遵循其自己的许可证：
 
 - **LXGW WenKai Lite Regular**：SIL Open Font License 1.1  
   许可证：`licenses/LXGW_WenKai_Lite_OFL.txt`
+- **foliate-js MOBI 解压算法参考**：MIT  
+  许可证：`licenses/foliate-js-MIT.txt`
 - **Feather Icons v4.29.2**：MIT  
   许可证：`res/icons/reader/LICENSE`
 
@@ -412,7 +439,7 @@ JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，�
 ./target/release/readall licenses
 ```
 
-可查看内置字体许可证。
+可查看内置字体与 MOBI 算法参考许可证。
 
 ---
 
