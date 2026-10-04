@@ -10,7 +10,7 @@
 
 **第一阶段不代表桌面功能已全部移植。** Android 长按选字、选区手柄、链接/图片点击、搜索/标注列表、仿书动画、连续惯性滚动及系统剪贴板尚未接入。横向手势当前只触发整页切换，没有动画；点击正文不会翻页。最低 API 26，默认编译/目标 API 36，仅提供 ARM64 或 x86_64 单 ABI 调试包。
 
-源码与宿主机测试不等同于 Android APK 或真机验收。只有真实 SDK/NDK 交叉编译、APK 校验、安装、启动及设备交互测试完成后，才能声称对应 Android 功能可用。
+已使用 API 36、Build Tools 36.0.0、NDK 29.0.14206865 和系统 Rust 1.97.1 完成 ARM64 原生库交叉编译、Java/D8 编译、APK 签名与对齐校验。产物为 `target/android/readall-android-debug-arm64-v8a.apk`，调试预览版；尚未完成手机安装、启动与交互验收。宿主机 JVM/JNI 测试与 APK 构建成功都不能替代真机验收。
 
 ## 文件与状态
 
@@ -20,7 +20,7 @@
 
 ## 工具路径与构建
 
-所有脚本调用都使用绝对工具路径，不写 `.zshrc`，不设置 `ANDROID_HOME`、`JAVA_HOME`、`PATH` 或 NDK 环境变量。Gentoo Java 包装器可能依赖未挂载配置，因此直接使用 `/usr/lib/jvm/openjdk-17/bin/java` 与 `javac`。SDK 与 Rust 安装也不会被脚本自动修改。
+所有脚本调用都使用绝对工具路径，不写 `.zshrc`，不设置 `ANDROID_HOME`、`JAVA_HOME`、`PATH` 或 NDK 环境变量。Gentoo Java 包装器可能依赖未挂载配置，因此直接使用 `/usr/lib/jvm/openjdk-17/bin/java` 与 `javac`。SDK 与系统 Rust 安装也不会被脚本修改。只有显式 `prepare-rust` 会下载匹配的 Android 标准库到项目 `target`，普通 build/doctor 不自动下载安装工具链。
 
 先在项目根目录运行诊断：
 
@@ -30,9 +30,19 @@
 
 必需组件是 SDK `platforms/android-36/android.jar`、Build Tools（`aapt2`、D8、`zipalign`、`apksigner`）、JDK 17、Android NDK，以及与所用 Rust 编译器匹配的 `aarch64-linux-android` 标准库。只安装 SDK 命令行管理器不代表这些组件全部存在。NDK 可以位于 SDK 的 `ndk/<版本>`，或用 `--ndk` 指定；脚本不会自动接受许可证或下载组件。
 
+Gentoo 系统 Rust 没有 Android 标准库时，不必安装 rustup 或替换系统 Rust。先执行一次：
+
+```bash
+/usr/bin/python3 apps/android/tools/build.py prepare-rust --abi arm64-v8a
+```
+
+该命令读取指定编译器的完整版本身份，从 Rust 官方 HTTPS 分发清单选择**版本、提交和日期完全匹配**的 Android 标准库，校验清单和压缩包 SHA-256，只提取正常的目标库文件到 `target/android/toolchains/rust-<版本>-<目标>/`。不执行下载包中的安装脚本，不接受路径穿越、链接或超预算文件，不向 `/opt/rust-*` 写入。网络下载只在这个显式命令中发生；已有匹配缓存可复用。
+
 ```bash
 /usr/bin/python3 apps/android/tools/build.py build --sdk /opt/android-sdk
 ```
+
+构建自动发现已准备的匹配目录，仅为 Android 目标传入 `--sysroot`；宿主编译脚本/过程宏仍使用系统标准库。也可用 `--rust-sysroot /absolute/sysroot` 指定外部目录。编译器升级后需要重新准备匹配目标，不混用不同版本标准库。
 
 工具不在默认位置时，使用独立参数，不需要环境变量。下列 `/absolute/...` 是需替换为实际安装位置的占位路径：
 
@@ -42,7 +52,7 @@
 
 SDK 平台可用 `--api`、Build Tools 可用 `--build-tools` 指定。`--abi x86_64` 用于 x86_64 模拟器。Rust Android 标准库缺失时会明确报错，不替换系统 `/usr/bin/rustc`。字体优先使用 `--font`，否则复用桌面构建的捆绑字体缓存；不会单独下载或向用户分发字体文件。
 
-构建流程：Rust `cdylib` → AAPT2 → javac → D8 → APK ZIP → zipalign → debug 签名 → 签名与对齐检查。所有输出都在根目录 `target/android/`。ARM64 APK 目标路径：
+构建流程：Rust `cdylib` → AAPT2 → javac → D8 → APK ZIP → zipalign → debug 签名 → 签名与对齐检查。Java 8 编译时将 SDK `core-lambda-stubs.jar` 放在 `android.jar` 前面，避免 `LambdaMetafactory.metafactory` 缺失；D8 负责后续语言特性转换。所有输出都在根目录 `target/android/`。ARM64 APK 目标路径：
 
 ```text
 target/android/readall-android-debug-arm64-v8a.apk
@@ -81,6 +91,7 @@ target/android/readall-android-debug-arm64-v8a.apk
 
 ```bash
 /usr/bin/python3 -B apps/android/tools/test_build.py
+/usr/bin/python3 -B apps/android/tools/test_rust_target.py
 /usr/bin/python3 apps/android/tools/build.py host-test
 ```
 
@@ -90,7 +101,7 @@ target/android/readall-android-debug-arm64-v8a.apk
 
 ## 后续真机验收
 
-完成 SDK/NDK 与 Rust Android 目标可见性后，先编译并校验 APK；再用授权设备测试中文首屏、GIF/SVG、跨章、目录、旋转、后台恢复、读取取消和错误界面。随后独立推进触摸选字/复制、链接/图片查看及三种翻页模式，不把宿主机测试结果当成手机帧率或视觉验收。
+ARM64 APK 已通过真实 SDK/NDK 构建，签名 v2/v3、ELF 三个 LOAD 段 16 KiB 对齐、APK ZIP 对齐、JNI 导出和基础包结构已检查。下一步用授权设备测试安装、中文首屏、GIF/SVG、跨章、目录、旋转、后台恢复、读取取消和错误界面。随后独立推进触摸选字/复制、链接/图片查看及三种翻页模式，不把宿主机测试结果当成手机帧率或视觉验收。
 
 ## 官方参考
 

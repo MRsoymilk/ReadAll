@@ -2,7 +2,7 @@
 
 ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
-> **v0.1.0 是首个开发预览版。当前已验证的界面为 Linux Wayland；Android 已加入独立开发入口，APK 与真机验收仍待完成。Windows 和 PDF 仍在后续路线中。**
+> **v0.1.0 是首个开发预览版。当前已验证的界面为 Linux Wayland；Android ARM64 调试 APK 已构建并通过签名/对齐校验，真机验收仍待完成。Windows 和 PDF 仍在后续路线中。**
 
 ## Android 开发入口
 
@@ -15,7 +15,7 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 /usr/bin/python3 apps/android/tools/build.py build --sdk /opt/android-sdk
 ```
 
-宿主机 `host-test` 使用真实 JVM/JNI，可验证共享引擎和数据传递，但不代替 SDK 交叉编译、APK 安装或手机测试。
+ARM64 产物为 `target/android/readall-android-debug-arm64-v8a.apk`。系统 Rust 缺少 Android 标准库时，可显式运行 `prepare-rust` 将完全匹配的官方目标库下载到项目缓存，不安装 rustup、不替换系统 Rust；构建通过目标专用 `--sysroot` 使用它。Java Lambda 编译已接入 SDK 的 `core-lambda-stubs.jar`。宿主机 `host-test` 和 APK 构建校验不代替手机安装与交互测试。
 
 ## v0.1.0 已实现
 
@@ -444,7 +444,7 @@ cargo check -p readall --no-default-features --offline
 v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 - Linux 原生 GUI 当前只实现 Wayland
-- Windows 窗口后端尚未实现；Android 是单独开发入口，APK 与真机验收尚未完成
+- Windows 窗口后端尚未实现；Android 是单独开发入口，ARM64 调试 APK 已构建验证，真机验收尚未完成
 - PDF 尚未实现
 - MOBI 支持未加密 MOBI6/7，AZW3 支持独立可重排 KF8；固定版式 KF8、KFX、DRM、字典专用索引和完整 Kindle 版式尚未实现
 - EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/GIF/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
