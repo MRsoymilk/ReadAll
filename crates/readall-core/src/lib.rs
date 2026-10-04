@@ -33,11 +33,14 @@ impl Default for Limits {
 pub enum FormatHint {
     Pdf,
     ZipArchive,
+    Mobi,
     TextCandidate,
 }
 
 pub fn format_hint(bytes: &[u8]) -> FormatHint {
-    if bytes.starts_with(b"%PDF-") {
+    if bytes.get(60..68) == Some(b"BOOKMOBI") {
+        FormatHint::Mobi
+    } else if bytes.starts_with(b"%PDF-") {
         FormatHint::Pdf
     } else if [b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"]
         .iter()
@@ -78,6 +81,9 @@ impl fmt::Display for Error {
             }
             Self::UnsupportedFormat(FormatHint::ZipArchive) => f.write_str(
                 "ZIP archive detected (possibly EPUB); the EPUB engine is not implemented yet",
+            ),
+            Self::UnsupportedFormat(FormatHint::Mobi) => f.write_str(
+                "MOBI signature detected; use open-mobi, mobi-text or render-mobi instead of the TXT reader",
             ),
             Self::UnsupportedFormat(FormatHint::TextCandidate) => {
                 f.write_str("unsupported document format")
