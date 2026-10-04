@@ -4,6 +4,8 @@ mod external;
 mod link_tests;
 mod links;
 #[cfg(test)]
+mod selection_tests;
+#[cfg(test)]
 mod tests;
 use super::*;
 use crate::reader_data::{Annotation, Kind, Settings, Store};
@@ -118,6 +120,23 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
     }
     fn tool_rows(&self) -> usize {
         (self.tool_panel().height.saturating_sub(136) / 42).max(1) as usize
+    }
+    fn tool_row_at(&self, x: i32, y: i32) -> Option<usize> {
+        let panel = self.tool_panel();
+        let start = panel.y + 88;
+        if y < start || y >= panel.y + panel.height as i32 - 46 {
+            return None;
+        }
+        let row = ((y - start) / 42) as usize;
+        let index = self.tools.scroll.saturating_add(row);
+        let rect = Rect::new(
+            panel.x + 8,
+            start + row as i32 * 42,
+            panel.width.saturating_sub(16),
+            38,
+        );
+        (row < self.tool_rows() && index < self.tool_count() && point_in(rect, x, y))
+            .then_some(index)
     }
     fn tool_keep_visible(&mut self) {
         let visible = self.tool_rows();
@@ -392,21 +411,16 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 }
                 return Ok(Some(true));
             }
-            let start = panel.y + 88;
-            if y >= start && y < panel.y + panel.height as i32 - 46 {
-                let row = ((y - start) / 42) as usize;
-                let index = self.tools.scroll + row;
-                if row < self.tool_rows() && index < self.tool_count() {
-                    self.tools.selected = index;
-                    if self.tools.mode == Mode::Settings {
-                        self.change_setting(if x < panel.x + panel.width as i32 - 64 {
-                            -1
-                        } else {
-                            1
-                        })?;
+            if let Some(index) = self.tool_row_at(x, y) {
+                self.tools.selected = index;
+                if self.tools.mode == Mode::Settings {
+                    self.change_setting(if x < panel.x + panel.width as i32 - 64 {
+                        -1
                     } else {
-                        self.tool_activate()?;
-                    }
+                        1
+                    })?;
+                } else {
+                    self.tool_activate()?;
                 }
             }
             return Ok(Some(true));
@@ -593,6 +607,16 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             }
             Action::PointerMove { x, y } if self.tools.mode != Mode::None => {
                 self.pointer = Some((x, y));
+                if let Some(index) = self.tool_row_at(x, y)
+                    && self.tools.selected != index
+                {
+                    self.tools.selected = index;
+                    return Ok(Some(true));
+                }
+                Ok(Some(false))
+            }
+            Action::PointerLeave if self.tools.mode != Mode::None => {
+                self.pointer = None;
                 Ok(Some(false))
             }
             _ => Ok(None),

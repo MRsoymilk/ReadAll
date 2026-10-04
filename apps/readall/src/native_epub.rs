@@ -13,6 +13,8 @@ mod enabled {
     mod async_reader;
     #[cfg(test)]
     mod loading_tests;
+    #[cfg(test)]
+    mod selection_tests;
     mod tools;
     use super::*;
     use crate::{
@@ -219,7 +221,17 @@ mod enabled {
             let before = self.hover_target();
             self.pointer = pointer;
             let after = self.hover_target();
-            if before == after {
+            // One active row, controlled by the most recent navigation or pointer
+            // event. Hovering never changes the actual reading position.
+            let selection_changed = if let ReaderHover::TocRow(index) = after
+                && self.toc_selected != index
+            {
+                self.toc_selected = index;
+                true
+            } else {
+                false
+            };
+            if before == after && !selection_changed {
                 return Ok(false);
             }
             self.refresh_surface()?;
@@ -475,8 +487,6 @@ mod enabled {
                     color: Color::rgba(221, 226, 233, 255),
                 },
             ])?;
-            let hover = self.hover_target();
-            let current_toc = self.current_toc_index();
             let visible = self.visible_toc_rows();
             for (row, _entry) in self
                 .toc
@@ -487,19 +497,10 @@ mod enabled {
             {
                 let index = self.toc_scroll + row;
                 let y = panel.y + 48 + row as i32 * 38;
-                let selected = index == self.toc_selected;
-                let current = Some(index) == current_toc;
-                let hovered = hover == ReaderHover::TocRow(index);
-                if selected || current || hovered {
+                if index == self.toc_selected {
                     self.surface.draw(&[DrawCommand::FillRect {
                         rect: Rect::new(panel.x + 8, y, panel.width.saturating_sub(16), 34),
-                        color: if hovered {
-                            Color::rgba(220, 232, 249, 245)
-                        } else if current {
-                            Color::rgba(231, 238, 251, 245)
-                        } else {
-                            Color::rgba(238, 241, 246, 245)
-                        },
+                        color: Color::rgba(220, 232, 249, 245),
                     }])?;
                 }
             }
@@ -706,7 +707,16 @@ mod enabled {
                         {
                             let row = ((y - row_area_y) / 38) as usize;
                             let index = self.toc_scroll.saturating_add(row);
-                            if row < self.visible_toc_rows() && index < self.toc.len() {
+                            let rect = Rect::new(
+                                panel.x + 8,
+                                row_area_y + row as i32 * 38,
+                                panel.width.saturating_sub(16),
+                                34,
+                            );
+                            if row < self.visible_toc_rows()
+                                && index < self.toc.len()
+                                && point_in(rect, x, y)
+                            {
                                 return ReaderHover::TocRow(index);
                             }
                         }

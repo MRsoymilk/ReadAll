@@ -295,9 +295,11 @@ mod enabled {
         }
 
         fn hover_target(&self) -> HoverTarget {
-            let Some((x, y)) = self.pointer else {
-                return HoverTarget::None;
-            };
+            self.pointer
+                .map_or(HoverTarget::None, |(x, y)| self.hover_target_at(x, y))
+        }
+
+        fn hover_target_at(&self, x: i32, y: i32) -> HoverTarget {
             match &self.mode {
                 Mode::Library => {
                     let card = self.open_card_rect();
@@ -321,7 +323,7 @@ mod enabled {
                         return HoverTarget::None;
                     }
                     let row = ((y - LIST_TOP) / ROW_HEIGHT) as usize;
-                    if row >= self.visible_rows() {
+                    if row >= self.visible_rows() || (y - LIST_TOP) % ROW_HEIGHT >= ROW_HEIGHT - 5 {
                         return HoverTarget::None;
                     }
                     let index = browser.scroll.saturating_add(row);
@@ -338,7 +340,19 @@ mod enabled {
             let before = self.hover_target();
             self.pointer = pointer;
             let after = self.hover_target();
-            if before == after {
+            // Pointer and keyboard/wheel navigation share one active row. Do this
+            // even within the same hover target: navigation may have moved it.
+            let selection_changed = if let (HoverTarget::BrowserRow(index), Mode::Browser(browser)) =
+                (after, &mut self.mode)
+                && browser.selected != index
+            {
+                browser.selected = index;
+                browser.refresh_preview();
+                true
+            } else {
+                false
+            };
+            if before == after && !selection_changed {
                 return Ok(false);
             }
             self.paint()?;
@@ -541,13 +555,7 @@ mod enabled {
                 let index = browser.scroll + row;
                 let y = LIST_TOP + row as i32 * ROW_HEIGHT;
                 let selected = index == browser.selected;
-                let hovered = hover == HoverTarget::BrowserRow(index);
-                let row_color = match (selected, hovered) {
-                    (true, true) => HOVER_STRONG,
-                    (false, true) => HOVER_SOFT,
-                    (true, false) => ACCENT_SOFT,
-                    (false, false) => PANEL,
-                };
+                let row_color = if selected { ACCENT_SOFT } else { PANEL };
                 self.surface.draw(&[
                     DrawCommand::FillRect {
                         rect: Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
@@ -557,16 +565,10 @@ mod enabled {
                         rect: Rect::new(
                             250,
                             y,
-                            if selected {
-                                5
-                            } else if hovered {
-                                3
-                            } else {
-                                1
-                            },
+                            if selected { 5 } else { 1 },
                             (ROW_HEIGHT - 5) as u32,
                         ),
-                        color: if selected || hovered { ACCENT } else { BORDER },
+                        color: if selected { ACCENT } else { BORDER },
                     },
                 ])?;
             }
@@ -651,28 +653,22 @@ mod enabled {
                 Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
                 Action::PointerLeave => self.pointer_changed(None),
                 Action::Click { x, y } => {
-                    if (250..=326).contains(&x) && (102..=142).contains(&y) {
-                        return self.back();
-                    }
-                    if y >= LIST_TOP {
-                        let row = ((y - LIST_TOP) / ROW_HEIGHT) as usize;
-                        let target = match &self.mode {
-                            Mode::Browser(browser) => browser.scroll + row,
-                            Mode::Library => return Ok(false),
-                        };
-                        if let Mode::Browser(browser) = &mut self.mode {
-                            if target < browser.entries.len() {
-                                browser.selected = target;
+                    self.pointer = Some((x, y));
+                    match self.hover_target() {
+                        HoverTarget::BrowserBack => self.back(),
+                        HoverTarget::BrowserRow(target) => {
+                            if let Mode::Browser(browser) = &mut self.mode {
+                                if browser.selected != target {
+                                    browser.selected = target;
+                                    browser.refresh_preview();
+                                }
                                 browser.keep_visible(visible);
-                                browser.refresh_preview();
-                            } else {
-                                return Ok(false);
                             }
+                            self.paint()?;
+                            self.activate_browser()
                         }
-                        self.paint()?;
-                        return self.activate_browser();
+                        _ => Ok(false),
                     }
-                    Ok(false)
                 }
                 Action::Close
                 | Action::Text(_)
@@ -912,32 +908,131 @@ mod enabled {
             assert_eq!(home.surface.pixels(), initial);
         }
 
+        fn assert_browser_highlight(home: &Home<'_>, selected: usize) {
+            let Mode::Browser(browser) = &home.mode else {
+                panic!("not a browser")
+            };
+            assert_eq!(browser.selected, selected);
+            let visible = home
+                .visible_rows()
+                .min(browser.entries.len().saturating_sub(browser.scroll));
+            let mut active = 0;
+            for row in 0..visible {
+                let y = (LIST_TOP + row as i32 * ROW_HEIGHT + 2) as u32;
+                let pixel = home.surface.pixel(home.surface.width() - 44, y).unwrap();
+                let current = browser.scroll + row == selected;
+                assert_eq!(
+                    pixel,
+                    if current { ACCENT_SOFT } else { PANEL },
+                    "row {}",
+                    browser.scroll + row
+                );
+                assert_eq!(
+                    home.surface.pixel(252, y),
+                    Some(if current { ACCENT } else { PANEL })
+                );
+                active += usize::from(pixel == ACCENT_SOFT);
+            }
+            assert_eq!(active, usize::from(!browser.entries.is_empty()));
+        }
+
         #[test]
-        fn browser_hover_does_not_replace_keyboard_selection() {
+        fn browser_hover_and_navigation_share_one_highlight_and_activation_target() {
             let temp = Temp::new();
             fs::create_dir(temp.0.join("Folder")).unwrap();
-            fs::write(temp.0.join("book.epub"), b"x").unwrap();
+            let book = temp.0.join("book.epub");
+            fs::write(&book, test_epub::make_epub()).unwrap();
+            fs::write(temp.0.join("z.epub"), b"x").unwrap();
             let ui_font = font();
             let mut home = Home::new(1040, 700, &ui_font).unwrap();
             home.mode = Mode::Browser(Browser::load(temp.0.clone()).unwrap());
             home.paint().unwrap();
-            let selected = match &home.mode {
-                Mode::Browser(browser) => browser.selected,
-                Mode::Library => unreachable!(),
+            assert_browser_highlight(&home, 0);
+            let motion = Action::PointerMove {
+                x: 400,
+                y: LIST_TOP + ROW_HEIGHT + 10,
             };
-            assert!(
-                home.action(Action::PointerMove {
-                    x: 400,
-                    y: LIST_TOP + ROW_HEIGHT + 10,
-                })
-                .unwrap()
-            );
-            assert_eq!(home.hover_target(), HoverTarget::BrowserRow(1));
-            let still_selected = match &home.mode {
-                Mode::Browser(browser) => browser.selected,
-                Mode::Library => unreachable!(),
+            assert!(home.action(motion).unwrap());
+            assert_browser_highlight(&home, 1);
+            let Mode::Browser(browser) = &home.mode else {
+                unreachable!()
             };
-            assert_eq!(still_selected, selected);
+            assert!(browser.preview.as_ref().unwrap().contains("ReadAll"));
+            assert!(!home.action(motion).unwrap());
+            home.action(Action::Next).unwrap();
+            assert_browser_highlight(&home, 2);
+            // Same hovered row, but a different active row after wheel/keys.
+            assert!(home.action(motion).unwrap());
+            assert_browser_highlight(&home, 1);
+            home.action(Action::PointerLeave).unwrap();
+            assert_browser_highlight(&home, 1);
+            assert!(!home.action(Action::Activate).unwrap());
+            assert_eq!(home.selected_book.as_deref(), Some(book.as_path()));
+        }
+
+        #[test]
+        fn browser_scrolling_bounds_and_empty_or_outside_rows_do_not_add_highlights() {
+            let temp = Temp::new();
+            for index in 0..24 {
+                fs::create_dir(temp.0.join(format!("folder{index:02}"))).unwrap();
+            }
+            let ui_font = font();
+            let mut home = Home::new(1040, 700, &ui_font).unwrap();
+            home.mode = Mode::Browser(Browser::load(temp.0.clone()).unwrap());
+            home.paint().unwrap();
+            home.action(Action::PointerMove {
+                x: 400,
+                y: LIST_TOP + 10,
+            })
+            .unwrap();
+            for selected in 1..24 {
+                home.action(Action::Next).unwrap();
+                assert_browser_highlight(&home, selected);
+            }
+            home.action(Action::Next).unwrap();
+            assert_browser_highlight(&home, 23);
+            for selected in (0..23).rev() {
+                home.action(Action::Previous).unwrap();
+                assert_browser_highlight(&home, selected);
+            }
+            home.action(Action::Previous).unwrap();
+            assert_browser_highlight(&home, 0);
+            for (x, y) in [
+                (220, LIST_TOP + ROW_HEIGHT + 10),
+                (1035, LIST_TOP + 10),
+                (400, LIST_TOP + ROW_HEIGHT - 1),
+                (400, 680),
+            ] {
+                home.action(Action::PointerMove { x, y }).unwrap();
+                assert_browser_highlight(&home, 0);
+                assert!(!home.action(Action::Click { x, y }).unwrap());
+                assert!(!home.close_requested());
+            }
+            home.action(Action::Last).unwrap();
+            assert_browser_highlight(&home, 23);
+            let Mode::Browser(browser) = &home.mode else {
+                unreachable!()
+            };
+            let target = browser.scroll + 1;
+            home.action(Action::PointerMove {
+                x: 400,
+                y: LIST_TOP + ROW_HEIGHT + 10,
+            })
+            .unwrap();
+            assert_browser_highlight(&home, target);
+            home.action(Action::First).unwrap();
+            assert_browser_highlight(&home, 0);
+            let empty = temp.0.join("empty");
+            fs::create_dir(&empty).unwrap();
+            home.mode = Mode::Browser(Browser::load(empty).unwrap());
+            home.paint().unwrap();
+            home.action(Action::PointerMove {
+                x: 400,
+                y: LIST_TOP + 10,
+            })
+            .unwrap();
+            home.action(Action::Next).unwrap();
+            assert_browser_highlight(&home, 0);
         }
 
         #[test]
