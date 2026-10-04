@@ -1,7 +1,9 @@
 MOBI format and decompression reference: foliate-js/mobi.js
 https://github.com/johnfactotum/foliate-js
 ReadAll's bounded Rust implementation is adapted from/cross-checked against the
-PalmDOC and HUFF/CDIC algorithms in that project. It does not run foliate-js.
+PalmDOC and HUFF/CDIC algorithms, INDX/TAGX/CNCX tables, KF8 skeleton/fragment
+reconstruction, Kindle resource/position URIs and FONT records in that project.
+It does not run foliate-js. The original MIT notice is retained below.
 
 MIT License
 

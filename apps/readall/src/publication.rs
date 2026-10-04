@@ -7,12 +7,14 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub(crate) enum Format {
     Epub,
     Mobi,
+    Azw3,
 }
 impl Format {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Epub => "EPUB",
             Self::Mobi => "MOBI",
+            Self::Azw3 => "AZW3/KF8",
         }
     }
 }
@@ -20,6 +22,8 @@ pub(crate) fn path_format(path: &Path) -> Option<Format> {
     let ext = path.extension()?.to_str()?;
     if ext.eq_ignore_ascii_case("epub") {
         Some(Format::Epub)
+    } else if ext.eq_ignore_ascii_case("azw3") {
+        Some(Format::Azw3)
     } else if ["mobi", "azw", "prc"]
         .iter()
         .any(|kind| ext.eq_ignore_ascii_case(kind))
@@ -37,11 +41,20 @@ pub(crate) fn prepare(bytes: Vec<u8>, path: &Path) -> Result<Prepared> {
     if readall_mobi::is_mobi(&bytes) {
         crate::loading::stage("校验 MOBI 文件结构")?;
         let book = MobiBook::parse(&bytes, MobiLimits::default())?;
+        let format = if book.metadata().version == 8 {
+            Format::Azw3
+        } else {
+            Format::Mobi
+        };
         let converted = book.to_epub_with_progress(|p| {
-            let phase = match p.stage {
-                Stage::Decompress => "解压 MOBI 正文",
-                Stage::Markup => "整理 MOBI 章节与链接",
-                Stage::Package => "准备 MOBI 图片资源",
+            let phase = match (format, p.stage) {
+                (Format::Azw3, Stage::Decompress) => "解压 AZW3 正文",
+                (_, Stage::Index) => "解析 KF8 章节与目录索引",
+                (Format::Azw3, Stage::Markup) => "重建 AZW3 章节与链接",
+                (Format::Azw3, Stage::Package) => "准备 AZW3 样式、图片与字体",
+                (_, Stage::Decompress) => "解压 MOBI 正文",
+                (_, Stage::Markup) => "整理 MOBI 章节与链接",
+                (_, Stage::Package) => "准备 MOBI 图片资源",
             };
             crate::loading::step(phase, p.done, p.total).is_ok()
         })?;
@@ -50,11 +63,11 @@ pub(crate) fn prepare(bytes: Vec<u8>, path: &Path) -> Result<Prepared> {
         }
         return Ok(Prepared {
             bytes: converted.epub,
-            format: Format::Mobi,
+            format,
         });
     }
     // Do not parse a random Palm database or disguised binary as ordinary text.
-    if path_format(path) == Some(Format::Mobi) {
+    if matches!(path_format(path), Some(Format::Mobi | Format::Azw3)) {
         return Err("invalid MOBI: expected PalmDB BOOKMOBI signature (not every PRC/AZW file is a MOBI book)".into());
     }
     Ok(Prepared {
@@ -86,7 +99,9 @@ mod tests {
         for name in ["book.mobi", "book.MOBI", "book.azw", "book.PRC"] {
             assert_eq!(path_format(Path::new(name)), Some(Format::Mobi));
         }
-        assert_eq!(path_format(Path::new("book.azw3")), None);
+        assert_eq!(path_format(Path::new("book.azw3")), Some(Format::Azw3));
+        assert_eq!(path_format(Path::new("book.AZW3")), Some(Format::Azw3));
+        assert!(prepare(b"not KF8".to_vec(), Path::new("fake.azw3")).is_err());
         assert_eq!(path_format(Path::new("book.txt")), None);
         let source = crate::test_mobi::make_mobi("<html><body>AAAA</body></html>");
         let prepared = prepare(source, Path::new("wrong.epub")).unwrap();

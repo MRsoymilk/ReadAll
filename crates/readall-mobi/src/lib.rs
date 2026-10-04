@@ -1,9 +1,13 @@
-//! Bounded, read-only MOBI6/7 ingestion. The legacy part of dual MOBI/KF8 books
-//! is used deliberately; standalone KF8 and encrypted books are rejected.
+//! Bounded, read-only MOBI6/7 and standalone AZW3/KF8 ingestion.
+//! Existing dual-format MOBI uses its legacy part to preserve stored locations.
 //! Produces a deterministic in-memory EPUB adapter, never changes the source.
 mod compression;
 mod html;
+mod kf8;
 mod package;
+#[cfg(test)]
+#[path = "../../../apps/readall/tests/support/mobi.rs"]
+mod test_mobi;
 #[cfg(test)]
 mod tests;
 use std::{borrow::Cow, error::Error, fmt, ops::Range};
@@ -55,6 +59,7 @@ pub type Result<T> = std::result::Result<T, MobiError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Decompress,
+    Index,
     Markup,
     Package,
 }
@@ -104,6 +109,7 @@ pub struct MobiBook<'a> {
     cover: Option<usize>,
     huff: Option<(usize, usize)>,
     trailing: u16,
+    kf8: Option<kf8::Header>,
 }
 pub fn is_mobi(data: &[u8]) -> bool {
     data.get(60..68) == Some(b"BOOKMOBI")
@@ -184,11 +190,14 @@ impl<'a> MobiBook<'a> {
             }
         }
         let version = field(36)?;
-        if version >= 8 {
-            return Err(MobiError::Unsupported(
-                "standalone KF8/AZW3; only MOBI6/7 and the legacy part of dual-format books are supported",
-            ));
+        if version > 8 {
+            return Err(MobiError::Unsupported("MOBI version newer than KF8"));
         }
+        let kf8 = if version == 8 {
+            Some(kf8::Header::parse(header, header_length, count)?)
+        } else {
+            None
+        };
         let compression = u16be(header, 0)?;
         if !matches!(compression, 1 | 2 | 17480) {
             return Err(MobiError::Unsupported("text compression method"));
@@ -263,6 +272,11 @@ impl<'a> MobiBook<'a> {
                         }
                     }
                     524 => language = Some(metadata_text(value, encoding)?),
+                    122 if version == 8 && value.eq_ignore_ascii_case(b"true") => {
+                        return Err(MobiError::Unsupported(
+                            "fixed-layout KF8; reflowable AZW3 is supported",
+                        ));
+                    }
                     201 if value.len() == 4 => {
                         let n = u32be(value, 0)?;
                         if n != u32::MAX {
@@ -323,6 +337,7 @@ impl<'a> MobiBook<'a> {
             cover,
             huff,
             trailing,
+            kf8,
         })
     }
     pub fn metadata(&self) -> &Metadata {
@@ -357,6 +372,9 @@ impl<'a> MobiBook<'a> {
         mut observer: impl FnMut(Progress) -> bool,
     ) -> Result<ConvertedBook> {
         let text = self.text(&mut observer)?;
+        if let Some(header) = &self.kf8 {
+            return kf8::convert(self, header, &text, &mut observer);
+        }
         let mut content =
             html::normalize(&text, self.metadata.encoding, self.limits, &mut observer)?;
         if self.metadata.dual_format {
@@ -411,7 +429,10 @@ impl<'a> MobiBook<'a> {
         result.truncate(self.metadata.text_bytes);
         // Validate the complete stream after joining records: UTF-8 characters may
         // straddle record boundaries and must not be decoded independently.
-        if self.metadata.encoding == 65001 && std::str::from_utf8(&result).is_err() {
+        if self.kf8.is_none()
+            && self.metadata.encoding == 65001
+            && std::str::from_utf8(&result).is_err()
+        {
             return Err(MobiError::Invalid("text is not valid UTF-8"));
         }
         Ok(result)

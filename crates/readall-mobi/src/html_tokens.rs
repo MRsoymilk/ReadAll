@@ -3,7 +3,7 @@
 use crate::{MobiError, Result, decode_text};
 use std::{collections::BTreeMap, ops::Range};
 #[derive(Debug)]
-pub(super) struct Tag {
+pub(crate) struct Tag {
     pub name: String,
     pub closing: bool,
     pub empty: bool,
@@ -15,20 +15,20 @@ impl Tag {
     }
 }
 #[derive(Debug)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Text,
     Tag(Tag),
     Skip,
 }
 #[derive(Debug)]
-pub(super) struct Token {
+pub(crate) struct Token {
     pub range: Range<usize>,
     pub kind: Kind,
 }
 fn name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"-_:".contains(&b)
 }
-pub(super) fn tokens(data: &[u8], encoding: u32, limit: usize) -> Result<Vec<Token>> {
+pub(crate) fn tokens(data: &[u8], encoding: u32, limit: usize) -> Result<Vec<Token>> {
     let mut out = Vec::new();
     let mut at = 0;
     let mut raw: Option<String> = None;

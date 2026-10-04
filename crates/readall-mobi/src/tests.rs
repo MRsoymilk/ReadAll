@@ -1,6 +1,5 @@
 use super::*;
-#[path = "../../../apps/readall/tests/support/mobi.rs"]
-mod fixture;
+use crate::test_mobi as fixture;
 use readall_epub::{EpubBook, EpubLimits};
 fn header_offset(bytes: &[u8]) -> usize {
     u32be(bytes, 78).unwrap() as usize
@@ -180,7 +179,7 @@ fn bad_headers_drm_kf8_unknown_compression_and_budgets_are_explicit() {
     set32(&mut kf8, at + 36, 8);
     assert!(matches!(
         MobiBook::parse(&kf8, MobiLimits::default()),
-        Err(MobiError::Unsupported(_))
+        Err(MobiError::Invalid("KF8 header is too short"))
     ));
     let mut bad = bytes.clone();
     set32(&mut bad, 86, 1);

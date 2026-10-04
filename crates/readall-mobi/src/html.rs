@@ -2,7 +2,7 @@
 //! filesystem reads or code execution. Byte filepos and record indices are rewritten
 //! before UTF-8/entity conversion; original source bytes remain untouched.
 #[path = "html_tokens.rs"]
-mod tokenizer;
+pub(crate) mod tokenizer;
 use crate::{MobiError, MobiLimits, Progress, Result, Stage, decode_text, progress};
 use std::collections::{BTreeMap, BTreeSet};
 use tokenizer::{Kind, Tag};

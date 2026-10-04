@@ -147,7 +147,7 @@ pub(crate) fn build(
     )?;
     zip.finish()
 }
-fn image_type(data: &[u8]) -> Option<&'static str> {
+pub(crate) fn image_type(data: &[u8]) -> Option<&'static str> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if data.starts_with(b"\xff\xd8\xff") {
@@ -160,14 +160,14 @@ fn image_type(data: &[u8]) -> Option<&'static str> {
         None
     }
 }
-struct Zip {
+pub(crate) struct Zip {
     bytes: Vec<u8>,
     central: Vec<u8>,
     count: u16,
     limit: usize,
 }
 impl Zip {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             bytes: Vec::new(),
             central: Vec::new(),
@@ -175,7 +175,7 @@ impl Zip {
             limit,
         }
     }
-    fn add(&mut self, name: &str, data: &[u8]) -> Result<()> {
+    pub(crate) fn add(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let name = name.as_bytes();
         let name_size = u16::try_from(name.len()).map_err(|_| MobiError::Limit("ZIP name"))?;
         let size = u32::try_from(data.len()).map_err(|_| MobiError::Limit("ZIP entry bytes"))?;
@@ -220,7 +220,7 @@ impl Zip {
         self.central.extend_from_slice(name);
         Ok(())
     }
-    fn finish(mut self) -> Result<Vec<u8>> {
+    pub(crate) fn finish(mut self) -> Result<Vec<u8>> {
         let offset =
             u32::try_from(self.bytes.len()).map_err(|_| MobiError::Limit("ZIP central offset"))?;
         let size =
