@@ -3,10 +3,9 @@
 //! is freed only AFTER all proxies and the connection. No state reference is
 //! held while dispatching. Callbacks only collect bounded events or marshal
 //! protocol replies; they never invoke application code or unwind into C.
+mod keyboard;
 mod protocol;
-use super::window::{
-    Action, WindowHandler, WindowOptions, WindowReport, WindowResult, physical_key, write_xrgb,
-};
+use super::window::{Action, WindowHandler, WindowOptions, WindowReport, WindowResult, write_xrgb};
 use protocol::*;
 use std::{
     ffi::{CStr, CString, c_void},
@@ -62,11 +61,15 @@ struct State {
     xrgb: bool,
     capabilities: u32,
     keyboard_focus: bool,
+    key_state: keyboard::Keyboard,
+    text_input: bool,
     pointer_focus: bool,
     pointer_x: i32,
     pointer_y: i32,
-    scroll: i32,
-    discrete: i32,
+    scroll: [i32; 2],
+    discrete: [i32; 2],
+    precise_scroll: bool,
+    motion: super::window::MotionCoalescer,
     actions: [Option<Action>; 64],
     action_count: usize,
     fault: Option<&'static str>,
@@ -98,29 +101,28 @@ impl State {
             xrgb: false,
             capabilities: 0,
             keyboard_focus: false,
+            key_state: keyboard::Keyboard::default(),
+            text_input: false,
             pointer_focus: false,
             pointer_x: 0,
             pointer_y: 0,
-            scroll: 0,
-            discrete: 0,
+            scroll: [0; 2],
+            discrete: [0; 2],
+            precise_scroll: false,
+            motion: super::window::MotionCoalescer::default(),
             actions: [None; 64],
             action_count: 0,
             fault: None,
         }
     }
     fn action(&mut self, action: Action) {
-        if action == Action::Close {
-            self.closed = true;
-            return;
-        }
-        if matches!(action, Action::PointerMove { .. })
-            && self.action_count > 0
-            && matches!(
-                self.actions[self.action_count - 1],
-                Some(Action::PointerMove { .. })
-            )
+        if self.action_count > 0
+            && self
+                .motion
+                .may_replace(self.actions[self.action_count - 1], action)
         {
             self.actions[self.action_count - 1] = Some(action);
+            self.motion.accepted(action);
             return;
         }
         if self.action_count == self.actions.len() {
@@ -129,6 +131,7 @@ impl State {
         }
         self.actions[self.action_count] = Some(action);
         self.action_count += 1;
+        self.motion.accepted(action);
     }
 }
 // SAFETY: callers supply a live proxy and exactly the argument signature for its opcode.
@@ -207,13 +210,13 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                     b"wl_seat" => Some(3),
                     _ => None,
                 };
-                if let Some(i) = slot {
-                    if s.globals[i].name == 0 {
-                        s.globals[i] = Global {
-                            name: (*args).u,
-                            version: (*args.add(2)).u,
-                        };
-                    }
+                if let Some(i) = slot
+                    && s.globals[i].name == 0
+                {
+                    s.globals[i] = Global {
+                        name: (*args).u,
+                        version: (*args.add(2)).u,
+                    };
                 }
             }
             (REGISTRY, 1) => {
@@ -259,16 +262,31 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
             (KEYBOARD, 0) => {
                 let fd = (*args.add(1)).h;
                 if fd >= 0 {
-                    drop(OwnedFd::from_raw_fd(fd));
+                    let fd = OwnedFd::from_raw_fd(fd);
+                    if (*args).u == 1
+                        && s.key_state
+                            .keymap(fs::File::from(fd), (*args.add(2)).u)
+                            .is_err()
+                    {
+                        eprintln!(
+                            "ReadAll: compositor keymap unavailable; physical navigation remains enabled"
+                        );
+                    }
                 }
             }
             (KEYBOARD, 1) => s.keyboard_focus = (*args.add(1)).o == s.surface,
             (KEYBOARD, 2) => s.keyboard_focus = false,
             (KEYBOARD, 3) if s.keyboard_focus && (*args.add(3)).u == 1 => {
-                if let Some(action) = physical_key((*args.add(2)).u) {
+                if let Some(action) = s.key_state.action((*args.add(2)).u, s.text_input) {
                     s.action(action);
                 }
             }
+            (KEYBOARD, 4) => s.key_state.modifiers(
+                (*args.add(1)).u,
+                (*args.add(2)).u,
+                (*args.add(3)).u,
+                (*args.add(4)).u,
+            ),
             (POINTER, 0) => {
                 s.pointer_focus = (*args.add(1)).o == s.surface;
                 s.pointer_x = (*args.add(2)).i;
@@ -285,8 +303,8 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                     s.action(Action::PointerLeave);
                 }
                 s.pointer_focus = false;
-                s.scroll = 0;
-                s.discrete = 0;
+                s.scroll = [0; 2];
+                s.discrete = [0; 2];
             }
             (POINTER, 2) => {
                 s.pointer_x = (*args.add(1)).i;
@@ -304,32 +322,66 @@ unsafe fn dispatch(s: &mut State, kind: usize, target: *mut Proxy, opcode: u32, 
                     y: s.pointer_y / 256,
                 });
             }
-            (POINTER, 4) if s.pointer_focus && (*args.add(1)).u == 0 => {
-                s.scroll = s
-                    .scroll
-                    .saturating_add((*args.add(2)).i)
-                    .clamp(-61440, 61440)
+            (POINTER, 3) if s.pointer_focus && (*args.add(2)).u == 272 && (*args.add(3)).u == 0 => {
+                s.action(Action::PointerRelease {
+                    x: s.pointer_x / 256,
+                    y: s.pointer_y / 256,
+                });
             }
-            (POINTER, 8) if s.pointer_focus && (*args).u == 0 => {
-                s.discrete = s.discrete.saturating_add((*args.add(1)).i).clamp(-64, 64)
+            (POINTER, 3) if s.pointer_focus && s.precise_scroll && (*args.add(2)).u == 273 => {
+                let (x, y) = (s.pointer_x / 256, s.pointer_y / 256);
+                s.action(if (*args.add(3)).u == 1 {
+                    Action::PanStart { x, y }
+                } else {
+                    Action::PanEnd { x, y }
+                });
+            }
+            (POINTER, 4) if s.pointer_focus && (*args.add(1)).u < 2 => {
+                let axis = (*args.add(1)).u as usize;
+                s.scroll[axis] = s.scroll[axis]
+                    .saturating_add((*args.add(2)).i)
+                    .clamp(-262144, 262144);
+            }
+            (POINTER, 8) if s.pointer_focus && (*args).u < 2 => {
+                let axis = (*args).u as usize;
+                s.discrete[axis] = s.discrete[axis]
+                    .saturating_add((*args.add(1)).i)
+                    .clamp(-16, 16);
             }
             (POINTER, 5) => {
-                let direction = if s.discrete != 0 {
-                    s.discrete.signum()
-                } else if s.scroll.abs() >= 2560 {
-                    s.scroll.signum()
-                } else {
-                    0
-                };
-                if direction != 0 {
-                    s.action(if direction > 0 {
-                        Action::Next
-                    } else {
-                        Action::Previous
+                if s.precise_scroll {
+                    let delta = std::array::from_fn::<_, 2, _>(|axis| {
+                        if s.discrete[axis] != 0 {
+                            s.discrete[axis] * 64 * 256
+                        } else {
+                            s.scroll[axis]
+                        }
                     });
-                    s.scroll = 0;
+                    if delta != [0, 0] {
+                        s.action(Action::Scroll {
+                            dx: delta[1],
+                            dy: delta[0],
+                        });
+                    }
+                    s.scroll = [0; 2];
+                } else {
+                    let direction = if s.discrete[0] != 0 {
+                        s.discrete[0].signum()
+                    } else if s.scroll[0].abs() >= 2560 {
+                        s.scroll[0].signum()
+                    } else {
+                        0
+                    };
+                    if direction != 0 {
+                        s.action(if direction > 0 {
+                            Action::Next
+                        } else {
+                            Action::Previous
+                        });
+                        s.scroll = [0; 2];
+                    }
                 }
-                s.discrete = 0;
+                s.discrete = [0; 2];
             }
             (BUFFER, 0) => {
                 if let Some(slot) = s.buffers.iter_mut().find(|slot| **slot == target) {
@@ -465,16 +517,16 @@ impl Connection {
                     Arg { o: null_mut() },
                 ],
             )?;
-            if kind != 0 {
-                if let Err(e) = listen(p, kind, self.state) {
-                    wl_proxy_destroy(p);
-                    return Err(e);
-                }
+            if kind != 0
+                && let Err(e) = listen(p, kind, self.state)
+            {
+                wl_proxy_destroy(p);
+                return Err(e);
             }
             Ok(p)
         }
     }
-    fn initialize(&mut self) -> WindowResult<()> {
+    fn initialize(&mut self, minimum_size: (u32, u32)) -> WindowResult<()> {
         self.wait_sync()?;
         unsafe {
             (*self.state).compositor = self.bind(0, &raw const wl_compositor_interface, 4, 0)?;
@@ -511,7 +563,11 @@ impl Connection {
                     s: c"xin.soymilk.ReadAll".as_ptr(),
                 }],
             );
-            send(top, 8, &mut [Arg { i: 256 }, Arg { i: 256 }]);
+            let min_width = i32::try_from(minimum_size.0)
+                .map_err(|_| "minimum window width exceeds Wayland limits")?;
+            let min_height = i32::try_from(minimum_size.1)
+                .map_err(|_| "minimum window height exceeds Wayland limits")?;
+            send(top, 8, &mut [Arg { i: min_width }, Arg { i: min_height }]);
             send(top, 7, &mut [Arg { i: 4096 }, Arg { i: 4096 }]);
             send(surface, 6, &mut []); // Initial empty commit; wait for xdg_surface.configure.
         }
@@ -740,7 +796,7 @@ pub(super) fn run(
         handler.surface().width(),
         handler.surface().height(),
     )?;
-    connection.initialize()?;
+    connection.initialize(handler.minimum_size())?;
     let start = Instant::now();
     let mut report = WindowReport::default();
     let mut finishing = false;
@@ -785,7 +841,11 @@ pub(super) fn run(
             };
             let mut changed = resized;
             for action in actions.into_iter().take(count).flatten() {
-                changed |= handler.action(action)?;
+                let handled = handler.action(action)?;
+                if action == Action::Close && !handled {
+                    return Ok(report);
+                }
+                changed |= handled;
                 if handler.close_requested() {
                     return Ok(report);
                 }
@@ -793,13 +853,22 @@ pub(super) fn run(
             if let Some(interval) = handler.animation_interval()
                 && last_animation.elapsed() >= interval
             {
-                changed |= handler.animation_tick()?;
+                // Schedule start-to-start; frame preparation and SHM presentation
+                // count towards the interval rather than being added after it.
                 last_animation = Instant::now();
+                changed |= handler.animation_tick()?;
+            }
+            // Worker completions and cancellation can arrive without input events.
+            if handler.close_requested() {
+                return Ok(report);
             }
             unsafe {
                 (*connection.state).dirty |= changed;
+                (*connection.state).text_input = handler.text_input_active();
+                (*connection.state).precise_scroll = handler.precise_scroll();
             }
             if (dirty || changed) && connection.present(handler)? {
+                handler.frame_presented();
                 report.committed_frames = report.committed_frames.saturating_add(1);
                 report.width = width;
                 report.height = height;

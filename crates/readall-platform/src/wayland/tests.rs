@@ -11,6 +11,103 @@ use std::{
     thread,
 };
 
+#[test]
+fn precise_axes_preserve_subpixels_and_do_not_double_count_wheel_detents() {
+    let mut state = State::new(640, 480);
+    state.pointer_focus = true;
+    state.precise_scroll = true;
+    // SAFETY: these fixed pointer-event signatures touch State only, not a proxy.
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            4,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { i: 128 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            4,
+            [Arg { u: 0 }, Arg { u: 1 }, Arg { i: -64 }].as_mut_ptr(),
+        );
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+    }
+    assert_eq!(state.actions[0], Some(Action::Scroll { dx: -64, dy: 128 }));
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            4,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { i: 2560 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            8,
+            [Arg { u: 0 }, Arg { i: 1 }].as_mut_ptr(),
+        );
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+    }
+    assert_eq!(
+        state.actions[1],
+        Some(Action::Scroll {
+            dx: 0,
+            dy: 64 * 256
+        })
+    );
+    assert_eq!(state.action_count, 2);
+}
+#[test]
+fn legacy_wheel_actions_and_new_right_drag_remain_separate_from_left_selection() {
+    let mut state = State::new(640, 480);
+    state.pointer_focus = true;
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            8,
+            [Arg { u: 0 }, Arg { i: 1 }].as_mut_ptr(),
+        );
+        dispatch(&mut state, POINTER, null_mut(), 5, null_mut());
+    }
+    assert_eq!(state.actions[0], Some(Action::Next));
+    state.precise_scroll = true;
+    state.pointer_x = 40 * 256;
+    state.pointer_y = 80 * 256;
+    unsafe {
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { u: 273 }, Arg { u: 1 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { u: 273 }, Arg { u: 0 }].as_mut_ptr(),
+        );
+        dispatch(
+            &mut state,
+            POINTER,
+            null_mut(),
+            3,
+            [Arg { u: 0 }, Arg { u: 0 }, Arg { u: 272 }, Arg { u: 1 }].as_mut_ptr(),
+        );
+    }
+    assert_eq!(state.actions[1], Some(Action::PanStart { x: 40, y: 80 }));
+    assert_eq!(state.actions[2], Some(Action::PanEnd { x: 40, y: 80 }));
+    assert_eq!(state.actions[3], Some(Action::Click { x: 40, y: 80 }));
+}
+
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
@@ -39,7 +136,7 @@ fn string(value: &str) -> Vec<u8> {
     let mut bytes = words(&[value.len() as u32 + 1]);
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(0);
     }
     bytes
@@ -381,6 +478,63 @@ fn animation_ticks_produce_frames_without_input_events() {
     assert_eq!(report.committed_frames, 2);
     assert!(handler.ticks >= 1);
     assert_eq!(observed.frames, 2);
+}
+
+struct CompletionHandler {
+    inner: Handler,
+    presented: usize,
+    done: bool,
+}
+impl WindowHandler for CompletionHandler {
+    fn resize(&mut self, w: u32, h: u32) -> WindowResult<bool> {
+        self.inner.resize(w, h)
+    }
+    fn action(&mut self, _: Action) -> WindowResult<bool> {
+        Ok(false)
+    }
+    fn surface(&self) -> &Surface {
+        self.inner.surface()
+    }
+    fn title(&self) -> String {
+        "ReadAll completion test".into()
+    }
+    fn frame_presented(&mut self) {
+        self.presented += 1;
+    }
+    fn animation_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(1))
+    }
+    fn animation_tick(&mut self) -> WindowResult<bool> {
+        self.done = self.presented > 0;
+        Ok(false)
+    }
+    fn close_requested(&self) -> bool {
+        self.done
+    }
+}
+#[test]
+fn worker_completion_closes_after_first_commit_without_any_input() {
+    let temp = Temp::new();
+    let socket = temp.0.join("display");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let thread = thread::spawn(move || serve(listener, false));
+    let mut handler = CompletionHandler {
+        inner: Handler::new(),
+        presented: 0,
+        done: false,
+    };
+    let report = run(
+        &mut handler,
+        WindowOptions {
+            display: Some(socket),
+            close_after_frames: None,
+        },
+    )
+    .unwrap();
+    let observed = thread.join().unwrap();
+    assert_eq!(handler.presented, 1);
+    assert_eq!(report.committed_frames, 1);
+    assert_eq!(observed.frames, 1);
 }
 
 #[test]

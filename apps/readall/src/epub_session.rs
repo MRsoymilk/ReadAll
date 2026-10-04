@@ -1,6 +1,9 @@
 //! Transactional EPUB reading state over the current XHTML text subset.
-use crate::text_page::{Options, PageRenderer, RenderedPage};
-use readall_core::{Limits, TextDocument};
+use crate::epub_flow::{Chapter, EpubRenderer as PageRenderer};
+use crate::reader_data::Settings;
+mod paging;
+mod tools;
+use crate::text_page::{Options, RenderedPage};
 use readall_epub::{EpubBook, EpubError, EpubLocator};
 use readall_font::Font;
 use std::error::Error;
@@ -20,8 +23,9 @@ pub(crate) enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TocEntry {
     pub(crate) spine: usize,
+    pub(crate) offset: usize,
     pub(crate) title: String,
-    pub(crate) current: bool,
+    pub(crate) depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -34,21 +38,46 @@ pub(crate) enum Start {
 pub(crate) struct EpubSession<'book, 'archive, 'font, 'font_bytes> {
     book: &'book EpubBook<'archive>,
     font: &'font Font<'font_bytes>,
+    fallbacks: Vec<&'font Font<'font_bytes>>,
     options: Options,
     renderer: PageRenderer<'font, 'font_bytes>,
-    chapter: TextDocument,
+    chapter: Chapter<'book, 'archive>,
     spine: usize,
     frame: RenderedPage,
     anchor: EpubLocator,
+    preferences: Settings,
+    paging: paging::Paging<'book, 'archive, 'font, 'font_bytes>,
 }
 
 impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'font_bytes> {
+    #[cfg(test)]
     pub(crate) fn new(
+        book: &'book EpubBook<'archive>,
+        font: &'font Font<'font_bytes>,
+        options: Options,
+        start: Start,
+    ) -> Result<Self> {
+        Self::new_with_fallbacks(book, font, options, start, &[])
+    }
+    #[cfg(test)]
+    pub(crate) fn new_with_fallbacks(
+        book: &'book EpubBook<'archive>,
+        font: &'font Font<'font_bytes>,
+        options: Options,
+        start: Start,
+        fallbacks: &[&'font Font<'font_bytes>],
+    ) -> Result<Self> {
+        Self::new_with_preferences(book, font, options, start, fallbacks, Settings::default())
+    }
+    pub(crate) fn new_with_preferences(
         book: &'book EpubBook<'archive>,
         font: &'font Font<'font_bytes>,
         mut options: Options,
         start: Start,
+        fallbacks: &[&'font Font<'font_bytes>],
+        preferences: Settings,
     ) -> Result<Self> {
+        crate::loading::stage("读取当前章节")?;
         if options.at.is_some() {
             return Err("EPUB session requires EpubLocator rather than TextLocator".into());
         }
@@ -68,7 +97,8 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
                 if options.page.is_some() {
                     return Err("EPUB locator cannot be combined with a page number".into());
                 }
-                let (spine, offset) = book.restore(&locator)?;
+                let locator = book.normalize_locator(&locator)?;
+                let (spine, offset) = (locator.spine_index(), locator.utf8_offset() as usize);
                 (
                     spine,
                     chapter_document(book, spine)?,
@@ -83,8 +113,14 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         } else {
             None
         };
-        let mut renderer = PageRenderer::new(font, options.size, options.allow_missing)?;
-        let frame = renderer.render(&chapter, &options)?;
+        let mut renderer = PageRenderer::new(font, options.size, options.allow_missing)?
+            .with_fallbacks(fallbacks)
+            .with_preferences(preferences.theme, preferences.line_spacing);
+        let frame = renderer.render_with_image(
+            &chapter,
+            &options,
+            exact_anchor.as_ref().and_then(EpubLocator::image_index),
+        )?;
         let anchor = if let Some(locator) = exact_anchor {
             locator
         } else {
@@ -94,17 +130,20 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         Ok(Self {
             book,
             font,
+            fallbacks: fallbacks.iter().copied().take(12).collect(),
             options,
             renderer,
             chapter,
             spine,
             frame,
             anchor,
+            preferences,
+            paging: paging::Paging::default(),
         })
     }
 
     pub(crate) fn frame(&self) -> &RenderedPage {
-        &self.frame
+        self.paging.view.as_ref().unwrap_or(&self.frame)
     }
 
     pub(crate) fn anchor(&self) -> &EpubLocator {
@@ -123,38 +162,89 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         (self.frame.page + 1, self.frame.pages)
     }
 
+    #[cfg(test)]
     pub(crate) fn font_size(&self) -> u32 {
         self.options.size
     }
 
     pub(crate) fn overall_progress(&self) -> f32 {
+        if let Some(progress) = self.scroll_progress() {
+            return progress;
+        }
         let chapters = self.book.spine().len().max(1) as f32;
         let chapter_fraction = (self.frame.page + 1) as f32 / self.frame.pages.max(1) as f32;
         ((self.spine as f32 + chapter_fraction) / chapters).clamp(0.0, 1.0)
     }
 
     pub(crate) fn toc_entries(&self) -> Result<Vec<TocEntry>> {
+        if let Ok(navigation) = self.book.navigation() {
+            let mut entries = Vec::new();
+            let navigation_len = navigation.len();
+            for (position, item) in navigation.into_iter().enumerate() {
+                crate::loading::step("生成目录", position, navigation_len)?;
+                let spine = item.spine_index();
+                let Some(spine_item) = self.book.spine().get(spine) else {
+                    continue;
+                };
+                if !spine_item.linear() {
+                    continue;
+                }
+                let content = match self.book.read_spine_content(spine) {
+                    Ok(content) => content,
+                    Err(EpubError::Unsupported(_)) => continue,
+                    Err(_) => continue,
+                };
+                if content.text.trim().is_empty() && content.images.is_empty() {
+                    continue;
+                }
+                let offset = match item.fragment() {
+                    Some(fragment) => self
+                        .book
+                        .locator_for_fragment(spine, fragment)
+                        .ok()
+                        .flatten()
+                        .and_then(|locator| usize::try_from(locator.utf8_offset()).ok())
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                entries.push(TocEntry {
+                    spine,
+                    offset,
+                    title: item.label().to_owned(),
+                    depth: item.depth(),
+                });
+                if entries.len() >= 512 {
+                    break;
+                }
+            }
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+        }
+
         let mut entries = Vec::new();
         for spine in 0..self.book.spine().len() {
+            crate::loading::step("生成目录", spine, self.book.spine().len())?;
             let Some(item) = self.book.spine().get(spine) else {
                 continue;
             };
             if !item.linear() {
                 continue;
             }
-            let text = match self.book.read_spine_text(spine) {
-                Ok(text) => text,
+            let content = match self.book.read_spine_content(spine) {
+                Ok(content) => content,
                 Err(EpubError::Unsupported(_)) => continue,
                 Err(error) => return Err(error.into()),
             };
-            if text.trim().is_empty() {
+            if content.text.trim().is_empty() && content.images.is_empty() {
                 continue;
             }
-            let title = chapter_title(&text, entries.len() + 1);
+            let title = chapter_title(&content.text, entries.len() + 1);
             entries.push(TocEntry {
                 spine,
+                offset: 0,
                 title,
-                current: spine == self.spine,
+                depth: 0,
             });
             if entries.len() >= 512 {
                 break;
@@ -163,13 +253,29 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         Ok(entries)
     }
 
+    #[cfg(test)]
     pub(crate) fn jump_to_spine(&mut self, spine: usize) -> Result<bool> {
-        if spine == self.spine && self.frame.page == 0 {
-            return Ok(false);
-        }
+        self.jump_to_toc_target(spine, 0)
+    }
+
+    pub(crate) fn jump_to_toc_target(&mut self, spine: usize, offset: usize) -> Result<bool> {
         let chapter = readable_chapter(self.book, spine)?
             .ok_or("selected EPUB chapter has no readable text")?;
-        self.switch_chapter(spine, chapter, PageTarget::First)
+        let anchor = self.book.locator(spine, offset)?;
+        if self.spine == spine && self.anchor == anchor {
+            return Ok(false);
+        }
+        let mut options = self.options.clone();
+        options.page = None;
+        options.at = Some(chapter.locator(offset)?);
+        let frame = self.renderer.render(&chapter, &options)?;
+        self.chapter = chapter;
+        self.spine = spine;
+        self.options = options;
+        self.clear_paging();
+        self.frame = frame;
+        self.anchor = anchor;
+        Ok(true)
     }
 
     pub(crate) fn title(&self) -> String {
@@ -209,16 +315,23 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
 
         if options.size != self.options.size || options.allow_missing != self.options.allow_missing
         {
-            let mut renderer = PageRenderer::new(self.font, options.size, options.allow_missing)?;
-            let frame = renderer.render(&self.chapter, &options)?;
+            let mut renderer = PageRenderer::new(self.font, options.size, options.allow_missing)?
+                .with_fallbacks(&self.fallbacks)
+                .with_preferences(self.preferences.theme, self.preferences.line_spacing);
+            let frame =
+                renderer.render_with_image(&self.chapter, &options, self.anchor.image_index())?;
             self.renderer = renderer;
             self.options = options;
+            self.clear_paging();
             self.frame = frame;
             return Ok(true);
         }
 
-        let frame = self.renderer.render(&self.chapter, &options)?;
+        let frame =
+            self.renderer
+                .render_with_image(&self.chapter, &options, self.anchor.image_index())?;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         Ok(true)
     }
@@ -290,6 +403,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         let frame = self.renderer.render(&self.chapter, &options)?;
         let anchor = page_anchor(self.book, self.spine, &self.chapter, &frame)?;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         self.anchor = anchor;
         Ok(true)
@@ -298,7 +412,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
     fn switch_chapter(
         &mut self,
         spine: usize,
-        chapter: TextDocument,
+        chapter: Chapter<'book, 'archive>,
         target: PageTarget,
     ) -> Result<bool> {
         let mut options = self.options.clone();
@@ -314,6 +428,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         self.chapter = chapter;
         self.spine = spine;
         self.options = options;
+        self.clear_paging();
         self.frame = frame;
         self.anchor = anchor;
         Ok(true)
@@ -342,49 +457,54 @@ fn chapter_title(text: &str, ordinal: usize) -> String {
     title
 }
 
-fn chapter_document(book: &EpubBook<'_>, spine: usize) -> Result<TextDocument> {
-    let text = book.read_spine_text(spine)?;
-    if text.trim().is_empty() {
-        return Err("EPUB spine contains no readable text in the current XHTML subset".into());
+fn chapter_document<'book, 'archive>(
+    book: &'book EpubBook<'archive>,
+    spine: usize,
+) -> Result<Chapter<'book, 'archive>> {
+    let chapter = Chapter::load(book, spine)?;
+    if !chapter.is_readable() {
+        return Err("EPUB spine contains no readable text or images".into());
     }
-    Ok(TextDocument::from_bytes(
-        text.as_bytes(),
-        Limits::default(),
-    )?)
+    Ok(chapter)
 }
 
-fn readable_chapter(book: &EpubBook<'_>, spine: usize) -> Result<Option<TextDocument>> {
+fn readable_chapter<'book, 'archive>(
+    book: &'book EpubBook<'archive>,
+    spine: usize,
+) -> Result<Option<Chapter<'book, 'archive>>> {
     let Some(spine_item) = book.spine().get(spine) else {
         return Ok(None);
     };
     if !spine_item.linear() {
         return Ok(None);
     }
-    let text = match book.read_spine_text(spine) {
-        Ok(text) => text,
-        Err(EpubError::Unsupported(_)) => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    if text.trim().is_empty() {
-        return Ok(None);
+    match Chapter::load(book, spine) {
+        Ok(chapter) => Ok(chapter.is_readable().then_some(chapter)),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<EpubError>(),
+                Some(EpubError::Unsupported(_))
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
-    Ok(Some(TextDocument::from_bytes(
-        text.as_bytes(),
-        Limits::default(),
-    )?))
 }
 
 fn page_anchor(
-    book: &EpubBook<'_>,
-    spine: usize,
-    chapter: &TextDocument,
+    _book: &EpubBook<'_>,
+    _spine: usize,
+    chapter: &Chapter<'_, '_>,
     frame: &RenderedPage,
 ) -> Result<EpubLocator> {
     let offset = chapter.restore(&frame.locator)?;
-    Ok(book.locator(spine, offset)?)
+    chapter.epub_locator(offset, frame.image_index)
 }
 
-fn first_readable(book: &EpubBook<'_>) -> Result<Option<(usize, TextDocument)>> {
+fn first_readable<'book, 'archive>(
+    book: &'book EpubBook<'archive>,
+) -> Result<Option<(usize, Chapter<'book, 'archive>)>> {
     for index in 0..book.spine().len() {
         if let Some(chapter) = readable_chapter(book, index)? {
             return Ok(Some((index, chapter)));
@@ -393,7 +513,9 @@ fn first_readable(book: &EpubBook<'_>) -> Result<Option<(usize, TextDocument)>> 
     Ok(None)
 }
 
-fn last_readable(book: &EpubBook<'_>) -> Result<Option<(usize, TextDocument)>> {
+fn last_readable<'book, 'archive>(
+    book: &'book EpubBook<'archive>,
+) -> Result<Option<(usize, Chapter<'book, 'archive>)>> {
     for index in (0..book.spine().len()).rev() {
         if let Some(chapter) = readable_chapter(book, index)? {
             return Ok(Some((index, chapter)));
@@ -402,7 +524,10 @@ fn last_readable(book: &EpubBook<'_>) -> Result<Option<(usize, TextDocument)>> {
     Ok(None)
 }
 
-fn next_readable(book: &EpubBook<'_>, current: usize) -> Result<Option<(usize, TextDocument)>> {
+fn next_readable<'book, 'archive>(
+    book: &'book EpubBook<'archive>,
+    current: usize,
+) -> Result<Option<(usize, Chapter<'book, 'archive>)>> {
     for index in current.saturating_add(1)..book.spine().len() {
         if let Some(chapter) = readable_chapter(book, index)? {
             return Ok(Some((index, chapter)));
@@ -411,7 +536,10 @@ fn next_readable(book: &EpubBook<'_>, current: usize) -> Result<Option<(usize, T
     Ok(None)
 }
 
-fn previous_readable(book: &EpubBook<'_>, current: usize) -> Result<Option<(usize, TextDocument)>> {
+fn previous_readable<'book, 'archive>(
+    book: &'book EpubBook<'archive>,
+    current: usize,
+) -> Result<Option<(usize, Chapter<'book, 'archive>)>> {
     for index in (0..current.min(book.spine().len())).rev() {
         if let Some(chapter) = readable_chapter(book, index)? {
             return Ok(Some((index, chapter)));
@@ -544,8 +672,10 @@ mod tests {
         assert_eq!(toc.len(), 2);
         assert_eq!(toc[0].spine, 1);
         assert_eq!(toc[1].spine, 3);
-        assert!(toc[0].current);
-        assert!(!toc[1].current);
+        assert_eq!(toc[0].offset, 0);
+        assert_eq!(toc[1].offset, 0);
+        assert_eq!(toc[0].depth, 0);
+        assert_eq!(toc[1].depth, 0);
         assert!(toc[0].title.starts_with("AAAA"));
 
         assert!(session.jump_to_spine(toc[1].spine).unwrap());
@@ -553,6 +683,146 @@ mod tests {
         assert_eq!(session.frame().page, 0);
         assert!(!session.jump_to_spine(3).unwrap());
         assert!(session.jump_to_spine(0).is_err());
+    }
+
+    #[test]
+    fn toc_prefers_epub3_navigation_labels_and_preserves_hierarchy() {
+        let epub_bytes = test_epub::make_epub_with_navigation();
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+
+        let toc = session.toc_entries().unwrap();
+        assert_eq!(toc.len(), 3);
+        assert_eq!(toc[0].title, "正式目录第一章");
+        assert_eq!(toc[0].spine, 0);
+        assert_eq!(toc[0].offset, 0);
+        assert_eq!(toc[0].depth, 0);
+        assert_eq!(toc[1].title, "第一章详细部分");
+        assert_eq!(toc[1].spine, 0);
+        assert!(toc[1].offset > 0);
+        assert_eq!(toc[1].depth, 1);
+        assert_eq!(toc[2].title, "正式目录第二章");
+        assert_eq!(toc[2].spine, 1);
+        assert_eq!(toc[2].offset, 0);
+        assert_eq!(toc[2].depth, 0);
+
+        let target = toc[1].offset;
+        assert!(session.jump_to_toc_target(toc[1].spine, target).unwrap());
+        assert_eq!(session.anchor().spine_index(), 0);
+        assert_eq!(session.anchor().utf8_offset(), target as u64);
+        let exact = session.anchor().clone();
+        session.resize(260, 160).unwrap();
+        session.action(Action::Larger).unwrap();
+        assert_eq!(session.anchor(), &exact);
+    }
+
+    #[test]
+    fn toc_uses_epub2_ncx_when_epub3_navigation_is_absent() {
+        let epub_bytes = test_epub::make_epub_with_ncx_navigation();
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+
+        let toc = session.toc_entries().unwrap();
+        assert_eq!(toc.len(), 3);
+        assert_eq!(toc[0].title, "旧目录第一章");
+        assert_eq!(toc[0].spine, 0);
+        assert_eq!(toc[0].offset, 0);
+        assert_eq!(toc[0].depth, 0);
+        assert_eq!(toc[1].title, "第一章子节");
+        assert_eq!(toc[1].spine, 0);
+        assert!(toc[1].offset > 0);
+        assert_eq!(toc[1].depth, 1);
+        assert_eq!(toc[2].title, "旧目录第二章");
+        assert_eq!(toc[2].spine, 1);
+        assert_eq!(toc[2].offset, 0);
+
+        assert!(
+            session
+                .jump_to_toc_target(toc[1].spine, toc[1].offset)
+                .unwrap()
+        );
+        assert_eq!(session.anchor().utf8_offset(), toc[1].offset as u64);
+    }
+
+    #[test]
+    fn image_only_spines_participate_in_navigation_toc_and_progress() {
+        let epub_bytes = test_epub::make_epub_with_resources(
+            &[
+                "<html><body><img src='a.png'/></body></html>",
+                "<html><body><p>AAAA</p></body></html>",
+            ],
+            vec![(
+                "a.png",
+                "image/png",
+                test_epub::make_png(64, 32, [0, 0, 255, 255]),
+            )],
+        );
+        let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+        assert_eq!(session.spine, 0);
+        assert_eq!(session.toc_entries().unwrap().len(), 2);
+        let anchor = session.anchor().clone();
+        assert!(session.resize(1, 1).is_err());
+        assert_eq!(session.anchor(), &anchor);
+        assert!(session.action(Action::Next).unwrap());
+        assert_eq!(session.spine, 1);
+        assert!(session.action(Action::Previous).unwrap());
+        assert_eq!(session.spine, 0);
+        assert_eq!(session.anchor(), &anchor);
+        let restored = EpubSession::new(&book, &font, options(), Start::Locator(anchor)).unwrap();
+        assert_eq!(restored.spine, 0);
+        assert_eq!(restored.frame().page, 0);
+    }
+
+    #[test]
+    fn adjacent_image_pages_resume_exactly_across_resize_and_restart() {
+        let source =
+            "<html><body><img src='a.png'/><img src='a.png'/><img src='a.png'/></body></html>";
+        let bytes = test_epub::make_epub_with_resources(
+            &[source],
+            vec![(
+                "a.png",
+                "image/png",
+                test_epub::make_png(160, 96, [20, 40, 60, 255]),
+            )],
+        );
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        let font_bytes = test_font::make_font();
+        let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+        let mut session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+        assert_eq!(session.frame().pages, 3);
+        session.action(Action::Next).unwrap();
+        let anchor = session.anchor().clone();
+        assert_eq!(anchor.image_index(), Some(1));
+        assert_eq!(anchor.utf8_offset(), 0);
+        assert!(anchor.to_string().starts_with("epub-v2:"));
+        assert_eq!(anchor.to_string().parse::<EpubLocator>().unwrap(), anchor);
+        let mut resumed =
+            EpubSession::new(&book, &font, options(), Start::Locator(anchor.clone())).unwrap();
+        assert_eq!(resumed.frame().page, 1);
+        resumed.resize(260, 240).unwrap();
+        resumed.resize(200, 128).unwrap();
+        assert_eq!(resumed.frame().page, 1);
+        assert_eq!(resumed.anchor(), &anchor);
+        assert!(
+            book.restore(&format!("epub-v2:{}:0:0:99", book.id()).parse().unwrap())
+                .is_err()
+        );
+        let legacy = book.locator(0, 0).unwrap();
+        assert!(legacy.to_string().starts_with("epub-v1:"));
+        assert_eq!(
+            EpubSession::new(&book, &font, options(), Start::Locator(legacy))
+                .unwrap()
+                .frame()
+                .page,
+            0
+        );
     }
 
     #[test]

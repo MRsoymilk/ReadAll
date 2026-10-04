@@ -1,12 +1,13 @@
 use crate::{
     FontError, Result,
     binary::{offset_at, slice, u16_at, u32_at},
+    storage::FontData,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Cmap<'a> {
-    Segments { bytes: &'a [u8], count: usize },
-    Groups { bytes: &'a [u8], count: usize },
+    Segments { bytes: FontData<'a>, count: usize },
+    Groups { bytes: FontData<'a>, count: usize },
 }
 impl<'a> Cmap<'a> {
     pub(crate) fn parse(table: &'a [u8], glyph_count: u16) -> Result<Self> {
@@ -76,7 +77,10 @@ impl<'a> Cmap<'a> {
             {
                 return Err(FontError::Invalid("cmap sentinel is missing"));
             }
-            Ok(Self::Segments { bytes, count })
+            Ok(Self::Segments {
+                bytes: FontData::Borrowed(bytes),
+                count,
+            })
         } else {
             if u16_at(tail, 2)? != 0 {
                 return Err(FontError::Invalid("cmap reserved field"));
@@ -107,14 +111,35 @@ impl<'a> Cmap<'a> {
                 }
                 previous_end = Some(end);
             }
-            Ok(Self::Groups { bytes, count })
+            Ok(Self::Groups {
+                bytes: FontData::Borrowed(bytes),
+                count,
+            })
         }
+    }
+
+    pub(crate) fn shared(
+        &self,
+        root: &[u8],
+        owner: &std::sync::Arc<[u8]>,
+    ) -> Result<Cmap<'static>> {
+        Ok(match self {
+            Self::Segments { bytes, count } => Cmap::Segments {
+                bytes: bytes.shared(root, owner)?,
+                count: *count,
+            },
+            Self::Groups { bytes, count } => Cmap::Groups {
+                bytes: bytes.shared(root, owner)?,
+                count: *count,
+            },
+        })
     }
 
     pub(crate) fn glyph_index(&self, ch: char) -> Result<u16> {
         let code = u32::from(ch);
-        match *self {
+        match self {
             Self::Segments { bytes, count } => {
+                let count = *count;
                 if code > 0xffff {
                     return Ok(0);
                 }
@@ -149,6 +174,7 @@ impl<'a> Cmap<'a> {
                 })
             }
             Self::Groups { bytes, count } => {
+                let count = *count;
                 let (mut lo, mut hi) = (0, count);
                 while lo < hi {
                     let mid = lo + (hi - lo) / 2;

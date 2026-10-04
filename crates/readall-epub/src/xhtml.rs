@@ -6,7 +6,99 @@ use crate::{
     xml::{self, Event, XmlLimits, local_name},
 };
 
+use crate::css::{BoxStyle, StyleSheet, TextStyle, WhiteSpace};
+mod code;
+mod whitespace;
+pub use code::CodeBlock;
+#[cfg(test)]
+mod whitespace_tests;
+use std::ops::Range;
+use whitespace::Whitespace;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleRun {
+    pub range: Range<usize>,
+    pub style: TextStyle,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageReference {
+    /// Offset in the unchanged canonical text stream, not an inserted character.
+    pub offset: usize,
+    pub source: String,
+    pub alt: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub inline_svg: Option<String>,
+}
+/// Source-ordered box boundaries, including image order at a shared text offset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockBoundary {
+    pub offset: usize,
+    pub images_before: usize,
+    /// Some opens a block; None closes the innermost open block.
+    pub style: Option<BoxStyle>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChapterContent {
+    pub font_families: crate::css::FontFamilies,
+    pub font_faces: Vec<crate::css::FontFace>,
+    pub text: String,
+    pub runs: Vec<StyleRun>,
+    pub images: Vec<ImageReference>,
+    pub blocks: Vec<BlockBoundary>,
+    pub links: Vec<crate::ContentLink>,
+    pub warnings: Vec<String>,
+    pub codes: Vec<CodeBlock>,
+    pub(crate) anchors: Vec<(String, usize)>,
+    pub(crate) legacy_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExtractedText {
+    pub(crate) text: String,
+    pub(crate) anchors: Vec<(String, usize)>,
+    pub(crate) legacy_text: Option<String>,
+    pub(crate) runs: Vec<StyleRun>,
+    pub(crate) images: Vec<ImageReference>,
+    pub(crate) blocks: Vec<BlockBoundary>,
+    pub(crate) links: Vec<crate::ContentLink>,
+    pub(crate) codes: Vec<CodeBlock>,
+}
+
+impl ExtractedText {
+    #[cfg(test)]
+    pub(crate) fn anchor(&self, id: &str) -> Option<usize> {
+        self.anchors
+            .iter()
+            .find(|(candidate, _)| candidate == id)
+            .map(|(_, offset)| *offset)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
+    Ok(extract_styled(bytes, max_bytes, Some(&mut StyleSheet::default()))?.text)
+}
+
+pub(crate) fn extract_with_anchors(bytes: &[u8], max_bytes: usize) -> Result<ExtractedText> {
+    extract_impl(bytes, max_bytes, None, false)
+}
+
+pub(crate) fn extract_styled(
+    bytes: &[u8],
+    max_bytes: usize,
+    sheet: Option<&mut StyleSheet>,
+) -> Result<ExtractedText> {
+    extract_impl(bytes, max_bytes, sheet, true)
+}
+
+fn extract_impl(
+    bytes: &[u8],
+    max_bytes: usize,
+    mut sheet: Option<&mut StyleSheet>,
+    formatting: bool,
+) -> Result<ExtractedText> {
     let events = xml::parse(
         bytes,
         XmlLimits {
@@ -27,17 +119,65 @@ pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
         .try_reserve(bytes.len().min(64 * 1024))
         .map_err(|_| EpubError::AllocationFailed)?;
 
+    let mut anchors = Vec::new();
+    anchors
+        .try_reserve(32)
+        .map_err(|_| EpubError::AllocationFailed)?;
+    let mut named_anchors = Vec::new();
     let mut depth = 0_usize;
     let mut body_depth = None;
     let mut suppressed_depth = None;
     let mut seen_body = false;
     let mut pending_space = false;
+    let mut whitespace = Whitespace::default();
+    let mut legacy_candidate = false;
+    let mut styles = vec![TextStyle::default()];
+    let mut runs: Vec<StyleRun> = Vec::new();
+    let mut images = Vec::new();
+    let mut blocks = Vec::new();
+    let mut open_blocks = Vec::new();
+    let mut links = crate::links::LinkCollector::default();
+    let mut codes = code::CodeCollector::default();
+    let mut svg_capture: Option<(usize, usize, String)> = None;
 
     for event in &events {
+        if let Some((_, _, buffer)) = &mut svg_capture {
+            crate::svg_inline::append(buffer, event, false, max_bytes)?;
+        }
         match event {
             Event::Start(element) => {
                 let current = depth + 1;
                 let name = local_name(&element.name);
+                let parent = *styles.last().unwrap_or(&TextStyle::default());
+                let (style, box_style) = match sheet.as_deref_mut() {
+                    Some(sheet) => sheet.compute_with_box(element, parent)?,
+                    None => (parent, BoxStyle::default()),
+                };
+                legacy_candidate |= formatting
+                    && (name == "pre" || name == "br" || style.white_space.preserves_breaks());
+                if sheet.is_some()
+                    && name == "svg"
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                    && !style.hidden
+                {
+                    if images.len() >= 1024 {
+                        return Err(EpubError::LimitExceeded("XHTML image references"));
+                    }
+                    let index = images.len();
+                    let mut buffer = String::new();
+                    crate::svg_inline::append(&mut buffer, event, true, max_bytes)?;
+                    images.push(ImageReference {
+                        offset: output.len(),
+                        source: format!("<inline-svg-{index}>"),
+                        alt: "SVG illustration".into(),
+                        width: None,
+                        height: None,
+                        inline_svg: None,
+                    });
+                    svg_capture = Some((current, index, buffer));
+                }
                 if name == "body" && body_depth.is_none() {
                     body_depth = Some(current);
                     seen_body = true;
@@ -46,52 +186,282 @@ pub(crate) fn extract(bytes: &[u8], max_bytes: usize) -> Result<String> {
                     suppressed_depth = Some(current);
                 } else if body_depth.is_some() && suppressed_depth.is_none() {
                     if name == "br" {
-                        line_break(&mut output, max_bytes)?;
+                        if formatting {
+                            let start = output.len();
+                            whitespace.explicit_break(&mut output, max_bytes)?;
+                            let mut break_style = style;
+                            break_style.white_space = WhiteSpace::PreLine;
+                            if sheet.is_some() {
+                                record_run(&mut runs, start..output.len(), break_style)?;
+                            }
+                        } else {
+                            line_break(&mut output, max_bytes)?;
+                        }
                         pending_space = false;
-                    } else if is_block(name) {
-                        block_break(&mut output, max_bytes)?;
+                    } else if is_block(name) && (formatting || name != "pre") {
+                        if formatting {
+                            whitespace.block_break(&mut output, max_bytes)?;
+                        } else {
+                            block_break(&mut output, max_bytes)?;
+                        }
                         pending_space = false;
                     }
                 }
+                if formatting
+                    && sheet.is_some()
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                {
+                    codes.start(element, current, output.len(), style);
+                }
+                let boxed = sheet.is_some()
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                    && !style.hidden
+                    && (is_block(name) || name == "body")
+                    && box_style.active();
+                if boxed {
+                    if blocks.len() >= 100_000 {
+                        return Err(EpubError::LimitExceeded("XHTML block boundaries"));
+                    }
+                    blocks.push(BlockBoundary {
+                        offset: output.len(),
+                        images_before: images.len(),
+                        style: Some(box_style),
+                    });
+                }
+                if body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && !is_suppressed(name)
+                    && let Some(id) = element.attribute("id")
+                {
+                    record_anchor(&mut anchors, id, output.len())?;
+                }
+                if name == "a"
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && let Some(name) = element.attribute("name")
+                {
+                    record_anchor(&mut named_anchors, name, output.len())?;
+                }
+                if anchors.len().saturating_add(named_anchors.len()) > 16_384 {
+                    return Err(EpubError::LimitExceeded("XHTML anchor metadata"));
+                }
+                if sheet.is_some()
+                    && name == "img"
+                    && svg_capture.is_none()
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && !style.hidden
+                {
+                    if images.len() >= 1024 {
+                        return Err(EpubError::LimitExceeded("XHTML image references"));
+                    }
+                    images.push(ImageReference {
+                        offset: output.len(),
+                        inline_svg: None,
+                        source: element.attribute("src").unwrap_or("").to_owned(),
+                        alt: element
+                            .attribute("alt")
+                            .unwrap_or("Image")
+                            .chars()
+                            .take(256)
+                            .collect(),
+                        width: element
+                            .attribute("width")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|v| *v > 0),
+                        height: element
+                            .attribute("height")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|v| *v > 0),
+                    });
+                }
+                if sheet.is_some()
+                    && name == "a"
+                    && body_depth.is_some()
+                    && suppressed_depth.is_none()
+                    && svg_capture.is_none()
+                    && !style.hidden
+                {
+                    links.start(element, current, output.len(), images.len())?;
+                }
                 if !element.empty {
+                    styles.push(style);
+                    open_blocks.push(boxed);
                     depth = current;
-                } else if body_depth == Some(current) && name == "body" {
-                    body_depth = None;
+                } else {
+                    if boxed {
+                        blocks.push(BlockBoundary {
+                            offset: output.len(),
+                            images_before: images.len(),
+                            style: None,
+                        });
+                    }
+                    if body_depth == Some(current) && name == "body" {
+                        body_depth = None;
+                    }
+                    if suppressed_depth == Some(current) {
+                        suppressed_depth = None;
+                    }
                 }
             }
             Event::Text(text) if body_depth.is_some() && suppressed_depth.is_none() => {
-                append_collapsed(&mut output, text, &mut pending_space, max_bytes)?;
+                let start = output.len();
+                let text_style = *styles.last().unwrap_or(&TextStyle::default());
+                if formatting {
+                    whitespace.append(
+                        &mut output,
+                        text,
+                        text_style.white_space,
+                        &mut pending_space,
+                        max_bytes,
+                    )?;
+                } else {
+                    append_collapsed(&mut output, text, &mut pending_space, max_bytes)?;
+                }
+                if sheet.is_some() && output.len() > start {
+                    let mut style = text_style;
+                    if svg_capture.is_some() {
+                        style.hidden = true;
+                    }
+                    record_run(&mut runs, start..output.len(), style)?;
+                }
             }
             Event::Text(_) => {}
             Event::End(name) => {
+                codes.end(depth, output.len());
+                if local_name(name) == "a" {
+                    links.end(depth, output.len(), images.len());
+                }
+                if open_blocks.pop() == Some(true) {
+                    blocks.push(BlockBoundary {
+                        offset: output.len(),
+                        images_before: images.len(),
+                        style: None,
+                    });
+                }
                 let local = local_name(name);
                 if suppressed_depth == Some(depth) {
                     suppressed_depth = None;
-                } else if body_depth.is_some() && is_block(local) {
-                    block_break(&mut output, max_bytes)?;
+                } else if body_depth.is_some() && is_block(local) && (formatting || local != "pre")
+                {
+                    if formatting {
+                        whitespace.block_break(&mut output, max_bytes)?;
+                    } else {
+                        block_break(&mut output, max_bytes)?;
+                    }
                     pending_space = false;
                 }
                 if body_depth == Some(depth) && local == "body" {
                     body_depth = None;
                 }
                 depth = depth.saturating_sub(1);
+                if styles.len() > 1 {
+                    styles.pop();
+                }
             }
+        }
+        let closed_svg = svg_capture.as_ref().is_some_and(|(level, _, _)| {
+            *level == depth + 1
+                && match event {
+                    Event::End(name) => local_name(name) == "svg",
+                    Event::Start(element) => element.empty && local_name(&element.name) == "svg",
+                    _ => false,
+                }
+        });
+        if closed_svg && let Some((_, index, buffer)) = svg_capture.take() {
+            images[index].inline_svg = Some(buffer);
         }
     }
     if !seen_body {
         return Err(EpubError::Invalid("XHTML body element is absent"));
     }
-    while output.ends_with([' ', '\n']) {
+    while output.len() > whitespace.protected_end && output.ends_with([' ', '\n']) {
         output.pop();
     }
-    Ok(output)
+    // HTML fragment lookup prefers any matching id over legacy <a name>, even
+    // when a same-named legacy anchor appears earlier in document order.
+    for (name, offset) in named_anchors {
+        record_anchor(&mut anchors, &name, offset)?;
+    }
+    for (_, offset) in &mut anchors {
+        *offset = (*offset).min(output.len());
+    }
+    for run in &mut runs {
+        run.range.end = run.range.end.min(output.len());
+    }
+    runs.retain(|run| !run.range.is_empty());
+    for image in &mut images {
+        image.offset = image.offset.min(output.len());
+    }
+    for boundary in &mut blocks {
+        boundary.offset = boundary.offset.min(output.len());
+    }
+    let links = links.finish(output.len());
+    let codes = codes.finish(output.len());
+    let legacy_text = if legacy_candidate {
+        let legacy = extract_with_anchors(bytes, max_bytes)?.text;
+        (legacy != output).then_some(legacy)
+    } else {
+        None
+    };
+    Ok(ExtractedText {
+        text: output,
+        legacy_text,
+        anchors,
+        runs,
+        images,
+        blocks,
+        links,
+        codes,
+    })
+}
+
+fn record_run(runs: &mut Vec<StyleRun>, range: Range<usize>, style: TextStyle) -> Result<()> {
+    if range.is_empty() {
+        return Ok(());
+    }
+    if let Some(last) = runs
+        .last_mut()
+        .filter(|last| last.range.end == range.start && last.style == style)
+    {
+        last.range.end = range.end;
+    } else {
+        if runs.len() >= 100_000 {
+            return Err(EpubError::LimitExceeded("XHTML style runs"));
+        }
+        runs.push(StyleRun { range, style });
+    }
+    Ok(())
+}
+
+fn record_anchor(anchors: &mut Vec<(String, usize)>, id: &str, offset: usize) -> Result<()> {
+    if id.is_empty() || anchors.iter().any(|(existing, _)| existing == id) {
+        return Ok(());
+    }
+    if id.len() > 4096 || anchors.len() >= 16_384 {
+        return Err(EpubError::LimitExceeded("XHTML anchor metadata"));
+    }
+    let mut value = String::new();
+    value
+        .try_reserve_exact(id.len())
+        .map_err(|_| EpubError::AllocationFailed)?;
+    value.push_str(id);
+    anchors
+        .try_reserve(1)
+        .map_err(|_| EpubError::AllocationFailed)?;
+    anchors.push((value, offset));
+    Ok(())
 }
 
 fn is_suppressed(name: &str) -> bool {
     matches!(name, "script" | "style" | "template" | "head")
 }
 
-fn is_block(name: &str) -> bool {
+pub(crate) fn is_block(name: &str) -> bool {
     matches!(
         name,
         "address"
@@ -118,6 +488,7 @@ fn is_block(name: &str) -> bool {
             | "nav"
             | "ol"
             | "p"
+            | "pre"
             | "section"
             | "table"
             | "tr"
@@ -132,7 +503,7 @@ fn append_collapsed(
     limit: usize,
 ) -> Result<()> {
     for ch in text.chars() {
-        if ch.is_whitespace() {
+        if is_collapsible_whitespace(ch) {
             *pending_space = !output.is_empty() && !output.ends_with('\n');
             continue;
         }
@@ -143,6 +514,10 @@ fn append_collapsed(
         push(output, ch, limit)?;
     }
     Ok(())
+}
+
+fn is_collapsible_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r')
 }
 
 fn block_break(output: &mut String, limit: usize) -> Result<()> {
@@ -200,6 +575,21 @@ mod tests {
     }
 
     #[test]
+    fn element_ids_map_to_canonical_text_offsets() {
+        let extracted = extract_with_anchors(
+            br#"<html><body id="top"><p>Before</p><section id="target"><h2 xml:id="heading">Target</h2><p>After</p></section></body></html>"#,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(extracted.anchor("top"), Some(0));
+        let target = extracted.anchor("target").unwrap();
+        let heading = extracted.anchor("heading").unwrap();
+        assert_eq!(&extracted.text[target..target + "Target".len()], "Target");
+        assert_eq!(target, heading);
+        assert!(extracted.anchor("missing").is_none());
+    }
+
+    #[test]
     fn common_xhtml_doctype_does_not_block_body_text_extraction() {
         let text = extract(
             br#"<?xml version="1.0"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Chapter text</p></body></html>"#,
@@ -217,6 +607,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn legacy_named_entities_preserve_non_breaking_space_in_reader_text() {
+        let text = extract(
+            b"<!DOCTYPE html><html><body><p>A&nbsp;B&mdash;C&hellip;</p></body></html>",
+            1024,
+        )
+        .unwrap();
+        assert_eq!(text, "A\u{00a0}B—C…");
     }
 
     #[test]

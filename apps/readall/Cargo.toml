@@ -7,7 +7,7 @@ build = "build.rs"
 
 [features]
 default = ["wayland"]
-wayland = ["readall-platform/wayland"]
+wayland = ["readall-platform/wayland", "dep:wl-clipboard-rs"]
 
 [build-dependencies]
 readall-font.workspace = true
@@ -17,7 +17,12 @@ readall-epub.workspace = true
 readall-font.workspace = true
 readall-core.workspace = true
 readall-render.workspace = true
+readall-image.workspace = true
 readall-platform.workspace = true
+rustybuzz = "=0.20.1"
+unicode-bidi = "=0.3.18"
+unicode-script = "=0.5.8"
+wl-clipboard-rs = { version = "=0.9.3", optional = true }
 
 [lints]
 workspace = true

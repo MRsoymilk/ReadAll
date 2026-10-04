@@ -35,7 +35,7 @@ pub(crate) struct Options {
 }
 impl Options {
     pub(crate) fn parse(args: &[OsString]) -> Result<Self> {
-        if args.len() % 2 != 0 {
+        if !args.len().is_multiple_of(2) {
             return Err("each render-text option requires a value".into());
         }
         let mut result = Self {
@@ -107,7 +107,7 @@ fn number(value: &OsString) -> Result<u32> {
     Ok(text.parse()?)
 }
 #[derive(Debug)]
-enum PageError {
+pub(crate) enum PageError {
     Font(FontError),
     Render(RenderError),
     Missing(char),
@@ -150,63 +150,83 @@ struct CachedGlyph {
     advance: f32,
     mask: Option<GlyphMask>,
 }
-struct GlyphCache<'f, 'data> {
-    font: &'f Font<'data>,
+pub(crate) struct GlyphCache<'f, 'data> {
+    font: std::borrow::Cow<'f, Font<'data>>,
     scale: f32,
     allow_missing: bool,
     entries: HashMap<u16, CachedGlyph>,
     missing: HashSet<char>,
     decoded_points: usize,
     mask_bytes: usize,
-    raster_work: u64,
+    mask_limit: usize,
+    pub(crate) raster_work: u64,
 }
 impl<'f, 'data> GlyphCache<'f, 'data> {
-    fn new(font: &'f Font<'data>, size: u32, allow_missing: bool) -> Self {
+    pub(crate) fn new(font: &'f Font<'data>, size: u32, allow_missing: bool) -> Self {
+        Self::from_font(std::borrow::Cow::Borrowed(font), size, allow_missing)
+    }
+    pub(crate) fn owned(font: Font<'data>, size: u32, allow_missing: bool) -> Self {
+        Self::from_font(std::borrow::Cow::Owned(font), size, allow_missing)
+    }
+    fn from_font(font: std::borrow::Cow<'f, Font<'data>>, size: u32, allow_missing: bool) -> Self {
+        let scale = size as f32 / f32::from(font.metrics().units_per_em);
         Self {
             font,
-            scale: size as f32 / f32::from(font.metrics().units_per_em),
+            scale,
             allow_missing,
             entries: HashMap::new(),
             missing: HashSet::new(),
             decoded_points: 0,
             mask_bytes: 0,
+            mask_limit: 32 * 1024 * 1024,
             raster_work: 0,
         }
     }
     fn ensure(&mut self, ch: char) -> std::result::Result<u16, PageError> {
         let index = self.font.glyph_index(ch)?;
         if index == 0 {
-            if !self.allow_missing {
-                return Err(PageError::Missing(ch));
+            self.record_missing(ch)?;
+        }
+        self.ensure_index(index)?;
+        Ok(index)
+    }
+    pub(crate) fn record_missing(&mut self, ch: char) -> std::result::Result<(), PageError> {
+        if !self.allow_missing {
+            return Err(PageError::Missing(ch));
+        }
+        if !self.missing.contains(&ch) {
+            if self.missing.len() >= 8192 {
+                return Err(PageError::Budget("missing character inventory"));
             }
-            if !self.missing.contains(&ch) {
-                if self.missing.len() >= 8192 {
-                    return Err(PageError::Budget("missing character inventory"));
-                }
-                self.missing
-                    .try_reserve(1)
-                    .map_err(|_| PageError::Budget("missing character allocation"))?;
-                self.missing.insert(ch);
-            }
+            self.missing
+                .try_reserve(1)
+                .map_err(|_| PageError::Budget("missing character allocation"))?;
+            self.missing.insert(ch);
+        }
+        Ok(())
+    }
+    fn ensure_index(&mut self, index: u16) -> std::result::Result<(), PageError> {
+        if index >= self.font.glyph_count() {
+            return Err(PageError::Budget("shaped glyph outside font"));
         }
         if !self.entries.contains_key(&index) {
             if self.entries.len() >= 8192 {
-                return Err(PageError::Budget("distinct glyphs"));
+                self.entries.clear();
+                self.mask_bytes = 0;
             }
-            let glyph = self.font.glyph(index)?;
-            self.charge_points(glyph.outline.points().len())?;
+            let metrics = self.font.horizontal_metrics(index)?;
             self.entries
                 .try_reserve(1)
                 .map_err(|_| PageError::Budget("glyph cache allocation"))?;
             self.entries.insert(
                 index,
                 CachedGlyph {
-                    advance: f32::from(glyph.metrics.advance_width) * self.scale,
+                    advance: f32::from(metrics.advance_width) * self.scale,
                     mask: None,
                 },
             );
         }
-        Ok(index)
+        Ok(())
     }
     fn charge_points(&mut self, count: usize) -> std::result::Result<(), PageError> {
         self.decoded_points = self
@@ -216,26 +236,52 @@ impl<'f, 'data> GlyphCache<'f, 'data> {
             .ok_or(PageError::Budget("decoded outline points"))?;
         Ok(())
     }
-    fn advance(&mut self, ch: char) -> std::result::Result<f32, PageError> {
+    pub(crate) fn advance(&mut self, ch: char) -> std::result::Result<f32, PageError> {
         let index = self.ensure(ch)?;
         Ok(self.entries[&index].advance)
     }
-    fn mask(&mut self, ch: char) -> std::result::Result<&GlyphMask, PageError> {
+    pub(crate) fn begin_page(&mut self) {
+        self.raster_work = 0;
+        self.decoded_points = 0;
+    }
+    pub(crate) fn set_mask_limit(&mut self, bytes: usize) {
+        self.mask_limit = bytes;
+    }
+    pub(crate) fn cached_masks(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.mask.is_some())
+            .count()
+    }
+    pub(crate) fn missing(&self) -> &HashSet<char> {
+        &self.missing
+    }
+    pub(crate) fn mask(&mut self, ch: char) -> std::result::Result<&GlyphMask, PageError> {
         let index = self.ensure(ch)?;
+        self.mask_index(index)
+    }
+    pub(crate) fn mask_index(&mut self, index: u16) -> std::result::Result<&GlyphMask, PageError> {
+        self.ensure_index(index)?;
         if self.entries[&index].mask.is_none() {
             let glyph = self.font.glyph(index)?;
             self.charge_points(glyph.outline.points().len())?;
             let mask = rasterize(&glyph.outline, self.scale, RasterLimits::default())?;
-            self.mask_bytes = self
-                .mask_bytes
-                .checked_add(mask.coverage().len())
-                .filter(|n| *n <= 32 * 1024 * 1024)
-                .ok_or(PageError::Budget("glyph mask cache"))?;
-            self.raster_work = self
+            if mask.coverage().len() > self.mask_limit {
+                return Err(PageError::Budget("glyph mask cache"));
+            }
+            let work = self
                 .raster_work
                 .checked_add(mask.work())
                 .filter(|n| *n <= 128 * 1024 * 1024)
                 .ok_or(PageError::Budget("aggregate raster work"))?;
+            if self.mask_bytes.saturating_add(mask.coverage().len()) > self.mask_limit {
+                for entry in self.entries.values_mut() {
+                    entry.mask = None;
+                }
+                self.mask_bytes = 0;
+            }
+            self.mask_bytes += mask.coverage().len();
+            self.raster_work = work;
             self.entries
                 .get_mut(&index)
                 .ok_or(PageError::Budget("missing cached glyph"))?
@@ -247,11 +293,21 @@ impl<'f, 'data> GlyphCache<'f, 'data> {
             .ok_or(PageError::Budget("missing glyph mask"))
     }
 }
+#[derive(Debug, Clone)]
+pub(crate) struct TextHit {
+    pub rect: Rect,
+    pub start: usize,
+    pub end: usize,
+}
+#[derive(Clone)]
 pub(crate) struct RenderedPage {
     pub surface: Surface,
     pub page: usize,
     pub pages: usize,
     pub locator: TextLocator,
+    pub image_index: Option<usize>,
+    pub hits: Vec<TextHit>,
+    pub image_hits: Vec<(Rect, usize)>,
     pub missing: Vec<char>,
     pub cached_masks: usize,
 }
@@ -359,6 +415,10 @@ impl<'font, 'data> PageRenderer<'font, 'data> {
         options: &Options,
     ) -> Result<RenderedPage> {
         self.ensure_layout(document, options)?;
+        // Raster-work is a per-page safety budget. Cached masks persist across pages,
+        // but work spent producing earlier pages must not eventually poison a normal
+        // long-running reading session.
+        self.cache.begin_page();
         let cached = self
             .layout
             .as_ref()
@@ -431,6 +491,9 @@ impl<'font, 'data> PageRenderer<'font, 'data> {
             page,
             pages: cached.layout.page_count(),
             locator,
+            image_index: None,
+            hits: Vec::new(),
+            image_hits: Vec::new(),
             missing,
             cached_masks,
         })
@@ -525,6 +588,48 @@ mod tests {
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
+    #[test]
+    fn measuring_glyphs_does_not_decode_outlines_and_page_work_resets() {
+        let bytes = crate::test_font::make_font();
+        let font = Font::parse(&bytes, 0, FontLimits::default()).unwrap();
+        let mut renderer = PageRenderer::new(&font, 24, false).unwrap();
+        renderer.cache.advance('A').unwrap();
+        assert_eq!(renderer.cache.decoded_points, 0);
+        renderer.cache.raster_work = 128 * 1024 * 1024;
+        renderer.cache.decoded_points = 2_000_000;
+        let options = Options::parse(&args(&[
+            "--font",
+            "fixture.ttf",
+            "--width",
+            "200",
+            "--height",
+            "128",
+            "--margin",
+            "16",
+        ]))
+        .unwrap();
+        let document = TextDocument::from_bytes(b"AW", Limits::default()).unwrap();
+        assert!(renderer.render(&document, &options).is_ok());
+        assert!(renderer.cache.raster_work < 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn bounded_glyph_masks_evict_without_poisoning_later_pages() {
+        let bytes = crate::test_font::make_font();
+        let font = Font::parse(&bytes, 0, FontLimits::default()).unwrap();
+        let mut cache = GlyphCache::new(&font, 24, false);
+        let a = cache.mask('A').unwrap().coverage().len();
+        let w = cache.mask('W').unwrap().coverage().len();
+        let mut cache = GlyphCache::new(&font, 24, false);
+        cache.set_mask_limit(a.max(w));
+        for _ in 0..8 {
+            cache.begin_page();
+            cache.mask('A').unwrap();
+            cache.mask('W').unwrap();
+            assert!(cache.mask_bytes <= a.max(w));
+        }
+    }
+
     #[test]
     fn options_validate_geometry_and_missing_policy() {
         let options = Options::parse(&args(&[

@@ -4,5 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+unicode-linebreak = "=0.1.5"
+unicode-segmentation = "=1.13.3"
+
 [lints]
 workspace = true

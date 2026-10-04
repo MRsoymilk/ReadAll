@@ -1,4 +1,6 @@
 //! Host adapters. Linux Wayland is opt-in; Android SAF and other window backends remain unimplemented.
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub mod web_link;
 pub mod window;
 
 // Necessary native FFI is isolated; all other platform modules deny unsafe code.

@@ -10,6 +10,13 @@ pub(crate) fn run(_: &[OsString], _: &mut impl Write) -> Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
+    mod async_reader;
+    #[cfg(test)]
+    mod loading_tests;
+    mod motion;
+    #[cfg(test)]
+    mod selection_tests;
+    mod tools;
     use super::*;
     use crate::{
         diagnostics::{ResultContext, boxed_stage},
@@ -26,7 +33,7 @@ mod enabled {
     use readall_font::{Font, FontLimits};
     use readall_platform::{
         LocalFileSource,
-        window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
+        window::{Action, WindowHandler, WindowOptions, WindowResult},
     };
     use readall_render::{Color, DrawCommand, Rect, Surface};
     use std::{
@@ -55,6 +62,7 @@ mod enabled {
         surface: Surface,
         ui_font: UiFont,
         toc: Vec<TocEntry>,
+        toc_loaded: bool,
         toc_selected: usize,
         toc_scroll: usize,
         toolbar: ToolbarMode,
@@ -62,6 +70,8 @@ mod enabled {
         title_scroll: u32,
         title_marquee_span: u32,
         close_requested: bool,
+        tools: tools::Tools,
+        motion: motion::Motion,
     }
 
     fn point_in(rect: Rect, x: i32, y: i32) -> bool {
@@ -74,29 +84,51 @@ mod enabled {
     }
 
     impl<'book, 'archive, 'font, 'font_bytes> ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
+        #[cfg(test)]
         fn new(
             session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
             progress: Option<EpubProgressStore>,
             ui_font: UiFont,
         ) -> WindowResult<Self> {
+            let mut reader = Self::new_lazy(session, progress, ui_font)?;
+            reader.ensure_toc()?;
+            Ok(reader)
+        }
+        fn ensure_toc(&mut self) -> WindowResult<()> {
+            if !self.toc_loaded {
+                let entries = self.session.toc_entries()?;
+                self.toc = entries;
+                self.toc_loaded = true;
+                self.sync_toc_selection();
+            }
+            Ok(())
+        }
+        fn new_lazy(
+            session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
+            progress: Option<EpubProgressStore>,
+            ui_font: UiFont,
+        ) -> WindowResult<Self> {
             let surface = session.frame().surface.clone();
-            let toc = session.toc_entries()?;
-            let toc_selected = toc.iter().position(|entry| entry.current).unwrap_or(0);
+            let toc = Vec::new();
             let mut reader = ReaderWindow {
                 session,
                 progress,
                 surface,
                 ui_font,
                 toc,
-                toc_selected,
+                toc_loaded: false,
+                toc_selected: 0,
                 toc_scroll: 0,
                 toolbar: ToolbarMode::Expanded,
                 pointer: None,
                 title_scroll: 0,
                 title_marquee_span: 0,
                 close_requested: false,
+                tools: tools::Tools::default(),
+                motion: motion::Motion::default(),
             };
-            reader.keep_toc_selected_visible();
+            reader.sync_toc_selection();
+            reader.reset_motion()?;
             reader.refresh_surface()?;
             Ok(reader)
         }
@@ -193,7 +225,17 @@ mod enabled {
             let before = self.hover_target();
             self.pointer = pointer;
             let after = self.hover_target();
-            if before == after {
+            // One active row, controlled by the most recent navigation or pointer
+            // event. Hovering never changes the actual reading position.
+            let selection_changed = if let ReaderHover::TocRow(index) = after
+                && self.toc_selected != index
+            {
+                self.toc_selected = index;
+                true
+            } else {
+                false
+            };
+            if before == after && !selection_changed {
                 return Ok(false);
             }
             self.refresh_surface()?;
@@ -202,11 +244,18 @@ mod enabled {
 
         fn refresh_surface(&mut self) -> WindowResult<()> {
             self.surface = self.session.frame().surface.clone();
+            self.draw_link_marks()?;
+            self.draw_marks()?;
+            self.draw_page_motion()?;
             let width = self.surface.width();
             let height = self.surface.height();
-            let header = Color::rgba(248, 249, 251, 235);
+            let (background, theme_ink) = self.session.settings().theme.colors();
+            let header = Color {
+                a: 245,
+                ..background
+            };
             let border = Color::rgba(224, 228, 234, 255);
-            let ink = Color::rgba(48, 54, 64, 255);
+            let ink = theme_ink;
             let muted = Color::rgba(112, 121, 133, 255);
             let accent = Color::rgba(55, 104, 190, 255);
             self.surface.draw(&[
@@ -222,8 +271,8 @@ mod enabled {
             let (chapter, chapters) = self.session.chapter_position();
             let (page, pages) = self.session.page_position();
             let status = format!(
-                "第 {chapter}/{chapters} 章 · 第 {page}/{pages} 页 · {} px",
-                self.session.font_size()
+                "第 {chapter}/{chapters} 章 · 第 {page}/{pages} 页 · {:.1}%",
+                self.session.overall_progress() * 100.0
             );
             {
                 let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
@@ -274,6 +323,7 @@ mod enabled {
                 ToolbarMode::Collapsed => self.draw_collapsed_control()?,
                 ToolbarMode::Expanded | ToolbarMode::Toc => self.draw_toolbar()?,
             }
+            self.draw_tools()?;
             Ok(())
         }
 
@@ -442,10 +492,8 @@ mod enabled {
                     color: Color::rgba(221, 226, 233, 255),
                 },
             ])?;
-            let hover = self.hover_target();
-            let current_spine = self.session.anchor().spine_index();
             let visible = self.visible_toc_rows();
-            for (row, entry) in self
+            for (row, _entry) in self
                 .toc
                 .iter()
                 .skip(self.toc_scroll)
@@ -454,23 +502,13 @@ mod enabled {
             {
                 let index = self.toc_scroll + row;
                 let y = panel.y + 48 + row as i32 * 38;
-                let selected = index == self.toc_selected;
-                let current = entry.spine == current_spine;
-                let hovered = hover == ReaderHover::TocRow(index);
-                if selected || current || hovered {
+                if index == self.toc_selected {
                     self.surface.draw(&[DrawCommand::FillRect {
                         rect: Rect::new(panel.x + 8, y, panel.width.saturating_sub(16), 34),
-                        color: if hovered {
-                            Color::rgba(220, 232, 249, 245)
-                        } else if current {
-                            Color::rgba(231, 238, 251, 245)
-                        } else {
-                            Color::rgba(238, 241, 246, 245)
-                        },
+                        color: Color::rgba(220, 232, 249, 245),
                     }])?;
                 }
             }
-            let text_width = panel.width.saturating_sub(56);
             let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
             text.draw(
                 panel.x + 18,
@@ -487,25 +525,56 @@ mod enabled {
                 .enumerate()
             {
                 let y = panel.y + 57 + row as i32 * 38;
+                let indent = entry.depth.min(6) as i32 * 16;
+                let text_width = panel
+                    .width
+                    .saturating_sub(56_u32.saturating_add(indent as u32));
                 let title = text.fit(14, &entry.title, text_width)?;
-                text.draw(panel.x + 20, y, 14, &title, Color::rgba(60, 67, 78, 255))?;
+                text.draw(
+                    panel.x + 20 + indent,
+                    y,
+                    14,
+                    &title,
+                    Color::rgba(60, 67, 78, 255),
+                )?;
             }
             Ok(())
         }
 
+        fn current_toc_index(&self) -> Option<usize> {
+            let anchor = self.session.anchor();
+            let current_spine = anchor.spine_index();
+            let current_offset = usize::try_from(anchor.utf8_offset()).unwrap_or(usize::MAX);
+            self.toc
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.spine == current_spine && entry.offset <= current_offset)
+                .max_by_key(|(_, entry)| entry.offset)
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    self.toc
+                        .iter()
+                        .position(|entry| entry.spine == current_spine)
+                })
+        }
+
         fn sync_toc_selection(&mut self) {
-            let current = self.session.anchor().spine_index();
-            if let Some(index) = self.toc.iter().position(|entry| entry.spine == current) {
+            if let Some(index) = self.current_toc_index() {
                 self.toc_selected = index;
                 self.keep_toc_selected_visible();
             }
         }
 
         fn jump_to_toc(&mut self, index: usize) -> WindowResult<bool> {
-            let Some(spine) = self.toc.get(index).map(|entry| entry.spine) else {
+            let Some((spine, offset)) =
+                self.toc.get(index).map(|entry| (entry.spine, entry.offset))
+            else {
                 return Ok(false);
             };
-            let changed = self.session.jump_to_spine(spine)?;
+            self.freeze_motion()?;
+            let changed = self.session.jump_to_toc_target(spine, offset)?;
+            self.reset_motion()?;
+            self.tools.clear_selection();
             self.toc_selected = index;
             self.keep_toc_selected_visible();
             self.toolbar = ToolbarMode::Expanded;
@@ -533,9 +602,14 @@ mod enabled {
         }
 
         fn perform_reader_action(&mut self, action: ReaderAction) -> WindowResult<bool> {
+            self.animated_page_action(action)
+        }
+
+        fn perform_reader_action_instant(&mut self, action: ReaderAction) -> WindowResult<bool> {
             match EpubSession::action(&mut self.session, action) {
                 Ok(changed) => {
                     if changed {
+                        self.tools.clear_selection();
                         self.save_progress();
                         self.sync_toc_selection();
                     }
@@ -544,12 +618,15 @@ mod enabled {
                 }
                 Err(error) => {
                     eprintln!("ReadAll: keeping current EPUB page: {error}");
-                    Ok(false)
+                    self.tools.status = format!("页面未切换：{error}");
+                    self.refresh_surface()?;
+                    Ok(true)
                 }
             }
         }
 
         fn handle_toolbar_button(&mut self, index: usize) -> WindowResult<bool> {
+            self.tools.cancel_gesture();
             match index {
                 0 => {
                     self.toolbar = ToolbarMode::Expanded;
@@ -559,6 +636,7 @@ mod enabled {
                     self.toolbar = if self.toolbar == ToolbarMode::Toc {
                         ToolbarMode::Expanded
                     } else {
+                        self.ensure_toc()?;
                         self.sync_toc_selection();
                         ToolbarMode::Toc
                     };
@@ -593,17 +671,13 @@ mod enabled {
                     self.refresh_surface()?;
                     return Ok(true);
                 }
-                return self.perform_reader_action(if x < self.surface.width() as i32 / 2 {
-                    ReaderAction::Previous
-                } else {
-                    ReaderAction::Next
-                });
+                return Ok(false);
             }
 
-            if self.toolbar == ToolbarMode::Toc {
-                if let ReaderHover::TocRow(index) = self.hover_target_at(x, y) {
-                    return self.jump_to_toc(index);
-                }
+            if self.toolbar == ToolbarMode::Toc
+                && let ReaderHover::TocRow(index) = self.hover_target_at(x, y)
+            {
+                return self.jump_to_toc(index);
             }
             for index in 0..6 {
                 if point_in(self.toolbar_button_rect(index), x, y) {
@@ -615,11 +689,8 @@ mod enabled {
                 self.refresh_surface()?;
                 return Ok(true);
             }
-            self.perform_reader_action(if x < self.surface.width() as i32 / 2 {
-                ReaderAction::Previous
-            } else {
-                ReaderAction::Next
-            })
+            // Body clicks are handled by selection/link gestures, never by page side.
+            Ok(false)
         }
 
         fn hover_target_at(&self, x: i32, y: i32) -> ReaderHover {
@@ -642,7 +713,16 @@ mod enabled {
                         {
                             let row = ((y - row_area_y) / 38) as usize;
                             let index = self.toc_scroll.saturating_add(row);
-                            if row < self.visible_toc_rows() && index < self.toc.len() {
+                            let rect = Rect::new(
+                                panel.x + 8,
+                                row_area_y + row as i32 * 38,
+                                panel.width.saturating_sub(16),
+                                34,
+                            );
+                            if row < self.visible_toc_rows()
+                                && index < self.toc.len()
+                                && point_in(rect, x, y)
+                            {
                                 return ReaderHover::TocRow(index);
                             }
                         }
@@ -669,14 +749,55 @@ mod enabled {
 
     impl WindowHandler for ReaderWindow<'_, '_, '_, '_> {
         fn resize(&mut self, width: u32, height: u32) -> WindowResult<bool> {
+            if (width, height) != (self.surface.width(), self.surface.height()) {
+                self.freeze_motion()?;
+                self.tools.cancel_gesture();
+            }
             let changed = EpubSession::resize(&mut self.session, width, height)?;
             if changed {
+                self.reset_motion()?;
                 self.refresh_surface()?;
             }
             Ok(changed)
         }
 
+        fn text_input_active(&self) -> bool {
+            self.tools.editing()
+        }
+        fn precise_scroll(&self) -> bool {
+            true
+        }
+        fn idle_tick(&mut self) -> WindowResult<bool> {
+            self.prefetch_page()
+        }
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if let Some(changed) = self.motion_action(action)? {
+                if changed {
+                    self.refresh_surface()?;
+                }
+                return Ok(changed);
+            }
+            let previous_anchor = self.session.anchor().clone();
+            let previous_mode = self.session.settings().page_mode;
+            match self.tool_action(action) {
+                Ok(Some(changed)) => {
+                    if changed {
+                        if previous_anchor != *self.session.anchor()
+                            || previous_mode != self.session.settings().page_mode
+                        {
+                            self.reset_motion()?;
+                        }
+                        self.refresh_surface()?;
+                    }
+                    return Ok(changed);
+                }
+                Err(error) => {
+                    self.tools.status = error.to_string();
+                    self.refresh_surface()?;
+                    return Ok(true);
+                }
+                Ok(None) => {}
+            }
             match action {
                 Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
                 Action::PointerLeave => self.pointer_changed(None),
@@ -720,7 +841,13 @@ mod enabled {
                 Action::Last => self.perform_reader_action(ReaderAction::Last),
                 Action::Larger => self.perform_reader_action(ReaderAction::Larger),
                 Action::Smaller => self.perform_reader_action(ReaderAction::Smaller),
-                Action::Close => Ok(false),
+                Action::Close
+                | Action::Text(_)
+                | Action::Command(_)
+                | Action::PointerRelease { .. }
+                | Action::Scroll { .. }
+                | Action::PanStart { .. }
+                | Action::PanEnd { .. } => Ok(false),
             }
         }
 
@@ -733,12 +860,22 @@ mod enabled {
         }
 
         fn animation_interval(&self) -> Option<Duration> {
-            (self.title_marquee_span != 0).then_some(Duration::from_millis(40))
+            if self.motion.active() {
+                return Some(Duration::from_millis(16));
+            }
+            (self.title_marquee_span != 0 || self.tools.pending())
+                .then_some(Duration::from_millis(40))
         }
 
         fn animation_tick(&mut self) -> WindowResult<bool> {
+            let motion_changed = self.tick_page_motion(std::time::Instant::now())?;
+            let clipboard_changed =
+                self.poll_clipboard() | self.poll_external_link() | motion_changed;
             if self.title_marquee_span == 0 {
-                return Ok(false);
+                if clipboard_changed {
+                    self.refresh_surface()?;
+                }
+                return Ok(clipboard_changed);
             }
             self.title_scroll = (self.title_scroll + 1) % self.title_marquee_span;
             self.refresh_surface()?;
@@ -766,19 +903,27 @@ mod enabled {
         if args.is_empty() {
             return Err("open-epub expects <book.epub> --font <font.ttf>".into());
         }
-        if (args.len() - 1) % 2 != 0 {
+        if !(args.len() - 1).is_multiple_of(2) {
             return Err("each EPUB window option needs a value".into());
         }
 
         let mut window = WindowOptions::default();
         let mut page_args = Vec::new();
+        let mut fallback_paths = Vec::new();
         let mut spine = None;
         let mut locator: Option<EpubLocator> = None;
         let mut state_dir = None;
+        let mut data_dir = None;
         let mut progress_enabled = true;
         let mut progress_seen = false;
         for pair in args[1..].chunks_exact(2) {
             match pair[0].to_str() {
+                Some("--fallback-font") => {
+                    if fallback_paths.len() >= 12 {
+                        return Err("at most 12 fallback fonts may be supplied".into());
+                    }
+                    fallback_paths.push(PathBuf::from(&pair[1]));
+                }
                 Some("--display") => {
                     if window.display.is_some() {
                         return Err("duplicate --display".into());
@@ -808,6 +953,12 @@ mod enabled {
                         return Err("duplicate --at".into());
                     }
                     locator = Some(pair[1].to_str().ok_or("locator must be UTF-8")?.parse()?);
+                }
+                Some("--data-dir") => {
+                    if data_dir.is_some() {
+                        return Err("duplicate --data-dir".into());
+                    }
+                    data_dir = Some(PathBuf::from(&pair[1]));
                 }
                 Some("--state-dir") => {
                     if state_dir.is_some() {
@@ -842,91 +993,183 @@ mod enabled {
             return Err("EPUB --at and --page cannot be combined".into());
         }
 
-        let epub_limits = EpubLimits::default();
         let epub_path = PathBuf::from(&args[0]);
-        let mut source = LocalFileSource::open(&epub_path).epub_stage("open EPUB file")?;
-        let epub_bytes = read_bounded(&mut source, epub_limits.zip.max_archive_bytes)
-            .epub_stage("read EPUB bytes")?;
-        let book =
-            EpubBook::parse(&epub_bytes, epub_limits).epub_stage("parse EPUB ZIP/container/OPF")?;
-        let explicit_position = spine.is_some() || locator.is_some() || options.page.is_some();
-        let progress = if progress_enabled {
-            match state_dir
-                .map(EpubProgressStore::new)
-                .map(Ok)
-                .unwrap_or_else(EpubProgressStore::from_environment)
-            {
-                Ok(store) => Some(store),
-                Err(error) => {
-                    writeln!(
-                        output,
-                        "EPUB reading progress disabled for this session: {error}"
-                    )?;
+        let dimensions = (options.width, options.height);
+        let (report, log) = async_reader::run(
+            epub_path.clone(),
+            dimensions,
+            window,
+            move |bridge| {
+                let mut options = options.clone();
+                let mut locator = locator.clone();
+                let state_dir = state_dir.clone();
+                let data_dir = data_dir.clone();
+                let mut log = Vec::new();
+                let output = &mut log;
+                let began = std::time::Instant::now();
+                crate::loading::stage("打开文档文件")?;
+                let epub_limits = EpubLimits::default();
+                let mut source = LocalFileSource::open(&epub_path).epub_stage("open EPUB file")?;
+                let epub_bytes = crate::loading::read(
+                    &mut source,
+                    epub_limits.zip.max_archive_bytes,
+                    "读取文档字节",
+                )
+                .map_err(|error| boxed_stage("read EPUB bytes", error))?;
+                crate::loading::stage("校验文档与解析目录结构")?;
+                let book = EpubBook::parse(&epub_bytes, epub_limits)
+                    .epub_stage("parse EPUB ZIP/container/OPF")?;
+                crate::loading::stage("恢复阅读位置")?;
+                let explicit_position =
+                    spine.is_some() || locator.is_some() || options.page.is_some();
+                let progress = if progress_enabled {
+                    match state_dir
+                        .map(EpubProgressStore::new)
+                        .map(Ok)
+                        .unwrap_or_else(EpubProgressStore::from_environment)
+                    {
+                        Ok(store) => Some(store),
+                        Err(error) => {
+                            writeln!(
+                                output,
+                                "EPUB reading progress disabled for this session: {error}"
+                            )?;
+                            None
+                        }
+                    }
+                } else {
                     None
-                }
-            }
-        } else {
-            None
-        };
-        if !explicit_position {
-            if let Some(store) = &progress {
-                match store.load(&book) {
-                    Ok(Some(saved)) => {
-                        writeln!(output, "Restored EPUB locator: {saved}")?;
-                        locator = Some(saved);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        writeln!(
-                            output,
-                            "Ignoring invalid EPUB reading progress and starting normally: {error}"
-                        )?;
+                };
+                if !explicit_position && let Some(store) = &progress {
+                    match store.load(&book) {
+                        Ok(Some(saved)) => {
+                            writeln!(output, "Restored EPUB locator: {saved}")?;
+                            locator = Some(saved);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            writeln!(
+                                output,
+                                "Ignoring invalid EPUB reading progress and starting normally: {error}"
+                            )?;
+                        }
                     }
                 }
-            }
-        }
 
-        let font_limits = FontLimits::default();
-        let font_bytes = if options.font.as_path() == Path::new(UiFont::builtin_label()) {
-            builtin_font_bytes().to_vec()
-        } else {
-            let mut source = LocalFileSource::open(&options.font).epub_stage("open reader font")?;
-            read_bounded(&mut source, font_limits.max_file_bytes).epub_stage("read reader font")?
-        };
-        let ui_font =
-            UiFont::from_bytes_face(font_bytes.clone(), options.font.clone(), options.face)
-                .map_err(|error| boxed_stage("prepare UI font", error))?;
-        let font =
-            Font::parse(&font_bytes, options.face, font_limits).epub_stage("parse reader font")?;
+                crate::loading::stage("准备界面与正文字体")?;
+                let font_limits = FontLimits::default();
+                let font_bytes = if options.font.as_path() == Path::new(UiFont::builtin_label()) {
+                    builtin_font_bytes().to_vec()
+                } else {
+                    let mut source =
+                        LocalFileSource::open(&options.font).epub_stage("open reader font")?;
+                    read_bounded(&mut source, font_limits.max_file_bytes)
+                        .epub_stage("read reader font")?
+                };
+                let ui_font =
+                    UiFont::from_bytes_face(font_bytes.clone(), options.font.clone(), options.face)
+                        .map_err(|error| boxed_stage("prepare UI font", error))?;
+                let font = Font::parse(&font_bytes, options.face, font_limits)
+                    .epub_stage("parse reader font")?;
 
-        let start = if let Some(locator) = locator {
-            Start::Locator(locator)
-        } else if let Some(spine) = spine {
-            Start::Spine(spine)
-        } else {
-            Start::Beginning
-        };
-        let session = EpubSession::new(&book, &font, options, start)
-            .map_err(|error| boxed_stage("restore/select readable EPUB chapter", error))?;
-        let mut reader = ReaderWindow::new(session, progress, ui_font)
-            .map_err(|error| boxed_stage("build EPUB reader UI and TOC", error))?;
+                let start = if let Some(locator) = locator {
+                    Start::Locator(locator)
+                } else if let Some(spine) = spine {
+                    Start::Spine(spine)
+                } else {
+                    Start::Beginning
+                };
+                let fallback_sources = crate::fonts::load_fallbacks(
+                    &fallback_paths,
+                    options.font.as_path() == Path::new(UiFont::builtin_label()),
+                );
+                let fallback_faces: Vec<_> = fallback_sources
+                    .iter()
+                    .filter_map(|source| {
+                        Font::parse(&source.bytes, source.face, FontLimits::default()).ok()
+                    })
+                    .collect();
+                let fallback_refs: Vec<_> = fallback_faces.iter().collect();
+                bridge.checkpoint()?;
+                (options.width, options.height) = bridge.size();
+                crate::loading::stage("读取阅读设置")?;
+                let store = data_dir
+                    .map(crate::reader_data::Store::new)
+                    .map(Ok)
+                    .unwrap_or_else(crate::reader_data::Store::from_environment);
+                let mut preferences = crate::reader_data::Settings::default();
+                let mut setting_error = None;
+                if let Ok(store) = &store {
+                    match store.settings() {
+                        Ok(mut saved) => {
+                            if page_args.iter().any(|arg| arg == "--font-size") {
+                                saved.size = options.size;
+                            }
+                            if page_args.iter().any(|arg| arg == "--margin")
+                                || saved.margin * 2 >= options.width.min(options.height)
+                            {
+                                saved.margin = options.margin;
+                            }
+                            options.size = saved.size;
+                            options.margin = saved.margin;
+                            preferences = saved;
+                        }
+                        Err(error) => setting_error = Some(format!("读取设置失败：{error}")),
+                    }
+                }
+                let session = EpubSession::new_with_preferences(
+                    &book,
+                    &font,
+                    options,
+                    start,
+                    &fallback_refs,
+                    preferences,
+                )
+                .map_err(|error| boxed_stage("restore/select readable EPUB chapter", error))?;
+                crate::loading::stage("准备阅读界面与标注")?;
+                writeln!(output, "Fallback font faces: {}", fallback_refs.len())?;
+                let mut reader = ReaderWindow::new_lazy(session, progress, ui_font)
+                    .map_err(|error| boxed_stage("build EPUB reader UI", error))?;
+                bridge.preview(&reader);
+                crate::loading::stage("载入标注与阅读工具")?;
+                match store {
+                    Ok(store) => {
+                        match store.annotations(reader.session.book()) {
+                            Ok(rows) => reader.tools.annotations = rows,
+                            Err(error) => reader.tools.status = format!("读取标注失败：{error}"),
+                        }
+                        reader.tools.store = Some(store);
+                    }
+                    Err(error) => reader.tools.status = format!("阅读设置存储不可用：{error}"),
+                }
+                if let Some(error) = setting_error {
+                    reader.tools.status = error;
+                }
+                reader.refresh_surface()?;
 
-        writeln!(
-            output,
-            "Native Wayland EPUB reader (XHTML text subset)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc closes.\nPage navigation crosses linear spine boundaries. Reading position is saved with epub-v1 locator when progress storage is available.\nCSS, images, shaping and font fallback are not rendered yet."
+                writeln!(
+                    output,
+                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nF5 settings select slide, book (2D paper curl) or continuous vertical scroll; the mode is saved. Wheel/touchpad and right-button drag navigate; left-button drag selects text. Esc stops ongoing motion first. Page navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
+                )?;
+                output.flush()?;
+
+                eprintln!(
+                    "ReadAll: 页面准备完成，用时 {:.3}s；目录按需生成",
+                    began.elapsed().as_secs_f64()
+                );
+                bridge
+                    .serve(&mut reader)
+                    .map_err(|error| boxed_stage("reader worker", error))?;
+                reader.save_progress();
+                writeln!(output, "EPUB locator: {}", reader.session.anchor())?;
+                Ok(log)
+            },
         )?;
-        output.flush()?;
-
-        let report: WindowReport = window::run(&mut reader, window)
-            .map_err(|error| boxed_stage("run native reader window", error))?;
-        reader.save_progress();
+        output.write_all(&log)?;
         writeln!(
             output,
-            "Closed. Buffer commits: {}; last size: {}x{}\nEPUB locator: {}",
-            report.committed_frames,
-            report.width,
-            report.height,
-            reader.session.anchor()
+            "Closed. Buffer commits: {}; last size: {}x{}",
+            report.committed_frames, report.width, report.height
         )?;
         Ok(())
     }
@@ -959,6 +1202,107 @@ mod enabled {
                 .map(Into::into),
             )
             .unwrap()
+        }
+
+        fn assert_header_status(reader: &ReaderWindow<'_, '_, '_, '_>, status: &str) {
+            let width = reader.surface.width();
+            let mut expected = reader.session.frame().surface.clone();
+            let background = reader.session.settings().theme.colors().0;
+            expected
+                .draw(&[
+                    DrawCommand::FillRect {
+                        rect: Rect::new(0, 0, width, 32),
+                        color: Color {
+                            a: 245,
+                            ..background
+                        },
+                    },
+                    DrawCommand::FillRect {
+                        rect: Rect::new(0, 31, width, 1),
+                        color: Color::rgba(224, 228, 234, 255),
+                    },
+                ])
+                .unwrap();
+            let mut text = UiPainter::new(&reader.ui_font, &mut expected).unwrap();
+            let x = width.saturating_sub(text.measure(12, status).unwrap() + 16);
+            text.draw(x as i32, 9, 12, status, Color::rgba(112, 121, 133, 255))
+                .unwrap();
+            for y in 0..32 {
+                for x in x..width {
+                    assert_eq!(
+                        reader.surface.pixel(x, y),
+                        expected.pixel(x, y),
+                        "header must display {status:?} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn header_replaces_font_size_with_overall_percentage_only() {
+            let epub_bytes =
+                test_epub::make_epub_with_resources(&["<html><body>AAAA</body></html>"; 4], vec![]);
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui_bytes = test_font::make_layout_font(
+                *b"latn",
+                *b"liga",
+                false,
+                &(33..127)
+                    .map(|ch| (ch, if ch == u32::from(b'%') { 2 } else { 1 }))
+                    .collect::<Vec<_>>(),
+            );
+            let ui = UiFont::from_bytes(ui_bytes, PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui).unwrap();
+            let title = reader.session.book_title().to_owned();
+            let toolbar = reader.toolbar_rect();
+            let size = reader.session.font_size();
+            assert_header_status(&reader, "第 1/4 章 · 第 1/1 页 · 25.0%");
+            reader.action(Action::Next).unwrap();
+            assert_header_status(&reader, "第 2/4 章 · 第 1/1 页 · 50.0%");
+            reader.action(Action::Last).unwrap();
+            assert_header_status(&reader, "第 4/4 章 · 第 1/1 页 · 100.0%");
+            reader.action(Action::First).unwrap();
+            assert_header_status(&reader, "第 1/4 章 · 第 1/1 页 · 25.0%");
+            assert_eq!(reader.session.font_size(), size);
+            reader.action(Action::Larger).unwrap();
+            assert!(reader.session.font_size() > size);
+            assert_header_status(&reader, "第 1/4 章 · 第 1/1 页 · 25.0%");
+            assert_eq!(reader.session.book_title(), title);
+            assert_eq!(reader.toolbar_rect(), toolbar);
+        }
+
+        #[test]
+        fn header_percentage_updates_within_a_chapter_using_the_existing_progress_bar_value() {
+            let long = format!(
+                "<html><body>{}</body></html>",
+                "<p>AAAA WWWW</p>".repeat(80)
+            );
+            let epub_bytes = test_epub::make_epub_with_resources(
+                &[long.as_str(), "<html><body>AAAA</body></html>"],
+                vec![],
+            );
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui = UiFont::from_bytes(font_bytes.clone(), PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui).unwrap();
+            let pages = reader.session.page_position().1;
+            assert!(pages > 2);
+            let before = reader.session.overall_progress();
+            reader.action(Action::Next).unwrap();
+            assert!(reader.session.overall_progress() > before);
+            assert!(reader.session.overall_progress() < 0.5);
+            assert_header_status(
+                &reader,
+                &format!(
+                    "第 1/2 章 · 第 2/{pages} 页 · {:.1}%",
+                    reader.session.overall_progress() * 100.0
+                ),
+            );
         }
 
         #[test]
@@ -1060,6 +1404,28 @@ mod enabled {
             );
             assert_eq!(reader.session.anchor().spine_index(), 1);
             assert_eq!(reader.toolbar, ToolbarMode::Expanded);
+        }
+
+        #[test]
+        fn toc_fragment_jump_selects_the_exact_entry_within_one_spine() {
+            let epub_bytes = test_epub::make_epub_with_navigation();
+            let book = EpubBook::parse(&epub_bytes, EpubLimits::default()).unwrap();
+            let font_bytes = test_font::make_font();
+            let font = Font::parse(&font_bytes, 0, FontLimits::default()).unwrap();
+            let session = EpubSession::new(&book, &font, options(), Start::Beginning).unwrap();
+            let ui_font =
+                UiFont::from_bytes(font_bytes.clone(), PathBuf::from("fixture.ttf")).unwrap();
+            let mut reader = ReaderWindow::new(session, None, ui_font).unwrap();
+
+            assert_eq!(reader.toc.len(), 3);
+            assert_eq!(reader.current_toc_index(), Some(0));
+            let target_offset = reader.toc[1].offset;
+            assert!(target_offset > 0);
+            assert!(reader.jump_to_toc(1).unwrap());
+            assert_eq!(reader.session.anchor().spine_index(), 0);
+            assert_eq!(reader.session.anchor().utf8_offset(), target_offset as u64);
+            assert_eq!(reader.current_toc_index(), Some(1));
+            assert_eq!(reader.toc_selected, 1);
         }
 
         #[test]

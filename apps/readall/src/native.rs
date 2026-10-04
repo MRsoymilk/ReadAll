@@ -68,7 +68,13 @@ mod enabled {
                 Action::Activate | Action::PointerMove { .. } | Action::PointerLeave => {
                     return Ok(false);
                 }
-                Action::Close => return Ok(false),
+                Action::Close
+                | Action::Text(_)
+                | Action::Command(_)
+                | Action::PointerRelease { .. }
+                | Action::Scroll { .. }
+                | Action::PanStart { .. }
+                | Action::PanEnd { .. } => return Ok(false),
             };
             match Session::action(&mut self.session, action) {
                 Ok(changed) => {
@@ -101,7 +107,7 @@ mod enabled {
         if args.is_empty() {
             return Err("open expects <book.txt> --font <font.ttf>".into());
         }
-        if (args.len() - 1) % 2 != 0 {
+        if !(args.len() - 1).is_multiple_of(2) {
             return Err("each window/page option needs a value".into());
         }
 
@@ -176,20 +182,18 @@ mod enabled {
             None
         };
 
-        if !explicit_position {
-            if let Some(store) = &progress {
-                match store.load(&document) {
-                    Ok(Some(locator)) => {
-                        writeln!(output, "Restored reading locator: {locator}")?;
-                        options.at = Some(locator);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        writeln!(
-                            output,
-                            "Ignoring invalid reading progress and starting normally: {error}"
-                        )?;
-                    }
+        if !explicit_position && let Some(store) = &progress {
+            match store.load(&document) {
+                Ok(Some(locator)) => {
+                    writeln!(output, "Restored reading locator: {locator}")?;
+                    options.at = Some(locator);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    writeln!(
+                        output,
+                        "Ignoring invalid reading progress and starting normally: {error}"
+                    )?;
                 }
             }
         }

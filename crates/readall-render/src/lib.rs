@@ -2,6 +2,9 @@
 //! Channels use straight-alpha, byte-space source-over compositing (not linear-light color management).
 
 pub mod glyph;
+mod image;
+mod page_motion;
+pub use page_motion::PageEffect;
 
 use std::{
     fmt,

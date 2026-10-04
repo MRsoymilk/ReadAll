@@ -140,7 +140,7 @@ fn parse_segments(svg: &str) -> Result<Vec<Segment>> {
             .split_whitespace()
             .map(str::parse)
             .collect::<std::result::Result<_, _>>()?;
-        if values.len() < 4 || values.len() % 2 != 0 {
+        if values.len() < 4 || !values.len().is_multiple_of(2) {
             return Err("invalid SVG polyline coordinate list".into());
         }
         let mut parsed = Vec::new();

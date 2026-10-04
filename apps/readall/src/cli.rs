@@ -24,12 +24,28 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n  readall diagnostics\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nFull EPUB styling, font shaping and PDF reading are not implemented yet; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n  readall diagnostics\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--data-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nEPUB supports CSS text/block properties, PNG/JPEG/WebP/SVG, shaping/bidi, font fallback, static TrueType @font-face selection and epub-v1/v2/v3 progress. Code blocks preserve line breaks, spaces and tabs; legacy positions are migrated. Automatic syntax highlighting supports C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; author multicolor styles remain unchanged. Full EPUB styling, WOFF/obfuscated fonts and PDF reading remain unimplemented; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
+        )?;
+        writeln!(
+            output,
+            "\nReader tools:\n  readall search <book.epub> <query> [--case-sensitive]\n  readall annotations <book.epub> [--data-dir DIR]\n  readall bookmark <book.epub> <EPUB_LOCATOR> [label]\n  readall note <book.epub> <EPUB_LOCATOR> [text]\n  readall highlight <book.epub> <EPUB_LOCATOR> <end-utf8-offset> [text]\n  readall annotation-remove <book.epub> <ID>\n  readall settings [theme|size|margin|line-spacing|page-mode VALUE] [--data-dir DIR]\nAll annotation commands accept --data-dir DIR. EPUB render/open accept repeated --fallback-font FILE.\nReader shortcuts: F2 search, F3 annotations, F4 bookmark, F5 settings, F6 theme, F7 note, F8 highlight, F9 text selection priority; Ctrl+C/Ctrl+V clipboard. EPUB body text is draggable by default, without F9; blank clicks do not turn pages. Releasing a selection shows Copy/Highlight/Note/Cancel actions. Links and images activate on release only when not dragging. F5 Page mode: slide (horizontal), book (2D paper curl), scroll (continuous vertical); settings page-mode slide|book|scroll persists it. Use wheel, touchpad, PageUp/PageDown, arrows or toolbar buttons; right-button drag navigates, left-button drag still selects. Esc stops motion, clears a selection or dismisses the active tool first. Native text input uses the compositor XKB keymap; IME composition is not integrated yet."
         )?;
         return Ok(());
     }
     let command = args[0].to_str().ok_or("command must be UTF-8")?;
+    if matches!(
+        command,
+        "search"
+            | "annotations"
+            | "bookmark"
+            | "note"
+            | "highlight"
+            | "annotation-remove"
+            | "settings"
+    ) {
+        return crate::reader_cli::run(command, &args[1..], output);
+    }
     if command == "licenses" {
         if args.len() != 1 {
             return Err("licenses takes no arguments".into());
@@ -125,7 +141,7 @@ struct ReadOptions {
 
 impl ReadOptions {
     fn parse(args: &[OsString]) -> Result<Self> {
-        if args.len() % 2 != 0 {
+        if !args.len().is_multiple_of(2) {
             return Err("each reading option requires a value".into());
         }
         let (mut columns, mut rows, mut page, mut at) = (None, None, None, None);
@@ -211,10 +227,16 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
     let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
     let book = EpubBook::parse(&bytes, limits)?;
+    write_epub_info(&book, output)
+}
+
+fn write_epub_info(book: &EpubBook<'_>, output: &mut impl Write) -> Result<()> {
     writeln!(
         output,
-        "Format: EPUB\nTitle: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
+        "Format: EPUB\nTitle: {}\nCreator: {}\nLanguage: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
         book.title().unwrap_or("(untitled)"),
+        book.creator().unwrap_or("(unknown)"),
+        book.language().unwrap_or("(unknown)"),
         book.package_path(),
         book.manifest().len(),
         book.spine().len()
@@ -239,6 +261,38 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
             "... {} additional spine items omitted from diagnostic output",
             book.spine().len() - 32
         )?;
+    }
+    match book.navigation() {
+        Ok(navigation) if navigation.is_empty() => {
+            writeln!(output, "Navigation: none")?;
+        }
+        Ok(navigation) => {
+            writeln!(output, "Navigation entries: {}", navigation.len())?;
+            for entry in navigation.iter().take(32) {
+                let indent = "  ".repeat(entry.depth().min(8));
+                let fragment = entry
+                    .fragment()
+                    .map(|fragment| format!("#{fragment}"))
+                    .unwrap_or_default();
+                writeln!(
+                    output,
+                    "Nav: {indent}{} -> spine {}{}",
+                    entry.label(),
+                    entry.spine_index() + 1,
+                    fragment
+                )?;
+            }
+            if navigation.len() > 32 {
+                writeln!(
+                    output,
+                    "... {} additional navigation entries omitted from diagnostic output",
+                    navigation.len() - 32
+                )?;
+            }
+        }
+        Err(error) => {
+            writeln!(output, "Navigation: unreadable ({error})")?;
+        }
     }
     Ok(())
 }
@@ -310,6 +364,7 @@ fn render_demo(path: PathBuf, output: &mut impl Write) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_epub;
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
@@ -341,6 +396,19 @@ mod tests {
         assert!(text.contains("ReadAll error log:"));
         assert!(text.contains("readall-error.log"));
         assert!(run(args(&["diagnostics", "extra"]), &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn epub_info_reports_epub3_navigation_targets() {
+        let bytes = test_epub::make_epub_with_navigation();
+        let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+        let mut output = Vec::new();
+        write_epub_info(&book, &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Navigation entries: 3"));
+        assert!(text.contains("正式目录第一章 -> spine 1#intro"));
+        assert!(text.contains("  第一章详细部分 -> spine 1#details"));
+        assert!(text.contains("正式目录第二章 -> spine 2#deep"));
     }
 
     #[test]

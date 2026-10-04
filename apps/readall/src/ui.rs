@@ -29,9 +29,8 @@ struct CachedGlyph {
 }
 
 pub(crate) struct UiFont {
-    bytes: Vec<u8>,
+    font: Font<'static>,
     path: PathBuf,
-    face: u32,
     cache: RefCell<HashMap<(u32, char), CachedGlyph>>,
 }
 
@@ -65,11 +64,10 @@ impl UiFont {
     }
 
     pub(crate) fn from_bytes_face(bytes: Vec<u8>, path: PathBuf, face: u32) -> UiResult<Self> {
-        Font::parse(&bytes, face, FontLimits::default())?;
+        let font = Font::from_shared(bytes.into(), face, FontLimits::default())?;
         Ok(Self {
-            bytes,
+            font,
             path,
-            face,
             cache: RefCell::new(HashMap::new()),
         })
     }
@@ -90,7 +88,7 @@ impl UiFont {
 pub(crate) struct UiPainter<'font, 'surface> {
     surface: &'surface mut Surface,
     source: &'font UiFont,
-    font: Font<'font>,
+    font: &'font Font<'static>,
 }
 
 impl<'font, 'surface> UiPainter<'font, 'surface> {
@@ -98,7 +96,7 @@ impl<'font, 'surface> UiPainter<'font, 'surface> {
         Ok(Self {
             surface,
             source: font,
-            font: Font::parse(&font.bytes, font.face, FontLimits::default())?,
+            font: &font.font,
         })
     }
 

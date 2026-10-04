@@ -1,6 +1,9 @@
-//! Diagnostic EPUB spine renderer: XHTML subset -> canonical text -> existing TXT page engine.
-use crate::text_page::{Options, render};
-use readall_core::{Limits, TextDocument, read_bounded};
+//! Diagnostic EPUB renderer using the same styled pagination as the native reader.
+use crate::{
+    epub_flow::{Chapter, EpubRenderer},
+    text_page::Options,
+};
+use readall_core::read_bounded;
 use readall_epub::{EpubBook, EpubLimits, EpubLocator};
 use readall_font::{Font, FontLimits};
 use readall_platform::LocalFileSource;
@@ -21,15 +24,21 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
                 .into(),
         );
     }
-    if (args.len() - 2) % 2 != 0 {
+    if !(args.len() - 2).is_multiple_of(2) {
         return Err("each render-epub option requires a value".into());
     }
 
     let mut spine = None;
+    let mut fallback_paths = Vec::new();
     let mut epub_at: Option<EpubLocator> = None;
     let mut page_args = Vec::new();
     for pair in args[2..].chunks_exact(2) {
-        if pair[0] == "--spine" {
+        if pair[0] == "--fallback-font" {
+            if fallback_paths.len() >= 12 {
+                return Err("at most 12 fallback fonts may be supplied".into());
+            }
+            fallback_paths.push(PathBuf::from(&pair[1]));
+        } else if pair[0] == "--spine" {
             if spine.is_some() {
                 return Err("duplicate --spine".into());
             }
@@ -65,13 +74,10 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let item = book
         .spine_item(spine)
         .ok_or("spine number is outside this EPUB")?;
-    let text = book.read_spine_text(spine)?;
-    if text.is_empty() {
-        return Err(
-            "selected EPUB spine contains no readable text in the current XHTML subset".into(),
-        );
+    let document = Chapter::load(&book, spine)?;
+    if !document.is_readable() {
+        return Err("selected EPUB spine contains no readable text or images".into());
     }
-    let document = TextDocument::from_bytes(text.as_bytes(), Limits::default())?;
     if let Some(offset) = restored_offset {
         options.at = Some(document.locator(offset)?);
     }
@@ -82,9 +88,24 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
         font_limits.max_file_bytes,
     )?;
     let font = Font::parse(&font_bytes, options.face, font_limits)?;
-    let rendered = render(&document, &font, &options)?;
+    let fallback_sources = crate::fonts::load_fallbacks(&fallback_paths, false);
+    let fallback_faces: Vec<_> = fallback_sources
+        .iter()
+        .filter_map(|source| Font::parse(&source.bytes, source.face, FontLimits::default()).ok())
+        .collect();
+    let fallback_refs: Vec<_> = fallback_faces.iter().collect();
+    let rendered = EpubRenderer::new(&font, options.size, options.allow_missing)?
+        .with_fallbacks(&fallback_refs)
+        .render_with_image(
+            &document,
+            &options,
+            epub_at.as_ref().and_then(EpubLocator::image_index),
+        )?;
     let chapter_offset = document.restore(&rendered.locator)?;
-    let epub_locator = book.locator(spine, chapter_offset)?;
+    let epub_locator = match rendered.image_index {
+        Some(image) => book.image_locator(spine, image)?,
+        None => book.locator(spine, chapter_offset)?,
+    };
 
     let path = PathBuf::from(&args[1]);
     let mut writer = BufWriter::new(
@@ -98,7 +119,7 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
 
     writeln!(
         output,
-        "Rendered EPUB spine page (XHTML text subset; CSS/images not rendered)\nTitle: {}\nSpine: {}/{}\nResource: {}\nPage: {}/{}\nEPUB locator: {}\nChapter locator: {}\nImage: {}x{}\nMissing characters: {}\nOutput: {:?}",
+        "Rendered EPUB spine page (CSS text/block subset + PNG/JPEG/WebP/SVG; shaping/bidi/font fallback)\nTitle: {}\nSpine: {}/{}\nResource: {}\nPage: {}/{}\nEPUB locator: {}\nChapter locator: {}\nImage: {}x{}\nMissing characters: {}\nOutput: {:?}",
         book.title().unwrap_or("(untitled)"),
         spine + 1,
         book.spine().len(),

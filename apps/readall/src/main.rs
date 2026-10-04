@@ -1,13 +1,20 @@
 mod cli;
 mod diagnostics;
+mod epub_flow;
 mod epub_page;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod epub_session;
+mod fonts;
 mod home;
+mod loading;
 mod native;
 mod native_epub;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod progress;
+mod reader_cli;
+mod reader_data;
+#[cfg(all(target_os = "linux", any(test, feature = "wayland")))]
+mod recent;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod session;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]

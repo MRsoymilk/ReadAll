@@ -23,6 +23,76 @@ fn outline(points: &[(i16, i16)]) -> Vec<u8> {
     }
     bytes
 }
+#[allow(dead_code)]
+pub fn make_layout_font(
+    script: [u8; 4],
+    feature: [u8; 4],
+    ligature: bool,
+    mappings: &[(u32, u16)],
+) -> Vec<u8> {
+    fn words(values: &[u16]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+    let mut gsub = words(&[1, 0, 10, 30, 44]);
+    gsub.extend(words(&[1]));
+    gsub.extend(script);
+    gsub.extend(words(&[8, 4, 0, 0, 65535, 1, 0]));
+    gsub.extend(words(&[1]));
+    gsub.extend(feature);
+    gsub.extend(words(&[8, 0, 1, 0]));
+    gsub.extend(words(&[1, 4, if ligature { 4 } else { 1 }, 0, 1, 8]));
+    if ligature {
+        gsub.extend(words(&[1, 18, 1, 8, 1, 4, 2, 2, 1, 1, 1, 1]));
+    } else {
+        gsub.extend(words(&[2, 8, 1, 2, 1, 1, 1]));
+    }
+    let original = make_font();
+    let count = u16::from_be_bytes(original[4..6].try_into().unwrap()) as usize;
+    let mut tables = Vec::new();
+    for i in 0..count {
+        let at = 12 + i * 16;
+        let tag: [u8; 4] = original[at..at + 4].try_into().unwrap();
+        let offset = u32::from_be_bytes(original[at + 8..at + 12].try_into().unwrap()) as usize;
+        let length = u32::from_be_bytes(original[at + 12..at + 16].try_into().unwrap()) as usize;
+        tables.push((tag, original[offset..offset + length].to_vec()));
+    }
+    let mut map = std::collections::BTreeMap::from([(32, 3), (65, 1), (87, 2)]);
+    for &(cp, glyph) in mappings {
+        map.insert(cp, glyph);
+    }
+    let mut cmap = vec![0; 28 + map.len() * 12];
+    u16_at(&mut cmap, 2, 1);
+    u16_at(&mut cmap, 4, 3);
+    u16_at(&mut cmap, 6, 10);
+    u32_at(&mut cmap, 8, 12);
+    u16_at(&mut cmap, 12, 12);
+    u32_at(&mut cmap, 16, (16 + map.len() * 12) as u32);
+    u32_at(&mut cmap, 24, map.len() as u32);
+    for (i, (cp, glyph)) in map.into_iter().enumerate() {
+        let at = 28 + i * 12;
+        u32_at(&mut cmap, at, cp);
+        u32_at(&mut cmap, at + 4, cp);
+        u32_at(&mut cmap, at + 8, u32::from(glyph));
+    }
+    tables.iter_mut().find(|(tag, _)| tag == b"cmap").unwrap().1 = cmap;
+    tables.push((*b"GSUB", gsub));
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut bytes = vec![0; 12 + tables.len() * 16];
+    u32_at(&mut bytes, 0, 0x10000);
+    u16_at(&mut bytes, 4, tables.len() as u16);
+    for (i, (tag, data)) in tables.into_iter().enumerate() {
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+        let at = 12 + i * 16;
+        let start = bytes.len();
+        bytes[at..at + 4].copy_from_slice(&tag);
+        u32_at(&mut bytes, at + 8, start as u32);
+        u32_at(&mut bytes, at + 12, data.len() as u32);
+        bytes.extend(data);
+    }
+    bytes
+}
 pub fn make_font() -> Vec<u8> {
     let triangle = outline(&[(0, 0), (300, 700), (600, 0)]);
     let wide = outline(&[(0, 0), (800, 0), (800, 700), (0, 700)]);
@@ -31,7 +101,7 @@ pub fn make_font() -> Vec<u8> {
     for glyph in [&triangle[..], &triangle[..], &wide[..], &[]] {
         loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
         glyf.extend_from_slice(glyph);
-        if glyf.len() % 2 != 0 {
+        if !glyf.len().is_multiple_of(2) {
             glyf.push(0);
         }
     }
@@ -80,7 +150,7 @@ pub fn make_font() -> Vec<u8> {
     u32_at(&mut bytes, 0, 0x10000);
     u16_at(&mut bytes, 4, 7);
     for (i, (tag, data)) in tables.into_iter().enumerate() {
-        while bytes.len() % 4 != 0 {
+        while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         let at = 12 + i * 16;
