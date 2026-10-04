@@ -10,6 +10,7 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 
 - 零参数启动原生书库：`./readall`
 - 内置文件浏览器，可直接选择 `.epub`
+- 选中 EPUB 时按需预览 OPF 书名 / 作者 / 语言，解析失败不阻止打开
 - 中文文件名、中文界面和中文正文
 - 内置 **LXGW WenKai Lite Regular / 霞鹜文楷轻便版**
 - 鼠标 hover 高亮，不需要先点击
@@ -35,7 +36,7 @@ ReadAll 当前自己处理：
 - CRC-32、路径安全和资源预算
 - `mimetype`
 - `META-INF/container.xml`，支持多个 `rootfile` 并按顺序选择第一个可解析 rendering
-- OPF metadata / manifest / spine
+- OPF metadata / manifest / spine，读取 title / creator / language
 - EPUB 3 Navigation Document：`properties="nav"` + `nav epub:type="toc"`
 - EPUB 2 NCX fallback：`spine toc` + `navMap/navPoint/navLabel/content`
 - 正式目录标题、嵌套层级与 `href#fragment` 目标解析

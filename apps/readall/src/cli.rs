@@ -217,8 +217,10 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
 fn write_epub_info(book: &EpubBook<'_>, output: &mut impl Write) -> Result<()> {
     writeln!(
         output,
-        "Format: EPUB\nTitle: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
+        "Format: EPUB\nTitle: {}\nCreator: {}\nLanguage: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
         book.title().unwrap_or("(untitled)"),
+        book.creator().unwrap_or("(unknown)"),
+        book.language().unwrap_or("(unknown)"),
         book.package_path(),
         book.manifest().len(),
         book.spine().len()

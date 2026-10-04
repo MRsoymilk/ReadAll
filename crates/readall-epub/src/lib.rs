@@ -218,6 +218,8 @@ pub struct EpubBook<'a> {
     archive: ZipArchive<'a>,
     package_path: String,
     title: Option<String>,
+    creator: Option<String>,
+    language: Option<String>,
     manifest: Vec<ManifestItem>,
     spine: Vec<SpineItem>,
     legacy_toc_manifest_index: Option<usize>,
@@ -260,6 +262,8 @@ impl<'a> EpubBook<'a> {
                         archive,
                         package_path,
                         title: parsed.title,
+                        creator: parsed.creator,
+                        language: parsed.language,
                         manifest: parsed.manifest,
                         spine: parsed.spine,
                         legacy_toc_manifest_index: parsed.legacy_toc_manifest_index,
@@ -281,6 +285,12 @@ impl<'a> EpubBook<'a> {
     }
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+    pub fn creator(&self) -> Option<&str> {
+        self.creator.as_deref()
+    }
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
     }
     pub fn manifest(&self) -> &[ManifestItem] {
         &self.manifest
@@ -427,6 +437,8 @@ impl<'a> EpubBook<'a> {
 
 struct ParsedPackage {
     title: Option<String>,
+    creator: Option<String>,
+    language: Option<String>,
     manifest: Vec<ManifestItem>,
     spine: Vec<SpineItem>,
     legacy_toc_manifest_index: Option<usize>,
@@ -559,26 +571,51 @@ fn parse_package(
         .map_err(|_| EpubError::AllocationFailed)?;
 
     let mut depth = 0_usize;
+    let mut metadata_depth = None;
     let mut manifest_depth = None;
     let mut spine_depth = None;
     let mut legacy_toc_id = None;
     let mut title_depth = None;
+    let mut creator_depth = None;
+    let mut language_depth = None;
     let mut title_text = String::new();
+    let mut creator_text = String::new();
+    let mut language_text = String::new();
     for event in &events {
         match event {
             Event::Start(element) => {
                 let element_depth = depth + 1;
                 let local = local_name(&element.name);
-                if local == "manifest" && manifest_depth.is_none() && !element.empty {
+                if local == "metadata" && metadata_depth.is_none() && !element.empty {
+                    metadata_depth = Some(element_depth);
+                } else if local == "manifest" && manifest_depth.is_none() && !element.empty {
                     manifest_depth = Some(element_depth);
                 } else if local == "spine" && spine_depth.is_none() && !element.empty {
                     spine_depth = Some(element_depth);
                     if let Some(toc) = element.attribute("toc") {
                         legacy_toc_id = Some(owned(toc)?);
                     }
-                } else if local == "title" && title_depth.is_none() && !element.empty {
+                } else if metadata_depth.is_some()
+                    && local == "title"
+                    && title_depth.is_none()
+                    && !element.empty
+                {
                     title_depth = Some(element_depth);
                     title_text.clear();
+                } else if metadata_depth.is_some()
+                    && local == "creator"
+                    && creator_depth.is_none()
+                    && !element.empty
+                {
+                    creator_depth = Some(element_depth);
+                    creator_text.clear();
+                } else if metadata_depth.is_some()
+                    && local == "language"
+                    && language_depth.is_none()
+                    && !element.empty
+                {
+                    language_depth = Some(element_depth);
+                    language_text.clear();
                 }
 
                 if local == "item" && manifest_depth.is_some() {
@@ -630,11 +667,22 @@ fn parse_package(
                 }
             }
             Event::Text(text) if title_depth.is_some() => title_text.push_str(text),
+            Event::Text(text) if creator_depth.is_some() => creator_text.push_str(text),
+            Event::Text(text) if language_depth.is_some() => language_text.push_str(text),
             Event::Text(_) => {}
             Event::End(name) => {
                 let local = local_name(name);
                 if title_depth == Some(depth) && local == "title" {
                     title_depth = None;
+                }
+                if creator_depth == Some(depth) && local == "creator" {
+                    creator_depth = None;
+                }
+                if language_depth == Some(depth) && local == "language" {
+                    language_depth = None;
+                }
+                if metadata_depth == Some(depth) && local == "metadata" {
+                    metadata_depth = None;
                 }
                 if manifest_depth == Some(depth) && local == "manifest" {
                     manifest_depth = None;
@@ -689,20 +737,26 @@ fn parse_package(
         });
     }
 
-    let title = {
-        let title = title_text.trim();
-        if title.is_empty() {
-            None
-        } else {
-            Some(owned(title)?)
-        }
-    };
+    let title = metadata_value(&title_text)?;
+    let creator = metadata_value(&creator_text)?;
+    let language = metadata_value(&language_text)?;
     Ok(ParsedPackage {
         title,
+        creator,
+        language,
         manifest,
         spine,
         legacy_toc_manifest_index,
     })
+}
+
+fn metadata_value(value: &str) -> Result<Option<String>> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(owned(&normalized)?))
+    }
 }
 
 fn has_token(value: &str, token: &str) -> bool {
@@ -1239,7 +1293,7 @@ mod tests {
 </container>"#;
         const PACKAGE: &[u8] = br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <metadata><dc:title>ReadAll &amp; Test</dc:title></metadata>
+  <metadata><dc:title>ReadAll &amp; Test</dc:title><dc:creator>Milk   Soy</dc:creator><dc:language>zh-CN</dc:language></metadata>
   <manifest>
     <item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/>
     <item id="style" href="styles/main.css" media-type="text/css"/>
@@ -1437,6 +1491,8 @@ mod tests {
         let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
         assert_eq!(book.package_path(), "OEBPS/package.opf");
         assert_eq!(book.title(), Some("ReadAll & Test"));
+        assert_eq!(book.creator(), Some("Milk Soy"));
+        assert_eq!(book.language(), Some("zh-CN"));
         assert_eq!(book.manifest().len(), 2);
         assert_eq!(book.spine().len(), 1);
         let chapter = book.spine_item(0).unwrap();

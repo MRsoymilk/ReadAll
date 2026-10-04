@@ -12,8 +12,11 @@ pub(crate) fn run(_: &mut impl Write) -> Result<()> {
 mod enabled {
     use super::*;
     use crate::ui::{UiFont, UiPainter};
-    use readall_platform::window::{
-        self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult,
+    use readall_core::read_bounded;
+    use readall_epub::{EpubBook, EpubLimits};
+    use readall_platform::{
+        LocalFileSource,
+        window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
     };
     use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
     use std::{
@@ -35,7 +38,8 @@ mod enabled {
     const SIDEBAR_MUTED: Color = Color::rgba(152, 164, 181, 255);
     const ROW_HEIGHT: i32 = 48;
     const LIST_TOP: i32 = 150;
-    const LIST_BOTTOM_MARGIN: i32 = 70;
+    const LIST_BOTTOM_MARGIN: i32 = 96;
+    const PREVIEW_MAX_EPUB_BYTES: u64 = 16 * 1024 * 1024;
 
     #[derive(Debug, Clone)]
     struct FileEntry {
@@ -50,6 +54,7 @@ mod enabled {
         entries: Vec<FileEntry>,
         selected: usize,
         scroll: usize,
+        preview: Option<String>,
     }
 
     impl Browser {
@@ -91,12 +96,15 @@ mod enabled {
                     .cmp(&a.directory)
                     .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
-            Ok(Self {
+            let mut browser = Self {
                 directory,
                 entries,
                 selected: 0,
                 scroll: 0,
-            })
+                preview: None,
+            };
+            browser.refresh_preview();
+            Ok(browser)
         }
 
         fn selected(&self) -> Option<&FileEntry> {
@@ -115,11 +123,13 @@ mod enabled {
                     .min(self.entries.len() - 1)
             };
             self.keep_visible(visible);
+            self.refresh_preview();
         }
 
         fn first(&mut self) {
             self.selected = 0;
             self.scroll = 0;
+            self.refresh_preview();
         }
 
         fn last(&mut self, visible: usize) {
@@ -128,6 +138,7 @@ mod enabled {
             }
             self.selected = self.entries.len() - 1;
             self.keep_visible(visible);
+            self.refresh_preview();
         }
 
         fn keep_visible(&mut self, visible: usize) {
@@ -138,6 +149,43 @@ mod enabled {
                 self.scroll = self.selected + 1 - visible;
             }
         }
+
+        fn refresh_preview(&mut self) {
+            let Some(entry) = self.selected().cloned() else {
+                self.preview = None;
+                return;
+            };
+            self.preview = if entry.directory {
+                None
+            } else {
+                Some(epub_preview(&entry.path))
+            };
+        }
+    }
+
+    fn epub_preview(path: &Path) -> String {
+        let size = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(_) => return "元数据预览不可用，仍可尝试打开".into(),
+        };
+        if size > PREVIEW_MAX_EPUB_BYTES {
+            return format!(
+                "EPUB · {:.1} MiB · 元数据预览已跳过（预览上限 16 MiB）",
+                size as f64 / (1024.0 * 1024.0)
+            );
+        }
+        let mut limits = EpubLimits::default();
+        limits.zip.max_archive_bytes = PREVIEW_MAX_EPUB_BYTES as usize;
+        let parsed = (|| -> Result<String> {
+            let mut source = LocalFileSource::open(path)?;
+            let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
+            let book = EpubBook::parse(&bytes, limits)?;
+            let title = book.title().unwrap_or("(未命名)");
+            let creator = book.creator().unwrap_or("作者未知");
+            let language = book.language().unwrap_or("语言未知");
+            Ok(format!("《{title}》 · {creator} · {language}"))
+        })();
+        parsed.unwrap_or_else(|_| "元数据预览不可用，仍可尝试打开".into())
     }
 
     enum Mode {
@@ -394,7 +442,7 @@ mod enabled {
                 282,
                 info_y + 98,
                 14,
-                "CSS、图片和目录导航仍在继续完善",
+                "CSS、图片和复杂版式仍在继续完善",
                 MUTED,
             )?;
             let status = text.fit(14, &self.status, content_w.saturating_sub(24))?;
@@ -464,6 +512,7 @@ mod enabled {
             }
 
             let footer_y = self.surface.height() as i32 - 42;
+            let preview_y = footer_y - 30;
             let path_width = self.surface.width().saturating_sub(360);
             let footer_width = self.surface.width().saturating_sub(280);
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
@@ -492,6 +541,10 @@ mod enabled {
 
             if browser.entries.is_empty() {
                 text.draw(272, LIST_TOP + 30, 15, "当前目录没有 EPUB 文件", MUTED)?;
+            }
+            if let Some(preview) = &browser.preview {
+                let preview = text.fit(13, preview, footer_width)?;
+                text.draw(250, preview_y, 13, &preview, ACCENT)?;
             }
             let footer = format!(
                 "{} 项 · Enter 打开 · Backspace 上一级 · Esc 退出",
@@ -551,6 +604,7 @@ mod enabled {
                             if target < browser.entries.len() {
                                 browser.selected = target;
                                 browser.keep_visible(visible);
+                                browser.refresh_preview();
                             } else {
                                 return Ok(false);
                             }
@@ -658,7 +712,7 @@ mod enabled {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::{test_font, ui::UiFont};
+        use crate::{test_epub, test_font, ui::UiFont};
         use std::{
             sync::atomic::{AtomicU64, Ordering},
             time::{SystemTime, UNIX_EPOCH},
@@ -705,6 +759,20 @@ mod enabled {
                 .map(|entry| entry.name.as_str())
                 .collect();
             assert_eq!(names, ["中文目录", "A.EPUB", "中文图书.epub"]);
+        }
+
+        #[test]
+        fn selected_epub_preview_uses_package_metadata_without_blocking_invalid_books() {
+            let temp = Temp::new();
+            let valid = temp.0.join("valid.epub");
+            fs::write(&valid, test_epub::make_epub()).unwrap();
+            let preview = epub_preview(&valid);
+            assert!(preview.contains("ReadAll"));
+            assert!(preview.contains("作者未知"));
+
+            let invalid = temp.0.join("invalid.epub");
+            fs::write(&invalid, b"not an epub").unwrap();
+            assert_eq!(epub_preview(&invalid), "元数据预览不可用，仍可尝试打开");
         }
 
         #[test]
