@@ -21,6 +21,7 @@ mod embedded;
 mod embedded_tests;
 mod font_cache;
 mod shaping;
+mod syntax;
 use font_cache::Fonts;
 use images::ImageStore;
 use readall_core::{DocumentId, Limits, TextDocument, layout::tab_advance};
@@ -42,6 +43,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub(crate) struct Chapter<'book, 'archive> {
     document: TextDocument,
     content: ChapterContent,
+    syntax: syntax::Syntax,
     embedded: embedded::EmbeddedFonts,
     images: RefCell<ImageStore<'book, 'archive>>,
     identity: (DocumentId, usize),
@@ -56,6 +58,10 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
     pub(crate) fn load(book: &'book EpubBook<'archive>, spine: usize) -> Result<Self> {
         crate::loading::stage("解析当前章节与样式")?;
         let mut content = book.read_spine_content(spine)?;
+        let syntax = syntax::Syntax::build(&content)?;
+        if let Some(warning) = syntax.warning() {
+            content.warnings.push(warning);
+        }
         crate::loading::stage("加载章节内嵌字体")?;
         let embedded = embedded::EmbeddedFonts::load(book, &mut content);
         crate::loading::check()?;
@@ -67,6 +73,7 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
         Ok(Self {
             document,
             content,
+            syntax,
             embedded,
             images,
             identity: (book.id(), spine),
@@ -393,6 +400,7 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
         }
         surface.draw(&decorations)?;
         let (mut raster_work, mut blend_work, mut glyphs) = (0_u64, 0_u64, 0_usize);
+        let mut colors = chapter.syntax.painter(self.theme);
         let mut hits = Vec::new();
         let mut image_hits = Vec::new();
         for (item_index, item) in current.items.iter().enumerate() {
@@ -440,12 +448,7 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
                                     margin + x.round() as i32,
                                     margin + (line.baseline + glyph.y).round() as i32,
                                 ),
-                                if glyph.style.backdrop.is_some() {
-                                    let [r, g, b] = glyph.style.color;
-                                    Color::rgba(r, g, b, 255)
-                                } else {
-                                    self.theme.text_color(glyph.style.color)
-                                },
+                                colors.color(&glyph.source, glyph.style),
                                 clip,
                                 glyph.bold,
                                 glyph.italic,
