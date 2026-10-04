@@ -21,6 +21,9 @@ mod session;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod svg_icon;
 #[cfg(test)]
+#[path = "../tests/support/azw3.rs"]
+mod test_azw3;
+#[cfg(test)]
 #[path = "../tests/support/epub.rs"]
 mod test_epub;
 #[cfg(test)]

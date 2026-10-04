@@ -187,10 +187,11 @@ mod enabled {
                     readall_mobi::MobiBook::parse(&bytes, readall_mobi::MobiLimits::default())?;
                 let meta = book.metadata();
                 return Ok(format!(
-                    "《{}》 · {} · {} · MOBI",
+                    "《{}》 · {} · {} · {}",
                     meta.title,
                     meta.author.as_deref().unwrap_or("作者未知"),
-                    meta.language.as_deref().unwrap_or("语言未知")
+                    meta.language.as_deref().unwrap_or("语言未知"),
+                    if meta.version == 8 { "AZW3" } else { "MOBI" }
                 ));
             }
             let book = EpubBook::parse(&bytes, limits)?;
@@ -249,7 +250,7 @@ mod enabled {
                 selected_book: None,
                 close_requested: false,
                 pointer: None,
-                status: "支持 EPUB / MOBI，点击“打开图书”开始".into(),
+                status: "支持 EPUB / MOBI / AZW3，点击“打开图书”开始".into(),
             };
             home.paint()?;
             Ok(home)
@@ -265,7 +266,7 @@ mod enabled {
 
         fn open_browser(&mut self) -> WindowResult<bool> {
             self.mode = Mode::Browser(Browser::load(Self::default_directory())?);
-            self.status = "选择 EPUB / MOBI 图书".into();
+            self.status = "选择 EPUB / MOBI / AZW3 图书".into();
             self.paint()?;
             Ok(true)
         }
@@ -373,13 +374,13 @@ mod enabled {
                 Mode::Library => None,
             };
             let Some(selected) = selected else {
-                self.status = "当前目录没有可打开的 EPUB / MOBI 图书".into();
+                self.status = "当前目录没有可打开的 EPUB / MOBI / AZW3 图书".into();
                 self.paint()?;
                 return Ok(true);
             };
             if selected.directory {
                 self.mode = Mode::Browser(Browser::load(selected.path)?);
-                self.status = "选择 EPUB / MOBI 图书".into();
+                self.status = "选择 EPUB / MOBI / AZW3 图书".into();
                 self.paint()?;
                 return Ok(true);
             }
@@ -396,11 +397,11 @@ mod enabled {
             match parent {
                 Some(parent) => {
                     self.mode = Mode::Browser(Browser::load(parent)?);
-                    self.status = "选择 EPUB / MOBI 图书".into();
+                    self.status = "选择 EPUB / MOBI / AZW3 图书".into();
                 }
                 None => {
                     self.mode = Mode::Library;
-                    self.status = "支持 EPUB / MOBI，点击“打开图书”开始".into();
+                    self.status = "支持 EPUB / MOBI / AZW3，点击“打开图书”开始".into();
                 }
             }
             self.paint()?;
@@ -492,8 +493,8 @@ mod enabled {
 
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(282, 148, 24, "打开 EPUB / MOBI 图书", INK)?;
-            text.draw(282, 190, 15, "浏览本地目录，选择 EPUB / MOBI 后阅读", MUTED)?;
+            text.draw(282, 148, 24, "打开电子书", INK)?;
+            text.draw(282, 190, 15, "支持 EPUB / MOBI / AZW3，选择后阅读", MUTED)?;
             text.draw(282, 230, 14, "点击卡片或按 Enter", ACCENT)?;
             text.draw(282, info_y + 20, 17, "最近阅读", INK)?;
             if self.recent.is_empty() {
@@ -606,7 +607,7 @@ mod enabled {
                     272,
                     LIST_TOP + 30,
                     15,
-                    "当前目录没有 EPUB / MOBI 文件",
+                    "当前目录没有 EPUB / MOBI / AZW3 文件",
                     MUTED,
                 )?;
             }
@@ -857,7 +858,14 @@ mod enabled {
                 .collect();
             assert_eq!(
                 names,
-                ["中文目录", "A.EPUB", "B.MOBI", "c.azw", "中文图书.epub"]
+                [
+                    "中文目录",
+                    "A.EPUB",
+                    "B.MOBI",
+                    "c.azw",
+                    "d.azw3",
+                    "中文图书.epub"
+                ]
             );
         }
 

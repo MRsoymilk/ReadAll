@@ -33,7 +33,7 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
         )?;
         writeln!(
             output,
-            "\nMOBI reading (unencrypted MOBI6/7):\n  readall <book.mobi>\n  readall open-mobi <book.mobi> [reader options]\n  readall mobi-info <book.mobi>\n  readall mobi-text <book.mobi> [--spine N]\n  readall render-mobi <book.mobi> <new-output.ppm> --font <font.ttf> [page options]\nSearch, annotations and all three page modes also accept MOBI. UTF-8/Windows-1252 and uncompressed/PalmDOC/HUFF-CDIC are supported. Dual files use their legacy MOBI section; standalone KF8/AZW3, KFX and DRM remain unsupported."
+            "\nMOBI reading (unencrypted MOBI6/7):\n  readall <book.mobi>\n  readall open-mobi <book.mobi> [reader options]\n  readall mobi-info <book.mobi>\n  readall mobi-text <book.mobi> [--spine N]\n  readall render-mobi <book.mobi> <new-output.ppm> --font <font.ttf> [page options]\nSearch, annotations and all three page modes also accept MOBI. UTF-8/Windows-1252 and uncompressed/PalmDOC/HUFF-CDIC are supported. Dual files use their legacy MOBI section; standalone reflowable AZW3/KF8 is supported; KFX, fixed-layout KF8 and DRM remain unsupported.\nAZW3 commands: readall <book.azw3>, open-azw3, azw3-info, azw3-text and render-azw3 (same options as MOBI)."
         )?;
         return Ok(());
     }
@@ -42,7 +42,7 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
         return crate::publication::open(&args, output);
     }
     let command = args[0].to_str().ok_or("command must be UTF-8")?;
-    if command == "mobi-info" {
+    if matches!(command, "mobi-info" | "azw3-info") {
         return mobi_info(&args[1..], output);
     }
     if matches!(
@@ -97,19 +97,19 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
         }
         return crate::native::run(&args[1..], output);
     }
-    if matches!(command, "open-epub" | "open-mobi") {
+    if matches!(command, "open-epub" | "open-mobi" | "open-azw3") {
         return crate::publication::open(&args[1..], output);
     }
     if command == "render-text" {
         return crate::text_page::run(&args[1..], output);
     }
-    if matches!(command, "render-epub" | "render-mobi") {
+    if matches!(command, "render-epub" | "render-mobi" | "render-azw3") {
         return crate::epub_page::run(&args[1..], output);
     }
     if command == "epub-info" {
         return epub_info(&args[1..], output);
     }
-    if matches!(command, "epub-text" | "mobi-text") {
+    if matches!(command, "epub-text" | "mobi-text" | "azw3-text") {
         return epub_text(&args[1..], output);
     }
     if !matches!(command, "inspect" | "read" | "render-demo") {
@@ -253,8 +253,12 @@ fn mobi_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let meta = book.metadata();
     writeln!(
         output,
-        "Format: MOBI{}\nTitle: {}\nCreator: {}\nLanguage: {}\nEncoding: {}\nCompression: {}\nText records: {}\nText bytes: {}\nDual MOBI/KF8: {}",
-        meta.version,
+        "Format: {}\nTitle: {}\nCreator: {}\nLanguage: {}\nEncoding: {}\nCompression: {}\nText records: {}\nText bytes: {}\nDual MOBI/KF8: {}",
+        if meta.version == 8 {
+            "AZW3/KF8".to_owned()
+        } else {
+            format!("MOBI{}", meta.version)
+        },
         meta.title,
         meta.author.as_deref().unwrap_or("(unknown)"),
         meta.language.as_deref().unwrap_or("(unknown)"),
