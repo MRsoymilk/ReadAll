@@ -11,7 +11,10 @@ pub(crate) fn run(_: &mut impl Write) -> Result<()> {
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
     use super::*;
-    use crate::ui::{UiFont, UiPainter};
+    use crate::{
+        recent::RecentStore,
+        ui::{UiFont, UiPainter},
+    };
     use readall_core::read_bounded;
     use readall_epub::{EpubBook, EpubLimits};
     use readall_platform::{
@@ -40,6 +43,9 @@ mod enabled {
     const LIST_TOP: i32 = 150;
     const LIST_BOTTOM_MARGIN: i32 = 96;
     const PREVIEW_MAX_EPUB_BYTES: u64 = 16 * 1024 * 1024;
+    const RECENT_TOP: i32 = 366;
+    const RECENT_ROW_HEIGHT: i32 = 34;
+    const RECENT_VISIBLE: usize = 3;
 
     #[derive(Debug, Clone)]
     struct FileEntry {
@@ -206,6 +212,7 @@ mod enabled {
     enum HoverTarget {
         None,
         OpenCard,
+        RecentRow(usize),
         BrowserBack,
         BrowserRow(usize),
     }
@@ -214,6 +221,7 @@ mod enabled {
         surface: Surface,
         ui_font: &'font UiFont,
         mode: Mode,
+        recent: Vec<PathBuf>,
         selected_book: Option<PathBuf>,
         close_requested: bool,
         pointer: Option<(i32, i32)>,
@@ -222,10 +230,14 @@ mod enabled {
 
     impl<'font> Home<'font> {
         fn new(width: u32, height: u32, ui_font: &'font UiFont) -> WindowResult<Self> {
+            let recent = RecentStore::from_environment()
+                .and_then(|store| store.load())
+                .unwrap_or_default();
             let mut home = Self {
                 surface: Surface::new(width, height, RenderLimits::default())?,
                 ui_font,
                 mode: Mode::Library,
+                recent,
                 selected_book: None,
                 close_requested: false,
                 pointer: None,
@@ -264,6 +276,24 @@ mod enabled {
             )
         }
 
+        fn recent_row_rect(&self, index: usize) -> Rect {
+            Rect::new(
+                270,
+                RECENT_TOP + index as i32 * RECENT_ROW_HEIGHT,
+                self.surface.width().saturating_sub(320).min(610),
+                (RECENT_ROW_HEIGHT - 4) as u32,
+            )
+        }
+
+        fn activate_recent(&mut self, index: usize) -> WindowResult<bool> {
+            let Some(path) = self.recent.get(index).cloned() else {
+                return Ok(false);
+            };
+            self.selected_book = Some(path);
+            self.close_requested = true;
+            Ok(false)
+        }
+
         fn hover_target(&self) -> HoverTarget {
             let Some((x, y)) = self.pointer else {
                 return HoverTarget::None;
@@ -272,10 +302,14 @@ mod enabled {
                 Mode::Library => {
                     let card = self.open_card_rect();
                     if point_in(card, x, y) {
-                        HoverTarget::OpenCard
-                    } else {
-                        HoverTarget::None
+                        return HoverTarget::OpenCard;
                     }
+                    for index in 0..self.recent.len().min(RECENT_VISIBLE) {
+                        if point_in(self.recent_row_rect(index), x, y) {
+                            return HoverTarget::RecentRow(index);
+                        }
+                    }
+                    HoverTarget::None
                 }
                 Mode::Browser(browser) => {
                     if (250..=326).contains(&x) && (102..=142).contains(&y) {
@@ -418,6 +452,21 @@ mod enabled {
                 rect: Rect::new(250, info_y, content_w.min(650), 158),
                 color: PANEL,
             }])?;
+            let hover = self.hover_target();
+            for index in 0..self.recent.len().min(RECENT_VISIBLE) {
+                let row = self.recent_row_rect(index);
+                let hovered = hover == HoverTarget::RecentRow(index);
+                self.surface.draw(&[
+                    DrawCommand::FillRect {
+                        rect: row,
+                        color: if hovered { HOVER_SOFT } else { PANEL },
+                    },
+                    DrawCommand::FillRect {
+                        rect: Rect::new(row.x, row.y, if hovered { 4 } else { 2 }, row.height),
+                        color: if hovered { ACCENT } else { BORDER },
+                    },
+                ])?;
+            }
 
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
@@ -430,21 +479,32 @@ mod enabled {
                 MUTED,
             )?;
             text.draw(282, 230, 14, "点击卡片或按 Enter", ACCENT)?;
-            text.draw(282, info_y + 24, 17, "当前阅读能力", INK)?;
-            text.draw(
-                282,
-                info_y + 62,
-                14,
-                "XHTML 文本 · 跨章节翻页 · 阅读进度保存",
-                MUTED,
-            )?;
-            text.draw(
-                282,
-                info_y + 98,
-                14,
-                "CSS、图片和复杂版式仍在继续完善",
-                MUTED,
-            )?;
+            text.draw(282, info_y + 20, 17, "最近阅读", INK)?;
+            if self.recent.is_empty() {
+                text.draw(282, info_y + 62, 14, "暂无最近阅读", MUTED)?;
+                text.draw(
+                    282,
+                    info_y + 96,
+                    13,
+                    "成功关闭一本 EPUB 后会自动记录",
+                    MUTED,
+                )?;
+            } else {
+                for (index, path) in self.recent.iter().take(RECENT_VISIBLE).enumerate() {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_else(|| path.as_os_str().to_string_lossy());
+                    let name = text.fit(14, &name, content_w.saturating_sub(110).min(560))?;
+                    text.draw(
+                        286,
+                        RECENT_TOP + index as i32 * RECENT_ROW_HEIGHT + 7,
+                        14,
+                        &name,
+                        INK,
+                    )?;
+                }
+            }
             let status = text.fit(14, &self.status, content_w.saturating_sub(24))?;
             text.draw(250, footer_y, 14, &status, MUTED)?;
             Ok(())
@@ -638,8 +698,16 @@ mod enabled {
             }
             match action {
                 Action::Activate => self.open_browser(),
-                Action::Click { x, y } if (250..=900).contains(&x) && (120..=294).contains(&y) => {
-                    self.open_browser()
+                Action::Click { x, y } => {
+                    if point_in(self.open_card_rect(), x, y) {
+                        return self.open_browser();
+                    }
+                    for index in 0..self.recent.len().min(RECENT_VISIBLE) {
+                        if point_in(self.recent_row_rect(index), x, y) {
+                            return self.activate_recent(index);
+                        }
+                    }
+                    Ok(false)
                 }
                 Action::Back => Ok(false),
                 Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
@@ -650,7 +718,6 @@ mod enabled {
                 | Action::Last
                 | Action::Larger
                 | Action::Smaller
-                | Action::Click { .. }
                 | Action::Close => Ok(false),
             }
         }
@@ -694,17 +761,26 @@ mod enabled {
             };
             writeln!(output, "正在打开 EPUB: {:?}", book)?;
             output.flush()?;
-            if let Err(error) = crate::native_epub::open_path(&book, output) {
-                writeln!(output, "无法打开 EPUB: {error}")?;
-                match crate::diagnostics::log_epub_failure(&book, error.as_ref()) {
-                    Ok(path) => writeln!(output, "错误日志: {}", path.display())?,
-                    Err(log_error) => writeln!(
-                        output,
-                        "错误日志写入失败: {log_error}; 目标路径: {}",
-                        crate::diagnostics::diagnostic_path().display()
-                    )?,
+            match crate::native_epub::open_path(&book, output) {
+                Ok(()) => {
+                    if let Err(error) =
+                        RecentStore::from_environment().and_then(|store| store.record(&book))
+                    {
+                        writeln!(output, "最近阅读记录写入失败: {error}")?;
+                    }
                 }
-                output.flush()?;
+                Err(error) => {
+                    writeln!(output, "无法打开 EPUB: {error}")?;
+                    match crate::diagnostics::log_epub_failure(&book, error.as_ref()) {
+                        Ok(path) => writeln!(output, "错误日志: {}", path.display())?,
+                        Err(log_error) => writeln!(
+                            output,
+                            "错误日志写入失败: {log_error}; 目标路径: {}",
+                            crate::diagnostics::diagnostic_path().display()
+                        )?,
+                    }
+                    output.flush()?;
+                }
             }
         }
     }
@@ -786,6 +862,30 @@ mod enabled {
             assert!(!home.action(Action::Activate).unwrap());
             assert!(home.close_requested());
             assert_eq!(home.selected_book.as_deref(), Some(book.as_path()));
+        }
+
+        #[test]
+        fn clicking_recent_book_requests_open_without_entering_browser() {
+            let temp = Temp::new();
+            let book = temp.0.join("recent.epub");
+            fs::write(&book, test_epub::make_epub()).unwrap();
+            let ui_font = font();
+            let mut home = Home::new(1040, 700, &ui_font).unwrap();
+            home.recent = vec![book.clone()];
+            home.paint().unwrap();
+            let row = home.recent_row_rect(0);
+            assert!(home.hover_target() == HoverTarget::None);
+            assert!(
+                !home
+                    .action(Action::Click {
+                        x: row.x + 10,
+                        y: row.y + 10,
+                    })
+                    .unwrap()
+            );
+            assert!(home.close_requested());
+            assert_eq!(home.selected_book.as_deref(), Some(book.as_path()));
+            assert!(matches!(home.mode, Mode::Library));
         }
 
         #[test]
