@@ -79,7 +79,11 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
             identity: (book.id(), spine),
         })
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+    #[cfg(any(
+        test,
+        feature = "mobile",
+        all(target_os = "linux", feature = "wayland")
+    ))]
     pub(crate) fn image(
         &self,
         index: usize,
@@ -87,7 +91,11 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
     ) -> Option<std::sync::Arc<readall_image::RgbaImage>> {
         self.images.borrow_mut().get_with_fonts(index, fonts)
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+    #[cfg(any(
+        test,
+        feature = "mobile",
+        all(target_os = "linux", feature = "wayland")
+    ))]
     pub(crate) fn text_link(&self, range: Range<usize>) -> Option<&readall_epub::ContentLink> {
         let index = self
             .content
@@ -98,7 +106,11 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
             .get(index)
             .filter(|link| link.text.start < range.end && range.start < link.text.end)
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+    #[cfg(any(
+        test,
+        feature = "mobile",
+        all(target_os = "linux", feature = "wayland")
+    ))]
     pub(crate) fn image_link(&self, image: usize) -> Option<&readall_epub::ContentLink> {
         let index = self
             .content

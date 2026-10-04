@@ -7,6 +7,8 @@ build = "build.rs"
 
 [features]
 default = ["wayland"]
+# Platform-neutral worker API; does not enable Wayland, XKB or desktop clipboard.
+mobile = []
 wayland = ["readall-platform/wayland", "dep:wl-clipboard-rs"]
 
 [build-dependencies]
