@@ -1,6 +1,7 @@
 //! Bounded ZIP reader for ReadAll document containers.
 //! Supports stored and raw-DEFLATE entries without extracting paths to the filesystem.
 mod deflate;
+pub mod zlib;
 
 use std::{collections::HashSet, fmt, ops::Range};
 
@@ -263,6 +264,28 @@ impl<'a> ZipArchive<'a> {
             .entry(name)
             .ok_or(ArchiveError::Invalid("requested ZIP entry is absent"))?;
         self.read_entry(entry)
+    }
+
+    /// Read an unverified header prefix without allocating/decoding the entire entry.
+    /// This is only for geometry probes; callers must use `read` for actual content
+    /// so the full uncompressed size and CRC are verified before rendering.
+    pub fn read_prefix(&self, name: &str, prefix: usize) -> Result<Vec<u8>> {
+        if prefix > 4096 {
+            return Err(ArchiveError::LimitExceeded("ZIP probe bytes"));
+        }
+        let entry = self
+            .entry(name)
+            .ok_or(ArchiveError::Invalid("requested ZIP entry is absent"))?;
+        let compressed = slice(self.bytes, entry.data.start, entry.compressed_size)?;
+        let length = prefix.min(entry.uncompressed_size);
+        match entry.method {
+            0 => Ok(compressed
+                .get(..length)
+                .ok_or(ArchiveError::Invalid("truncated stored header"))?
+                .to_vec()),
+            8 => deflate::decode_prefix(compressed, entry.uncompressed_size, length),
+            _ => Err(ArchiveError::Unsupported("compression method")),
+        }
     }
 
     pub fn read_entry(&self, entry: &ZipEntry) -> Result<Vec<u8>> {

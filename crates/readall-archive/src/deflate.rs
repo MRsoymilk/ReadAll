@@ -138,25 +138,67 @@ fn reverse_bits(mut code: u32, length: u8) -> u32 {
 }
 
 pub(crate) fn decode(input: &[u8], expected_size: usize) -> Result<Vec<u8>> {
+    decode_until(input, expected_size, None)
+}
+
+/// Unverified prefix for image header probes; full reads still verify size/CRC.
+/// Limit compressed work as well as output so empty-block streams stay bounded.
+pub(crate) fn decode_prefix(input: &[u8], expected_size: usize, prefix: usize) -> Result<Vec<u8>> {
+    if prefix > 4096 {
+        return Err(ArchiveError::LimitExceeded("DEFLATE probe bytes"));
+    }
+    decode_until(
+        &input[..input.len().min(64 * 1024)],
+        expected_size,
+        Some(prefix.min(expected_size)),
+    )
+}
+
+fn decode_until(input: &[u8], expected_size: usize, stop: Option<usize>) -> Result<Vec<u8>> {
+    if stop == Some(0) {
+        return Ok(Vec::new());
+    }
     let mut bits = Bits::new(input);
     let mut output = Vec::new();
     output
-        .try_reserve_exact(expected_size)
+        .try_reserve_exact(stop.unwrap_or(expected_size))
         .map_err(|_| ArchiveError::AllocationFailed)?;
 
+    let mut blocks = 0;
     loop {
+        blocks += 1;
+        if stop.is_some() && blocks > 4096 {
+            return Err(ArchiveError::LimitExceeded("DEFLATE probe blocks"));
+        }
         let final_block = bits.read(1)? != 0;
         match bits.read(2)? {
-            0 => stored(&mut bits, &mut output, expected_size)?,
+            0 => stored(&mut bits, &mut output, expected_size, stop)?,
             1 => {
                 let (literal, distance) = fixed_trees()?;
-                compressed(&mut bits, &literal, &distance, &mut output, expected_size)?;
+                compressed(
+                    &mut bits,
+                    &literal,
+                    &distance,
+                    &mut output,
+                    expected_size,
+                    stop,
+                )?;
             }
             2 => {
                 let (literal, distance) = dynamic_trees(&mut bits)?;
-                compressed(&mut bits, &literal, &distance, &mut output, expected_size)?;
+                compressed(
+                    &mut bits,
+                    &literal,
+                    &distance,
+                    &mut output,
+                    expected_size,
+                    stop,
+                )?;
             }
             _ => return Err(ArchiveError::Invalid("reserved DEFLATE block type")),
+        }
+        if stop.is_some_and(|end| output.len() == end) {
+            return Ok(output);
         }
         if final_block {
             break;
@@ -174,7 +216,12 @@ pub(crate) fn decode(input: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn stored(bits: &mut Bits<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()> {
+fn stored(
+    bits: &mut Bits<'_>,
+    output: &mut Vec<u8>,
+    limit: usize,
+    stop: Option<usize>,
+) -> Result<()> {
     bits.align_byte();
     let length = bits.read(16)? as u16;
     let complement = bits.read(16)? as u16;
@@ -187,8 +234,9 @@ fn stored(bits: &mut Bits<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()>
         .checked_add(length)
         .filter(|end| *end <= limit)
         .ok_or(ArchiveError::LimitExceeded("DEFLATE output"))?;
+    let end = end.min(stop.unwrap_or(end));
     output
-        .try_reserve(length)
+        .try_reserve(end - output.len())
         .map_err(|_| ArchiveError::AllocationFailed)?;
     for _ in output.len()..end {
         output.push(bits.read(8)? as u8);
@@ -270,6 +318,7 @@ fn compressed(
     distance: &Huffman,
     output: &mut Vec<u8>,
     limit: usize,
+    stop: Option<usize>,
 ) -> Result<()> {
     const LENGTH_BASE: [usize; 29] = [
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
@@ -288,6 +337,9 @@ fn compressed(
     ];
 
     loop {
+        if stop.is_some_and(|end| output.len() == end) {
+            return Ok(());
+        }
         let symbol = literal.decode(bits)?;
         match symbol {
             0..=255 => {
@@ -316,8 +368,9 @@ fn compressed(
                     .checked_add(length)
                     .filter(|end| *end <= limit)
                     .ok_or(ArchiveError::LimitExceeded("DEFLATE output"))?;
+                let end = end.min(stop.unwrap_or(end));
                 output
-                    .try_reserve(length)
+                    .try_reserve(end - output.len())
                     .map_err(|_| ArchiveError::AllocationFailed)?;
                 while output.len() < end {
                     let byte = output[output.len() - distance];
@@ -336,6 +389,28 @@ fn compressed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_probes_stop_before_later_data_and_bound_work() {
+        let stored = b"\x01\x05\x00\xfa\xffhello";
+        let fixed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
+        for (data, expected) in [
+            (stored.as_slice(), b"hello".as_slice()),
+            (&fixed, b"hello hello hello"),
+        ] {
+            for length in 0..=expected.len() {
+                assert_eq!(
+                    decode_prefix(data, expected.len(), length).unwrap(),
+                    &expected[..length]
+                );
+            }
+        }
+        assert_eq!(decode_prefix(&stored[..8], 5, 3).unwrap(), b"hel");
+        assert!(decode(&stored[..8], 5).is_err());
+        assert!(decode_prefix(stored, 5, 4097).is_err());
+        let empty_blocks = b"\x00\x00\x00\xff\xff".repeat(4097);
+        assert!(decode_prefix(&empty_blocks, 1, 1).is_err());
+    }
 
     #[test]
     fn stored_and_fixed_streams_decode() {
@@ -359,6 +434,10 @@ mod tests {
         ];
         let plain = b"abcdefg1234567890".repeat(1000);
         assert_eq!(decode(&compressed, plain.len()).unwrap(), plain);
+        assert_eq!(
+            decode_prefix(&compressed, plain.len(), 33).unwrap(),
+            &plain[..33]
+        );
     }
 
     #[test]
