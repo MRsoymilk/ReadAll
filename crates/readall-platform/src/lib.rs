@@ -1,5 +1,5 @@
 //! Host adapters. Linux Wayland is opt-in; Android SAF and other window backends remain unimplemented.
-#[cfg(all(target_os = "linux", feature = "wayland"))]
+#[cfg(feature = "web-links")]
 pub mod web_link;
 pub mod window;
 

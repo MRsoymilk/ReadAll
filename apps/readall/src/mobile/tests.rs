@@ -96,11 +96,7 @@ fn navigation_toc_theme_resize_and_restart_keep_a_content_anchor() {
     let reader = Reader::open(config.clone()).unwrap();
     let first = wait(&reader, |s| s.frame.is_some());
     reader.command(Command::Next).unwrap();
-    let second = wait(&reader, |s| {
-        s.frame
-            .as_ref()
-            .is_some_and(|f| f.serial > first.frame.as_ref().unwrap().serial)
-    });
+    let second = wait(&reader, |s| !s.busy && s.locator != first.locator);
     assert_ne!(first.locator, second.locator);
     reader
         .command(Command::Resize {
@@ -130,7 +126,7 @@ fn navigation_toc_theme_resize_and_restart_keep_a_content_anchor() {
     });
     assert_eq!(themed.locator, jumped.locator);
     reader.command(Command::Bookmark).unwrap();
-    wait(&reader, |s| s.notice == "已保存书签");
+    wait(&reader, |s| s.notice.contains("书签已保存"));
     stop(&reader);
     drop(reader);
     let resumed = Reader::open(config).unwrap();
@@ -139,7 +135,7 @@ fn navigation_toc_theme_resize_and_restart_keep_a_content_anchor() {
     stop(&resumed);
 }
 #[test]
-fn errors_and_cancellation_are_reported_and_do_not_replace_the_last_frame() {
+fn errors_and_cancellation_preserve_page_content_while_reporting_status() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = Temp::new();
     let config = temp.config("book.epub", &test_epub::make_epub());
@@ -153,7 +149,12 @@ fn errors_and_cancellation_are_reported_and_do_not_replace_the_last_frame() {
         .unwrap();
     let error = wait(&reader, |s| !s.notice.is_empty());
     assert_eq!(error.locator, first.locator);
-    assert_eq!(error.frame.unwrap().serial, first.frame.unwrap().serial);
+    let before = first.frame.unwrap();
+    let after = error.frame.unwrap();
+    assert_eq!(
+        &before.surface.pixels()[100 * 400..200 * 400],
+        &after.surface.pixels()[100 * 400..200 * 400]
+    );
     assert!(
         reader
             .command(Command::Resize {
@@ -168,6 +169,47 @@ fn errors_and_cancellation_are_reported_and_do_not_replace_the_last_frame() {
     let state = wait(&invalid, |s| s.closed);
     assert!(state.frame.is_none());
     assert!(!state.notice.is_empty());
+}
+#[test]
+fn mobile_commands_drive_shared_settings_touch_and_pause_without_reopening_book() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = Temp::new();
+    let html = format!(
+        "<html><body>{}</body></html>",
+        "<p>AAAA WWWW AAAA</p>".repeat(150)
+    );
+    let bytes = test_epub::make_epub_with_resources(&[&html], vec![]);
+    let config = temp.config("touch.epub", &bytes);
+    let reader = Reader::open(config.clone()).unwrap();
+    let first = wait(&reader, |s| s.frame.is_some());
+    assert_eq!(first.ui_mode, "expanded");
+    reader
+        .command(Command::Ui(UiAction::Command(UiCommand::Settings)))
+        .unwrap();
+    wait(&reader, |s| s.ui_mode == "settings");
+    for _ in 0..4 {
+        reader.command(Command::Next).unwrap();
+    }
+    reader.command(Command::Larger).unwrap();
+    wait(&reader, |s| s.page_mode == "book" && !s.busy);
+    reader.command(Command::Back).unwrap();
+    wait(&reader, |s| s.ui_mode == "expanded" && !s.busy);
+    for (kind, x, y) in [(0, 350, 170), (2, 350, 170), (3, 40, 170), (4, 40, 170)] {
+        reader.command(Command::Touch { kind, x, y }).unwrap();
+    }
+    let turned = wait(&reader, |s| s.locator != first.locator);
+    reader.command(Command::Pause(true)).unwrap();
+    wait(&reader, |s| {
+        !s.animating && !s.busy && s.revision > turned.revision
+    });
+    reader.command(Command::Pause(false)).unwrap();
+    stop(&reader);
+    drop(reader);
+    let resumed = Reader::open(config).unwrap();
+    let ready = wait(&resumed, |s| s.frame.is_some());
+    assert_eq!(ready.page_mode, "book");
+    assert_eq!(ready.locator, turned.locator);
+    stop(&resumed);
 }
 #[test]
 fn validated_mobile_paths_and_dimensions_precede_thread_creation() {

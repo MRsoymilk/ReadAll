@@ -30,7 +30,11 @@ mod reader_data;
 mod recent;
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
 mod session;
-#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+#[cfg(any(
+    test,
+    feature = "mobile",
+    all(target_os = "linux", feature = "wayland")
+))]
 mod svg_icon;
 #[cfg(test)]
 #[path = "../tests/support/azw3.rs"]
@@ -45,7 +49,11 @@ mod test_font;
 #[path = "../tests/support/mobi.rs"]
 mod test_mobi;
 mod text_page;
-#[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+#[cfg(any(
+    test,
+    feature = "mobile",
+    all(target_os = "linux", feature = "wayland")
+))]
 mod ui;
 
 /// Existing command-line entry; platform hosts should use the typed mobile API.

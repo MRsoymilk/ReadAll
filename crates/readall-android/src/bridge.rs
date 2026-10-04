@@ -5,7 +5,7 @@ use jni::{
     objects::{JByteBuffer, JClass, JString},
     sys::{jboolean, jint, jlong, jobjectArray},
 };
-use readall::mobile::{Command, Config, Reader, Snapshot};
+use readall::mobile::{Command, Config, Effect, Reader, Snapshot, UiAction, UiCommand};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -84,7 +84,7 @@ fn state_fields(s: Snapshot) -> Vec<String> {
         "ready"
     };
     vec![
-        "1".into(),
+        "2".into(),
         status.into(),
         s.phase.into(),
         s.done.to_string(),
@@ -98,6 +98,11 @@ fn state_fields(s: Snapshot) -> Vec<String> {
         s.locator,
         s.notice,
         s.revision.to_string(),
+        s.ui_mode.into(),
+        s.page_mode.into(),
+        u8::from(s.animating).to_string(),
+        u8::from(s.editing).to_string(),
+        s.input,
     ]
 }
 fn command(code: jint, a: jint, b: jint) -> Result<Command> {
@@ -119,6 +124,25 @@ fn command(code: jint, a: jint, b: jint) -> Result<Command> {
         12 => Command::Resize {
             width: number(a)?,
             height: number(b)?,
+        },
+        13 => Command::Back,
+        14 if matches!(a, 0 | 1) => Command::Pause(a != 0),
+        20 => Command::Ui(UiAction::Command(UiCommand::Find)),
+        21 => Command::Ui(UiAction::Command(UiCommand::Bookmarks)),
+        22 => Command::Ui(UiAction::Command(UiCommand::Settings)),
+        23 => Command::Ui(UiAction::Command(UiCommand::Select)),
+        24 => Command::Ui(UiAction::Command(UiCommand::Copy)),
+        25 => Command::Ui(UiAction::Command(UiCommand::Paste)),
+        26 => Command::Ui(UiAction::Command(UiCommand::Note)),
+        27 => Command::Ui(UiAction::Command(UiCommand::Highlight)),
+        28 => Command::Ui(UiAction::Command(UiCommand::Delete)),
+        29 => Command::Ui(UiAction::Activate),
+        30 => Command::Ui(UiAction::Close),
+        31 => Command::Ui(UiAction::Back),
+        40..=49 => Command::Touch {
+            kind: (code - 40) as u32,
+            x: a,
+            y: b,
         },
         _ => return Err(bad("unknown mobile reader command")),
     })
@@ -256,6 +280,62 @@ pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeClose(
         Ok(())
     })
 }
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeInput(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    mode: JString<'_>,
+    value: JString<'_>,
+) {
+    guard(&mut env, |env| {
+        let mode = text(env, &mode)?;
+        let value = text(env, &value)?;
+        with_reader(handle, |r| {
+            Ok(r.command(Command::Input { mode, text: value })?)
+        })
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeHostReply(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    kind: jint,
+    value: JString<'_>,
+) {
+    guard(&mut env, |env| {
+        let text: String = env.get_string(&value)?.into();
+        if text.len() > 128 * 1024 {
+            return Err(bad("host reply exceeds text limit"));
+        }
+        with_reader(handle, |r| {
+            Ok(r.command(Command::HostReply {
+                kind: number(kind)?,
+                text,
+            })?)
+        })
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeEffects(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+) -> jobjectArray {
+    guard(&mut env, |env| {
+        let effects = with_reader(handle, |r| Ok(r.take_effects()))?;
+        let fields: Vec<String> = effects
+            .into_iter()
+            .flat_map(|effect| match effect {
+                Effect::Copy(text) => ["copy".into(), text],
+                Effect::Paste => ["paste".into(), String::new()],
+                Effect::OpenUrl(url) => ["url".into(), url],
+            })
+            .collect();
+        strings(env, &fields)
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +344,19 @@ mod tests {
         assert!(command(0, 0, 0).is_err());
         assert!(command(8, -1, 0).is_err());
         assert!(command(12, 1, -1).is_err());
+        assert!(command(14, 2, 0).is_err());
+        assert!(matches!(
+            command(42, 30, 60).unwrap(),
+            Command::Touch {
+                kind: 2,
+                x: 30,
+                y: 60
+            }
+        ));
+        assert!(matches!(
+            command(22, 0, 0).unwrap(),
+            Command::Ui(UiAction::Command(UiCommand::Settings))
+        ));
         assert!(with_reader(-100, |r| Ok(r.snapshot())).is_err());
     }
     #[test]
@@ -274,8 +367,10 @@ mod tests {
             ..Snapshot::default()
         };
         let values = state_fields(state);
-        assert_eq!(values.len(), 14);
-        assert_eq!(values[0], "1");
+        assert_eq!(values.len(), 19);
+        assert_eq!(values[0], "2");
+        assert_eq!(values[14], "expanded");
+        assert_eq!(values[15], "slide");
         assert_eq!(values[8], "中文\t\n😀");
         assert_eq!(values[5], "0");
         assert_eq!(values[12], "a\"b");

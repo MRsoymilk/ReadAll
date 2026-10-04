@@ -1,19 +1,24 @@
-//! Platform-neutral, single-owner reader worker used by the Android JNI host.
-//! Owns all borrowing engine objects on one Rust thread; only immutable snapshots
-//! cross the boundary. No JVM objects, environment changes or platform UI here.
+//! Mobile worker for the SAME reader presenter used by the Linux window.
+//! Only immutable frames/state cross JNI. Parsing, interaction and animation live
+//! on this owner thread; Android supplies touch, IME, clipboard and browser services.
+mod input;
 #[cfg(test)]
 mod tests;
 use crate::{
-    epub_session::{Action, EpubSession, Start},
+    epub_session::{EpubSession, Start},
     loading,
+    native_epub::Presentation,
     progress::EpubProgressStore,
     publication,
-    reader_data::{Kind, Settings, Store},
+    reader_data::{Settings, Store},
     text_page::Options,
+    ui::UiFont,
 };
+use input::Inbox;
 use readall_epub::{EpubBook, EpubLimits};
 use readall_font::{Font, FontLimits};
 use readall_platform::LocalFileSource;
+pub use readall_platform::window::{Action as UiAction, ReaderCommand as UiCommand};
 use readall_render::Surface;
 use std::{
     error::Error,
@@ -21,17 +26,13 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 static WORKERS: AtomicUsize = AtomicUsize::new(0);
-
-/// Paths are explicitly supplied by the host. A SAF URI must first be imported
-/// by Android into a bounded app-private file; it is never treated as a Unix path.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub book: PathBuf,
@@ -72,7 +73,6 @@ fn geometry(width: u32, height: u32) -> io::Result<()> {
         Ok(())
     }
 }
-
 #[derive(Debug, Clone)]
 pub enum Command {
     Next,
@@ -87,6 +87,18 @@ pub enum Command {
     CycleTheme,
     Bookmark,
     Save,
+    Ui(UiAction),
+    Touch { kind: u32, x: i32, y: i32 },
+    Back,
+    Pause(bool),
+    Input { mode: String, text: String },
+    HostReply { kind: u32, text: String },
+}
+#[derive(Debug, Clone)]
+pub enum Effect {
+    Copy(String),
+    Paste,
+    OpenUrl(String),
 }
 #[derive(Debug, Clone)]
 pub struct ContentsItem {
@@ -104,7 +116,6 @@ impl Frame {
     pub fn byte_len(&self) -> usize {
         self.surface.width() as usize * self.surface.height() as usize * 4
     }
-    /// Android RGBA_8888 storage; premultiplied channels, native Java direct buffer.
     pub fn write_rgba(&self, output: &mut [u8]) -> io::Result<()> {
         if output.len() != self.byte_len() {
             return Err(invalid("pixel buffer length does not match frame"));
@@ -136,6 +147,11 @@ pub struct Snapshot {
     pub phase: &'static str,
     pub done: usize,
     pub total: usize,
+    pub ui_mode: &'static str,
+    pub page_mode: &'static str,
+    pub animating: bool,
+    pub editing: bool,
+    pub input: String,
 }
 impl Default for Snapshot {
     fn default() -> Self {
@@ -153,13 +169,20 @@ impl Default for Snapshot {
             phase: "准备打开",
             done: 0,
             total: 0,
+            ui_mode: "expanded",
+            page_mode: "slide",
+            animating: false,
+            editing: false,
+            input: String::new(),
         }
     }
 }
 struct Shared {
     snapshot: Mutex<Snapshot>,
-    resize: Mutex<Option<(u32, u32)>>,
+    inbox: Inbox,
     tracker: loading::Tracker,
+    interrupt: Arc<AtomicBool>,
+    effects: Mutex<Vec<Effect>>,
 }
 impl Shared {
     fn update(&self, edit: impl FnOnce(&mut Snapshot)) {
@@ -168,21 +191,19 @@ impl Shared {
         snapshot.revision = snapshot.revision.wrapping_add(1);
     }
 }
-/// Dropping or cancelling does not block Android's main thread. The worker observes
-/// cancellation at existing decode/layout checks and releases its owned state.
 pub struct Reader {
     shared: Arc<Shared>,
-    sender: SyncSender<Command>,
 }
 impl Reader {
     pub fn open(config: Config) -> io::Result<Self> {
         config.validate()?;
         let permit = Permit::acquire()?;
-        let (sender, receiver) = mpsc::sync_channel(16);
         let shared = Arc::new(Shared {
             snapshot: Mutex::new(Snapshot::default()),
-            resize: Mutex::new(None),
+            inbox: Inbox::default(),
             tracker: loading::Tracker::default(),
+            interrupt: Arc::new(AtomicBool::new(false)),
+            effects: Mutex::new(Vec::new()),
         });
         let owner = Arc::clone(&shared);
         thread::Builder::new()
@@ -191,11 +212,12 @@ impl Reader {
                 let _permit = permit;
                 let _guard = owner.tracker.install();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker(config, &owner, receiver)
+                    worker(config, &owner)
                 }));
                 owner.update(|snapshot| {
                     snapshot.busy = false;
                     snapshot.closed = true;
+                    snapshot.animating = false;
                     if !owner.tracker.is_cancelled() {
                         match result {
                             Ok(Err(error)) => snapshot.notice = error.to_string(),
@@ -203,12 +225,12 @@ impl Reader {
                                 snapshot.notice =
                                     "阅读工作线程发生异常；请关闭并重新打开图书".into()
                             }
-                            _ => {}
+                            Ok(Ok(())) => snapshot.notice.clear(),
                         }
                     }
                 });
             })?;
-        Ok(Self { shared, sender })
+        Ok(Self { shared })
     }
     pub fn snapshot(&self) -> Snapshot {
         let mut snapshot = self
@@ -217,32 +239,51 @@ impl Reader {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let progress = self.shared.tracker.snapshot();
-        snapshot.phase = progress.phase;
-        snapshot.done = progress.done;
-        snapshot.total = progress.total;
+        let p = self.shared.tracker.snapshot();
+        snapshot.phase = p.phase;
+        snapshot.done = p.done;
+        snapshot.total = p.total;
         snapshot
     }
     pub fn command(&self, command: Command) -> io::Result<()> {
         if self.shared.tracker.is_cancelled() || self.snapshot().closed {
             return Err(invalid("reader is closed"));
         }
-        if let Command::Resize { width, height } = command {
-            geometry(width, height)?;
-            *self.shared.resize.lock().unwrap_or_else(|e| e.into_inner()) = Some((width, height));
-            return Ok(());
+        match &command {
+            Command::Resize { width, height } => geometry(*width, *height)?,
+            Command::Touch { kind, x, y }
+                if *kind > 9 || x.unsigned_abs() > 65536 || y.unsigned_abs() > 65536 =>
+            {
+                return Err(invalid("invalid touch event"));
+            }
+            Command::Input { mode, text }
+                if !matches!(mode.as_str(), "search" | "note")
+                    || text.len() > 8192
+                    || text.contains('\0') =>
+            {
+                return Err(invalid("invalid editor input"));
+            }
+            Command::HostReply { text, .. } if text.len() > 128 * 1024 => {
+                return Err(invalid("host reply too large"));
+            }
+            _ => {}
         }
-        match self.sender.try_send(command) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "reader input queue is full",
-            )),
-            Err(TrySendError::Disconnected(_)) => Err(invalid("reader worker has stopped")),
-        }
+        self.shared.interrupt.store(true, Ordering::Release);
+        self.shared.inbox.push(command)
+    }
+    pub fn take_effects(&self) -> Vec<Effect> {
+        std::mem::take(
+            &mut *self
+                .shared
+                .effects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
     }
     pub fn cancel(&self) {
         self.shared.tracker.cancel();
+        self.shared.interrupt.store(true, Ordering::Release);
+        self.shared.inbox.wake();
     }
 }
 impl Drop for Reader {
@@ -253,8 +294,6 @@ impl Drop for Reader {
 struct Permit;
 impl Permit {
     fn acquire() -> io::Result<Self> {
-        // Includes cancelled-but-not-yet-finished workers: rapidly opening books
-        // cannot leave unlimited decoders alive behind retired JNI handles.
         WORKERS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < 4).then_some(n + 1)
@@ -273,9 +312,10 @@ impl Drop for Permit {
         WORKERS.fetch_sub(1, Ordering::AcqRel);
     }
 }
-
-fn publish(shared: &Shared, session: &EpubSession<'_, '_, '_, '_>, replace_frame: bool) {
+fn publish(shared: &Shared, ui: &mut Presentation<'_, '_, '_, '_>, changed: bool) {
+    let state = ui.ui_state();
     shared.update(|snapshot| {
+        let session = ui.session();
         snapshot.busy = false;
         snapshot.title = session.book_title().to_owned();
         let (chapter, chapters) = session.chapter_position();
@@ -283,23 +323,25 @@ fn publish(shared: &Shared, session: &EpubSession<'_, '_, '_, '_>, replace_frame
         snapshot.position = format!("第 {chapter}/{chapters} 章 · 第 {page}/{pages} 页");
         snapshot.progress = session.overall_progress();
         snapshot.locator = session.anchor().to_string();
-        if replace_frame {
-            let serial = snapshot.frame.as_ref().map_or(1, |f| f.serial + 1);
+        snapshot.ui_mode = state.mode;
+        snapshot.page_mode = state.page_mode;
+        snapshot.animating = state.animating;
+        snapshot.editing = state.editing;
+        snapshot.input = state.input;
+        snapshot.notice = state.notice;
+        if changed {
+            let serial = snapshot.frame.as_ref().map_or(1, |frame| frame.serial + 1);
             snapshot.frame = Some(Arc::new(Frame {
                 serial,
-                surface: session.frame().surface.clone(),
+                surface: ui.surface().clone(),
             }));
         }
     });
+    let mut effects = shared.effects.lock().unwrap_or_else(|e| e.into_inner());
+    let free = 8_usize.saturating_sub(effects.len());
+    effects.extend(ui.effects().into_iter().take(free));
 }
-fn save(shared: &Shared, store: Option<&EpubProgressStore>, session: &EpubSession<'_, '_, '_, '_>) {
-    if let Some(store) = store
-        && let Err(error) = store.save(session.anchor())
-    {
-        shared.update(|snapshot| snapshot.notice = format!("阅读进度保存失败：{error}"));
-    }
-}
-fn worker(config: Config, shared: &Shared, receiver: Receiver<Command>) -> Result<()> {
+fn worker(config: Config, shared: &Shared) -> Result<()> {
     let mut source = LocalFileSource::open(&config.book)?;
     let bytes = loading::read(&mut source, 128 * 1024 * 1024, "读取图书")?;
     let prepared = publication::prepare(bytes, &config.book)?;
@@ -311,6 +353,7 @@ fn worker(config: Config, shared: &Shared, receiver: Receiver<Command>) -> Resul
         FontLimits::default().max_file_bytes,
         "准备中文字体",
     )?;
+    let ui_font = UiFont::from_bytes_face(bytes.clone(), config.font.clone(), 0)?;
     let font = Font::parse(&bytes, 0, FontLimits::default())?;
     let store = Store::new(config.state_dir.join("library-v1"));
     let mut settings = if store.root().join("settings.conf").is_file() {
@@ -326,82 +369,50 @@ fn worker(config: Config, shared: &Shared, receiver: Receiver<Command>) -> Resul
         .margin
         .min((config.width.min(config.height) / 4).saturating_sub(1));
     let mut progress = Some(EpubProgressStore::new(config.state_dir.join("progress-v1")));
-    let start = match progress.as_ref().expect("created store").load(&book) {
+    let mut notice = None;
+    let start = match progress.as_ref().unwrap().load(&book) {
         Ok(Some(locator)) => Start::Locator(locator),
         Ok(None) => Start::Beginning,
         Err(error) => {
-            shared.update(|snapshot| {
-                snapshot.notice = format!("旧进度不可用，已从开头打开；原记录未覆盖：{error}")
-            });
+            notice = Some(format!("旧进度不可用，已从开头打开；原记录未覆盖：{error}"));
             progress = None;
             Start::Beginning
         }
     };
-    let (width, height) = shared
-        .resize
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .unwrap_or((config.width, config.height));
     let options = Options {
         font: config.font.clone(),
         face: 0,
-        width,
-        height,
+        width: config.width,
+        height: config.height,
         size: settings.size,
         margin: settings.margin,
         page: None,
         at: None,
         allow_missing: true,
     };
-    let mut session =
-        EpubSession::new_with_preferences(&book, &font, options, start, &[], settings)?;
-    publish(shared, &session, true);
-    save(shared, progress.as_ref(), &session);
-    while !shared.tracker.is_cancelled() {
-        let resize = shared
-            .resize
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        let command = if let Some((width, height)) = resize {
-            Command::Resize { width, height }
-        } else {
-            match receiver.recv_timeout(Duration::from_millis(60)) {
-                Ok(command) => command,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        };
-        shared.update(|snapshot| {
-            snapshot.busy = true;
-            snapshot.notice.clear();
+    let session = EpubSession::new_with_preferences(&book, &font, options, start, &[], settings)?;
+    let mut ui = Presentation::new(session, progress.clone(), ui_font, store)?;
+    if let Some(message) = notice {
+        ui.notice(message)?;
+    }
+    publish(shared, &mut ui, true);
+    if ui.load_annotations()? {
+        publish(shared, &mut ui, true);
+    }
+    let mut paused = false;
+    let mut last_tick = Instant::now();
+    while !shared.tracker.is_cancelled() && !ui.closed() {
+        let interval = if paused { None } else { ui.interval() };
+        let delay = interval.map_or(Duration::from_millis(60), |dt| {
+            dt.saturating_sub(last_tick.elapsed())
         });
-        let result: Result<bool> = (|| {
-            loading::stage("更新阅读页面")?;
-            match command {
-                Command::Next => session.action(Action::Next),
-                Command::Previous => session.action(Action::Previous),
-                Command::First => session.action(Action::First),
-                Command::Last => session.action(Action::Last),
-                Command::Resize { width, height } => session.resize(width, height),
-                Command::Larger | Command::Smaller => {
-                    let changed = session.action(if matches!(command, Command::Larger) {
-                        Action::Larger
-                    } else {
-                        Action::Smaller
-                    })?;
-                    if let Err(error) = store.save_settings(session.settings()) {
-                        shared.update(|snapshot| {
-                            snapshot.notice = format!("设置保存失败，当前页面仍使用新设置：{error}")
-                        });
-                    }
-                    Ok(changed)
-                }
+        if let Some(command) = shared.inbox.receive(delay) {
+            shared.update(|s| s.busy = true);
+            let result: Result<bool> = (|| match command {
+                Command::Resize { width, height } => ui.resize(width, height),
                 Command::Contents => {
-                    loading::stage("生成章节目录")?;
-                    let contents = session
-                        .toc_entries()?
+                    let contents = ui
+                        .contents()?
                         .into_iter()
                         .map(|e| ContentsItem {
                             title: e.title,
@@ -410,52 +421,61 @@ fn worker(config: Config, shared: &Shared, receiver: Receiver<Command>) -> Resul
                             offset: e.offset,
                         })
                         .collect();
-                    shared.update(|snapshot| snapshot.contents = Arc::new(contents));
-                    Ok(false)
+                    shared.update(|s| s.contents = Arc::new(contents));
+                    Ok(true)
                 }
-                Command::Jump { spine, offset } => session.jump_to_toc_target(spine, offset),
-                Command::CycleTheme => {
-                    let mut preferences = session.settings();
-                    preferences.theme = preferences.theme.next();
-                    let changed = session.apply_settings(preferences)?;
-                    if let Err(error) = store.save_settings(preferences) {
-                        shared.update(|snapshot| {
-                            snapshot.notice = format!("设置保存失败，当前页面仍使用新设置：{error}")
-                        });
-                    }
-                    Ok(changed)
+                Command::Jump { spine, offset } => ui.jump(spine, offset),
+                Command::Ui(action) => ui.action(action),
+                Command::Touch { kind, x, y } => ui.touch(kind, x, y),
+                Command::Back => ui.back(),
+                Command::Pause(value) => {
+                    paused = value;
+                    ui.pause()
                 }
-                Command::Bookmark => {
-                    store.add(
-                        &book,
-                        Kind::Bookmark,
-                        session.anchor().clone(),
-                        None,
-                        session.title(),
-                    )?;
-                    shared.update(|snapshot| snapshot.notice = "已保存书签".into());
-                    Ok(false)
-                }
+                Command::Input { mode, text } => ui.input(&mode, text),
+                Command::HostReply { kind, text } => ui.host_reply(kind, text),
                 Command::Save => {
-                    save(shared, progress.as_ref(), &session);
+                    if let Some(store) = &progress {
+                        store.save(ui.session().anchor())?;
+                    }
                     Ok(false)
                 }
+                command => ui.legacy(&command),
+            })();
+            match result {
+                Ok(changed) => publish(shared, &mut ui, changed),
+                Err(error) if !shared.tracker.is_cancelled() => {
+                    ui.notice(error.to_string())?;
+                    publish(shared, &mut ui, true);
+                }
+                Err(_) => break,
             }
-        })();
-        match result {
-            Ok(changed) => {
-                publish(shared, &session, changed);
-                save(shared, progress.as_ref(), &session);
+        } else if !paused && shared.inbox.interrupt_idle(&shared.interrupt) {
+            let result = {
+                let _guard = loading::speculate(Arc::clone(&shared.interrupt));
+                ui.idle()
+            };
+            if let Ok(true) = result {
+                publish(shared, &mut ui, true);
             }
-            Err(error) if !shared.tracker.is_cancelled() => {
-                shared.update(|snapshot| {
-                    snapshot.busy = false;
-                    snapshot.notice = error.to_string();
-                });
+        }
+        if !paused && ui.interval().is_some_and(|dt| last_tick.elapsed() >= dt) {
+            last_tick = Instant::now();
+            match ui.tick() {
+                Ok(true) => publish(shared, &mut ui, true),
+                Ok(false) => {}
+                Err(error) if !shared.tracker.is_cancelled() => {
+                    ui.notice(error.to_string())?;
+                    publish(shared, &mut ui, true);
+                }
+                Err(_) => break,
             }
-            Err(_) => break,
         }
     }
-    save(shared, progress.as_ref(), &session);
+    // Preserve the content anchor on app background/close, not every animation frame.
+    let _ = ui.pause();
+    if let Some(store) = progress {
+        store.save(ui.session().anchor())?;
+    }
     Ok(())
 }

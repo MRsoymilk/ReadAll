@@ -40,13 +40,13 @@ pub(super) struct Tools {
     pub(super) store: Option<Store>,
     pub(super) annotations: Vec<Annotation>,
     pub(super) mode: Mode,
-    query: String,
-    dirty: bool,
+    pub(super) query: String,
+    pub(super) dirty: bool,
     hits: Vec<SearchHit>,
     selected: usize,
     scroll: usize,
     pub(super) status: String,
-    link_history: Vec<readall_epub::EpubLocator>,
+    pub(super) link_history: Vec<readall_epub::EpubLocator>,
     external: external::ExternalLink,
     pub(super) selecting: bool,
     drag: Option<gestures::Gesture>,
@@ -104,7 +104,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         self.tools.store = Some(store);
         self.refresh_surface()
     }
-    fn tool_panel(&self) -> Rect {
+    pub(super) fn tool_panel(&self) -> Rect {
         let w = self.surface.width().saturating_sub(24).min(640);
         Rect::new(
             (self.surface.width() - w) as i32 / 2,
@@ -324,6 +324,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             ReaderCommand::Settings => {
                 self.tools.mode = Mode::Settings;
                 self.tools.selected = 0;
+                self.tools.scroll = 0;
                 self.tools.status = "↑↓ 选择；+/− 修改；点击右侧加减按钮".into();
             }
             ReaderCommand::Theme => {
@@ -442,6 +443,9 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 }
             }
             return Ok(Some(true));
+        }
+        if self.compact_toc() {
+            return Ok(None);
         }
         if let Some(changed) = self.selection_action_click(x, y)? {
             return Ok(Some(changed));
@@ -678,6 +682,9 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             return self.draw_external_link();
         }
         if self.tools.mode == Mode::None {
+            if self.compact_toc() {
+                return Ok(());
+            }
             if self.toolbar != ToolbarMode::Collapsed {
                 for (index, label) in ["查找", "标注", "设置"].into_iter().enumerate() {
                     let rect = self.tool_dock(index);
@@ -927,51 +934,73 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     fn start_clipboard(&mut self, text: Option<String>) -> WindowResult<()> {
-        if self.tools.clipboard.is_some() {
-            return Err("剪贴板操作尚未结束".into());
+        if let Some(effects) = &mut self.host_effects {
+            if text.as_ref().is_some_and(|s| s.len() > 128 * 1024) {
+                return Err("selection exceeds clipboard limit".into());
+            }
+            if effects.len() >= 8 {
+                return Err("系统操作队列已满".into());
+            }
+            effects.push_back(match text {
+                Some(text) => HostEffect::Copy(text),
+                None => HostEffect::Paste,
+            });
+            self.tools.status = "正在访问系统剪贴板…".into();
+            return Ok(());
         }
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = (|| -> std::result::Result<ClipboardResult, String> {
-                if let Some(text) = text {
-                    if text.len() > 128 * 1024 {
-                        return Err("selection exceeds clipboard limit".into());
-                    }
-                    let opts = wl_clipboard_rs::copy::Options::new();
-                    opts.copy(
-                        wl_clipboard_rs::copy::Source::Bytes(text.into_bytes().into()),
-                        wl_clipboard_rs::copy::MimeType::Specific(
-                            "text/plain;charset=utf-8".into(),
-                        ),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    Ok(ClipboardResult::Copied)
-                } else {
-                    use std::io::Read;
-                    let (pipe, _) = wl_clipboard_rs::paste::get_contents(
-                        wl_clipboard_rs::paste::ClipboardType::Regular,
-                        wl_clipboard_rs::paste::Seat::Unspecified,
-                        wl_clipboard_rs::paste::MimeType::Text,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    let mut data = Vec::new();
-                    pipe.take(128 * 1024 + 1)
-                        .read_to_end(&mut data)
+        #[cfg(not(all(target_os = "linux", feature = "wayland")))]
+        {
+            let _ = text;
+            Err("clipboard host is not attached".into())
+        }
+        #[cfg(all(target_os = "linux", feature = "wayland"))]
+        {
+            if self.tools.clipboard.is_some() {
+                return Err("剪贴板操作尚未结束".into());
+            }
+            let (sender, receiver) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = (|| -> std::result::Result<ClipboardResult, String> {
+                    if let Some(text) = text {
+                        if text.len() > 128 * 1024 {
+                            return Err("selection exceeds clipboard limit".into());
+                        }
+                        let opts = wl_clipboard_rs::copy::Options::new();
+                        opts.copy(
+                            wl_clipboard_rs::copy::Source::Bytes(text.into_bytes().into()),
+                            wl_clipboard_rs::copy::MimeType::Specific(
+                                "text/plain;charset=utf-8".into(),
+                            ),
+                        )
                         .map_err(|e| e.to_string())?;
-                    if data.len() > 128 * 1024 {
-                        return Err("clipboard exceeds text limit".into());
+                        Ok(ClipboardResult::Copied)
+                    } else {
+                        use std::io::Read;
+                        let (pipe, _) = wl_clipboard_rs::paste::get_contents(
+                            wl_clipboard_rs::paste::ClipboardType::Regular,
+                            wl_clipboard_rs::paste::Seat::Unspecified,
+                            wl_clipboard_rs::paste::MimeType::Text,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let mut data = Vec::new();
+                        pipe.take(128 * 1024 + 1)
+                            .read_to_end(&mut data)
+                            .map_err(|e| e.to_string())?;
+                        if data.len() > 128 * 1024 {
+                            return Err("clipboard exceeds text limit".into());
+                        }
+                        Ok(ClipboardResult::Pasted(
+                            String::from_utf8(data).map_err(|e| e.to_string())?,
+                        ))
                     }
-                    Ok(ClipboardResult::Pasted(
-                        String::from_utf8(data).map_err(|e| e.to_string())?,
-                    ))
-                }
-            })();
-            let _ = sender.send(result.unwrap_or_else(ClipboardResult::Failed));
-        });
-        self.tools.clipboard = Some(receiver);
-        self.tools.started = Some(Instant::now());
-        self.tools.status = "正在访问剪贴板…".into();
-        Ok(())
+                })();
+                let _ = sender.send(result.unwrap_or_else(ClipboardResult::Failed));
+            });
+            self.tools.clipboard = Some(receiver);
+            self.tools.started = Some(Instant::now());
+            self.tools.status = "正在访问剪贴板…".into();
+            Ok(())
+        }
     }
     pub(super) fn poll_clipboard(&mut self) -> bool {
         let Some(receiver) = &self.tools.clipboard else {

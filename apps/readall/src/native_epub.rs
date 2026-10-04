@@ -8,8 +8,12 @@ pub(crate) fn run(_: &[OsString], _: &mut impl Write) -> Result<()> {
     Err("native EPUB window unavailable: on Linux build with --features wayland; Windows/Android windows are not implemented".into())
 }
 
-#[cfg(all(target_os = "linux", feature = "wayland"))]
+#[cfg(feature = "mobile")]
+pub(crate) use enabled::mobile_ui::Presentation;
+
+#[cfg(any(feature = "mobile", all(target_os = "linux", feature = "wayland")))]
 mod enabled {
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     mod async_reader;
     #[cfg(test)]
     mod azw3_tests;
@@ -17,21 +21,28 @@ mod enabled {
     mod loading_tests;
     #[cfg(test)]
     mod mobi_tests;
+    #[cfg(feature = "mobile")]
+    pub(crate) mod mobile_ui;
     mod motion;
     #[cfg(test)]
     mod selection_tests;
     mod tools;
     use super::*;
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     use crate::{
         diagnostics::{ResultContext, boxed_stage},
+        ui::builtin_font_bytes,
+    };
+    use crate::{
         epub_session::{Action as ReaderAction, EpubSession, Start, TocEntry},
         progress::EpubProgressStore,
         svg_icon::{
             self, CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, LIST, MINUS, PLUS,
         },
         text_page::Options,
-        ui::{UiFont, UiPainter, builtin_font_bytes},
+        ui::{UiFont, UiPainter},
     };
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     use readall_core::read_bounded;
     use readall_epub::{EpubBook, EpubLimits, EpubLocator};
     use readall_font::{Font, FontLimits};
@@ -60,6 +71,13 @@ mod enabled {
         TocRow(usize),
     }
 
+    #[derive(Debug, Clone)]
+    pub(crate) enum HostEffect {
+        Copy(String),
+        Paste,
+        OpenUrl(String),
+    }
+
     struct ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
         session: EpubSession<'book, 'archive, 'font, 'font_bytes>,
         progress: Option<EpubProgressStore>,
@@ -76,6 +94,8 @@ mod enabled {
         close_requested: bool,
         tools: tools::Tools,
         motion: motion::Motion,
+        // Some routes platform side effects through the mobile host; None keeps Linux adapters.
+        host_effects: Option<std::collections::VecDeque<HostEffect>>,
     }
 
     fn point_in(rect: Rect, x: i32, y: i32) -> bool {
@@ -130,6 +150,7 @@ mod enabled {
                 close_requested: false,
                 tools: tools::Tools::default(),
                 motion: motion::Motion::default(),
+                host_effects: None,
             };
             reader.sync_toc_selection();
             reader.reset_motion()?;
@@ -194,7 +215,20 @@ mod enabled {
             }
         }
 
+        fn compact_toc(&self) -> bool {
+            self.toolbar == ToolbarMode::Toc && self.surface.height() < 420
+        }
+
         fn toc_panel_rect(&self) -> Rect {
+            if self.compact_toc() {
+                let width = 520_u32.min(self.surface.width().saturating_sub(32));
+                return Rect::new(
+                    ((self.surface.width() - width) / 2) as i32,
+                    44,
+                    width,
+                    self.surface.height().saturating_sub(98),
+                );
+            }
             let toolbar = self.toolbar_rect();
             let width = 520_u32.min(self.surface.width().saturating_sub(32));
             let max_height = self.surface.height().saturating_sub(290).min(390);
@@ -324,6 +358,7 @@ mod enabled {
                 self.draw_toc()?;
             }
             match self.toolbar {
+                ToolbarMode::Toc if self.compact_toc() => self.draw_collapsed_control()?,
                 ToolbarMode::Collapsed => self.draw_collapsed_control()?,
                 ToolbarMode::Expanded | ToolbarMode::Toc => self.draw_toolbar()?,
             }
@@ -683,6 +718,14 @@ mod enabled {
             {
                 return self.jump_to_toc(index);
             }
+            if self.compact_toc() {
+                if point_in(self.toc_panel_rect(), x, y) {
+                    return Ok(false);
+                }
+                self.toolbar = ToolbarMode::Expanded;
+                self.refresh_surface()?;
+                return Ok(true);
+            }
             for index in 0..6 {
                 if point_in(self.toolbar_button_rect(index), x, y) {
                     return self.handle_toolbar_button(index);
@@ -730,6 +773,13 @@ mod enabled {
                                 return ReaderHover::TocRow(index);
                             }
                         }
+                    }
+                    if self.compact_toc() {
+                        return if point_in(self.collapsed_rect(), x, y) {
+                            ReaderHover::Collapsed
+                        } else {
+                            ReaderHover::None
+                        };
                     }
                     for index in 0..6 {
                         if point_in(self.toolbar_button_rect(index), x, y) {
@@ -891,6 +941,7 @@ mod enabled {
         }
     }
 
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     pub(super) fn open_path(path: &Path, output: &mut impl Write) -> Result<()> {
         writeln!(output, "使用内置字体: {}", UiFont::builtin_file_name())?;
         let args = vec![
@@ -903,6 +954,7 @@ mod enabled {
         start(&args, output)
     }
 
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     pub(super) fn start(args: &[OsString], output: &mut impl Write) -> Result<()> {
         if args.is_empty() {
             return Err("open-epub expects <book.epub> --font <font.ttf>".into());

@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 public final class NativeReader implements AutoCloseable {
     static { System.loadLibrary("readall_android"); }
     public static final int NEXT=1, PREVIOUS=2, FIRST=3, LAST=4, LARGER=5, SMALLER=6, CONTENTS=7, JUMP=8, THEME=9, SAVE=10, BOOKMARK=11, RESIZE=12;
+    public static final int BACK=13, PAUSE=14, FIND=20, ANNOTATIONS=21, SETTINGS=22, SELECT=23, COPY=24, PASTE=25, NOTE=26, HIGHLIGHT=27, DELETE=28, ACTIVATE=29, DISMISS=30, BACKSPACE=31, TOUCH=40;
     private long handle;
     public NativeReader(String book, String font, String state, int width, int height, int size, int margin) {
         handle=nativeOpen(book,font,state,width,height,size,margin);
@@ -28,18 +29,23 @@ public final class NativeReader implements AutoCloseable {
         for(int i=0;i<items.length;i++) items[i]=new Item(fields[i*4],Integer.parseInt(fields[i*4+1]),Integer.parseInt(fields[i*4+2]),Integer.parseInt(fields[i*4+3]));
         return items;
     }
+    public synchronized void input(String mode,String text) { requireOpen();nativeInput(handle,mode,text); }
+    public synchronized void hostReply(int kind,String text) { requireOpen();nativeHostReply(handle,kind,text); }
+    public synchronized String[] effects() { requireOpen();String[] f=nativeEffects(handle);if(f==null||f.length%2!=0)throw new IllegalStateException("invalid host effects");return f; }
     @Override public synchronized void close() { if(handle!=0) { long value=handle;handle=0;nativeClose(value); } }
     public static final class Item {
         public final String title;public final int depth,spine,offset;
         Item(String title,int depth,int spine,int offset) { this.title=title;this.depth=depth;this.spine=spine;this.offset=offset; }
     }
     public static final class State {
-        public final String status,phase,title,position,percent,locator,notice;
+        public final String status,phase,title,position,percent,locator,notice,uiMode,pageMode,input;
+        public final boolean animating,editing;
         public final long done,total,serial,revision;
         public final int width,height;
         State(String[] f) {
-            if(f==null || f.length!=14 || !"1".equals(f[0])) throw new IllegalStateException("unsupported ReadAll native protocol");
+            if(f==null || f.length!=19 || !"2".equals(f[0])) throw new IllegalStateException("unsupported ReadAll native protocol");
             status=f[1];phase=f[2];done=Long.parseLong(f[3]);total=Long.parseLong(f[4]);serial=Long.parseLong(f[5]);width=Integer.parseInt(f[6]);height=Integer.parseInt(f[7]);title=f[8];position=f[9];percent=f[10];locator=f[11];notice=f[12];revision=Long.parseLong(f[13]);
+            uiMode=f[14];pageMode=f[15];animating="1".equals(f[16]);editing="1".equals(f[17]);input=f[18];
             if(width<0 || height<0 || (long)width*height>4194304L) throw new IllegalStateException("invalid native frame geometry");
         }
         public boolean busy() { return "loading".equals(status); }
@@ -52,4 +58,7 @@ public final class NativeReader implements AutoCloseable {
     private static native void nativeCommand(long handle,int code,int a,int b);
     private static native boolean nativeCopyPixels(long handle,long serial,ByteBuffer buffer);
     private static native void nativeClose(long handle);
+    private static native void nativeInput(long handle,String mode,String text);
+    private static native void nativeHostReply(long handle,int kind,String text);
+    private static native String[] nativeEffects(long handle);
 }

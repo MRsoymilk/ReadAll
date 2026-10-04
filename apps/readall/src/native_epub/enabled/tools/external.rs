@@ -55,6 +55,15 @@ impl ReaderWindow<'_, '_, '_, '_> {
             return;
         };
         self.tools.mode = Mode::None;
+        if let Some(effects) = &mut self.host_effects {
+            if effects.len() >= 8 {
+                self.tools.status = "系统操作队列已满".into();
+                return;
+            }
+            effects.push_back(HostEffect::OpenUrl(link.as_str().to_owned()));
+            self.tools.status = "正在请求系统浏览器打开…".into();
+            return;
+        }
         if self.tools.external.pending() {
             self.tools.status = "已有浏览器启动请求正在处理，请稍后再试".into();
             return;
