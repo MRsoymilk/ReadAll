@@ -14,6 +14,7 @@ pub(super) struct Gesture {
 impl ReaderWindow<'_, '_, '_, '_> {
     pub(super) fn body_press(&mut self, x: i32, y: i32) -> bool {
         self.tools.clear_selection();
+        self.tools.status.clear();
         self.pointer = Some((x, y));
         let anchor = self.hit_range(x, y, false);
         let link = (!self.tools.selecting)

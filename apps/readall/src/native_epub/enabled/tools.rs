@@ -4,6 +4,7 @@ mod gestures;
 #[cfg(test)]
 mod link_tests;
 mod links;
+mod selection_actions;
 #[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
@@ -436,6 +437,9 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             }
             return Ok(Some(true));
         }
+        if let Some(changed) = self.selection_action_click(x, y)? {
+            return Ok(Some(changed));
+        }
         if y < 32 {
             return Ok(Some(false));
         }
@@ -716,6 +720,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     text.draw_clipped(back.x + 18, back.y + 6, 12, "返回", Color::WHITE, back)?;
                 }
             }
+            self.draw_selection_actions()?;
             return Ok(());
         }
         let panel = self.tool_panel();
