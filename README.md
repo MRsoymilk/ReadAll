@@ -2,16 +2,16 @@
 
 ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
-> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/MOBI/TXT；Windows、Android 和 PDF 仍在后续路线中。**
+> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/MOBI/AZW3/TXT；Windows、Android 和 PDF 仍在后续路线中。**
 
 ## v0.1.0 已实现
 
 ### 原生 Linux 阅读界面
 
 - 零参数启动原生书库：`./readall`
-- 内置文件浏览器，可直接选择 `.epub` / `.mobi`（及使用 BOOKMOBI 容器的旧式 `.azw` / `.prc`）
-- 选中 EPUB / MOBI 时按需预览书名 / 作者 / 语言；MOBI 预览不解压正文，解析失败不阻止尝试打开
-- 持久化最近阅读列表，成功关闭 EPUB / MOBI 后自动记录，可从首页直接继续打开
+- 内置文件浏览器，可直接选择 `.epub` / `.mobi` / `.azw3`（及使用 BOOKMOBI 容器的旧式 `.azw` / `.prc`）
+- 选中 EPUB / MOBI / AZW3 时按需预览书名 / 作者 / 语言；MOBI 预览不解压正文，解析失败不阻止尝试打开
+- 持久化最近阅读列表，成功关闭 EPUB / MOBI / AZW3 后自动记录，可从首页直接继续打开
 - 中文文件名、中文界面和中文正文
 - 内置 **LXGW WenKai Lite Regular / 霞鹜文楷轻便版**
 - 鼠标 hover 高亮，不需要先点击
@@ -31,9 +31,9 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 - HTTP/HTTPS 外链确认后交给默认浏览器；取消或启动失败不改变阅读位置
 - 纸色 / 护眼 / 深色主题，字号、边距和行距设置持久化
 
-### EPUB / MOBI 加载状态与响应性
+### EPUB / MOBI / AZW3 加载状态与响应性
 
-打开 EPUB / MOBI 时先创建窗口并提交加载页，再开始读取文档；文件读取、章节解析、字体加载、排版与图片解码由单独的阅读工作线程执行。Wayland 事件处理留在窗口线程，加载期间仍能显示状态、接收窗口调整和取消操作。完成后在同一窗口切换正文，不再等全书目录和初始排版全部结束才出现阅读窗口。
+打开 EPUB / MOBI / AZW3 时先创建窗口并提交加载页，再开始读取文档；文件读取、章节解析、字体加载、排版与图片解码由单独的阅读工作线程执行。Wayland 事件处理留在窗口线程，加载期间仍能显示状态、接收窗口调整和取消操作。完成后在同一窗口切换正文，不再等全书目录和初始排版全部结束才出现阅读窗口。
 
 加载页显示文件名、当前阶段、阶段耗时和进度条。读取按实际字节数推进，章节排版按正文位置推进，页面绘制按项目数推进；无法准确计数的阶段显示活动条，不用定时器制造百分比。百分比是**当前阶段**的进度，不是整本书加载完成百分比。点击“取消加载”或按 Esc 可协作式取消；取消检查在文件块读取、章节排版和绘制等边界执行，不强杀正在处理的数据。
 
@@ -45,7 +45,7 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 
 ### MOBI
 
-新增原生 Rust `readall-mobi`，支持未加密的 **MOBI6/7**。PalmDB 必须有 `BOOKMOBI` 文件签名，扩展名本身不能证明格式兼容；普通 Palm PRC 数据库、独立 KF8/AZW3、KFX 和受 DRM 保护的图书会给出明确错误。双格式 MOBI/KF8 使用其中的 MOBI6/7 兼容部分，并提示未导入 KF8 专有布局。
+新增原生 Rust `readall-mobi`，支持未加密的 **MOBI6/7**。PalmDB 必须有 `BOOKMOBI` 文件签名，扩展名本身不能证明格式兼容；普通 Palm PRC 数据库、KFX 和受 DRM 保护的图书会给出明确错误。独立 AZW3/KF8 走下述专用重建路径。双格式 MOBI/KF8 使用其中的 MOBI6/7 兼容部分，并提示未导入 KF8 专有布局。
 
 支持未压缩、PalmDOC LZ77 和 HUFF/CDIC 正文，UTF-8 / Windows-1252 编码。UTF-8 在记录拼接后解码，避免中文字符恰好跨压缩记录时乱码。读取书名、作者、语言、EXTH 封面；`recindex` 图片转换为包内资源引用，`filepos` 链接以原始编码的字节偏移转换，避免中文和 HTML 实体改变跳转位置。识别 guide 指定的正文目录，否则从标题或章节生成目录。保留代码块换行/缩进，并兼容常见未加引号属性、大小写标签、未闭合段落和旧式 font/align 样式。
 
@@ -53,7 +53,7 @@ MOBI HTML 在内存中整理为有界 XHTML/EPUB 适配数据，复用已有的�
 
 读取 MOBI 时会显示“解压 MOBI 正文 / 整理 MOBI 章节与链接 / 准备 MOBI 图片资源”等阶段。首次显示前仍需完成有界正文解压和适配，像素解码由原图片缓存按需执行；不声称直接随机分页解码 MOBI。默认限制：输入 128 MiB、正文 32 MiB、单图片 16 MiB、内存适配包 192 MiB、1024 个章节。压缩字典、递归、符号工作量、标签数量/深度也有上限，异常文件报错而不是无限递归或分配。脚本、iframe/object/embed 不执行，图片只来自原书记录，不下载远程内容。
 
-MOBI6/7 HTML 是兼容子集，不保证还原所有出版工具生成的旧标签、复杂表格、字典/索引和嵌入字体；独立二进制 INDX/NCX 目录、音视频及 KF8 内容重建尚未接入。部分书会得到基于正文目录/标题的扁平目录，而非原始层级。图片格式的支持范围与原 EPUB 引擎相同，无法解码的图片显示占位。不能把“支持 MOBI”理解成支持所有 Kindle 文件。
+MOBI6/7 HTML 是兼容子集，不保证还原所有出版工具生成的旧标签、复杂表格、字典/索引和嵌入字体；MOBI6/7 路径的独立二进制 INDX/NCX 目录及音视频尚未接入；KF8 专用重建独立实现，不改变旧 MOBI 的适配结果。部分书会得到基于正文目录/标题的扁平目录，而非原始层级。图片格式的支持范围与原 EPUB 引擎相同，无法解码的图片显示占位。不能把“支持 MOBI”理解成支持所有 Kindle 文件。
 
 ```bash
 ./target/release/readall /path/to/book.mobi
@@ -65,6 +65,31 @@ MOBI6/7 HTML 是兼容子集，不保证还原所有出版工具生成的旧标�
 ```
 
 `mobi-info` 仅读取元数据；`mobi-text --spine N` 导出第 N 个适配章节，N 从 1 开始，独立封面可能占首个章节。`open` 也会按识别出的文档扩展名转到共同阅读入口；无 GUI 构建仍可运行元数据、文本、渲染和搜索命令。仅指定文件打开 GUI 时默认使用捆绑的中文字体。
+
+### AZW3 / KF8
+
+支持未加密、可重排的 **独立 AZW3（MOBI version 8 / KF8）**，包括 `.AZW3` 大写扩展名。以 PalmDB/MOBI 内容识别实际格式，不只是将扩展名加入文件选择器；KF8 签名出现在 `.mobi` 中也会进入 KF8 路径。双格式 MOBI/KF8 仍按原约定读取旧 MOBI 部分，避免已有 MOBI 进度和标注失效，不在本轮自动切换为 KF8。
+
+`readall-mobi/src/kf8/` 解析 INDX / TAGX / IDXT / CNCX、FDST 流表、章节 skeleton 与 fragment 表，按字节位置重建原 XHTML，再接入共同阅读器。NCX 索引的标题、父子关系和 `fid/offset` 转成可跳转目录；缺少有效目录时使用 guide 或章节标题。索引记录末尾的合法四字节对齐填充受限处理，截断、越界、循环引用和异常规模有明确错误。
+
+`kindle:flow:` 和 `kindle:embed:` 转为只指向包内的 CSS、SVG、图片和字体资源；嵌套资源按引用收集，不递归展开循环。SVG 属性大小写与原 XHTML 保留，正文/代码中的相同字样不会作为 URI 被替换。`kindle:pos:fid:…:off:…` 转为确定性的本地位置锚点，支持正文点击、脚注跳转及返回，原有 id 不被覆盖。
+
+支持 FONT 记录的普通存储、zlib 压缩及记录内置 key 的格式混淆解包；这不是 DRM 解密，受保护的书籍仍在读取正文前拒绝。静态 TrueType 字体复用现有 `@font-face`；解包出 CFF、WOFF/WOFF2、可变字体不代表这些字体能渲染，仍按现有字体引擎能力回退。CSS 同样仍是 ReadAll 的既有子集，不声称完整还原所有 Kindle 版式。
+
+左右滑动、仿书翻页、上下平滑滚动、文字选择/复制、搜索、书签、高亮、笔记及图片查看均复用现有实现。读取与重建位于阅读工作线程，显示“解压 AZW3 正文 / 解析 KF8 章节与目录索引 / 重建 AZW3 章节与链接 / 准备 AZW3 样式、图片与字体”，可在检查点取消。首屏仍需完成有界的文档适配，不是随机访问或整本书零等待加载。
+
+不修改原书、不生成磁盘中间 EPUB、不启动 Calibre/WebView。适配标识为 `readall-kf8-v1`，包含源文件身份；生成顺序固定，阅读位置内部复用 `epub-v1/v2/v3`，可重复打开恢复，不是 Kindle 云端位置。沿用 MOBI 输入/解压/包总量限制，KF8 额外限制索引条目、CNCX 文本、重建工作量和单章节大小。坏图片/字体会提示并降级；关键 skeleton/fragment 损坏不会被当作正常正文显示。
+
+```bash
+./target/release/readall /path/to/book.azw3
+./target/release/readall open-azw3 /path/to/book.azw3
+./target/release/readall azw3-info /path/to/book.azw3
+./target/release/readall azw3-text /path/to/book.azw3 --spine 2
+./target/release/readall render-azw3 /path/to/book.azw3 new-page.ppm --font /path/to/font.ttf
+./target/release/readall search /path/to/book.azw3 '查询内容'
+```
+
+当前不支持固定版式 KF8、KFX、DRM、Kindle 字典索引/音视频、RESC 高级分页和 Kindle 位置同步。损坏或非 XML 兼容的重建 XHTML 仍可能不能阅读。本轮未新增第三方依赖；KF8 格式参考沿用 foliate-js 的 MIT 许可说明。
 
 ### EPUB
 
@@ -402,7 +427,7 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 - Linux 原生 GUI 当前只实现 Wayland
 - Windows / Android 窗口后端尚未实现
 - PDF 尚未实现
-- MOBI 支持未加密 MOBI6/7；独立 KF8/AZW3、KFX、DRM、字典专用索引和完整 MOBI 版式尚未实现
+- MOBI 支持未加密 MOBI6/7，AZW3 支持独立可重排 KF8；固定版式 KF8、KFX、DRM、字典专用索引和完整 Kindle 版式尚未实现
 - EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
 - 已有 shaping / bidi / 字素断行 / 有界字体回退，但竖排、完整排版规范和更多语言仍需验收
 - 已有搜索、书签、高亮、笔记、设置和正文链接/脚注跳转；封面墙、弹出脚注、跨页选择尚未实现
@@ -422,7 +447,7 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 ReadAll 项目源码目前**尚未声明统一的开源许可证**。在明确项目代码许可证之前，请不要假定项目源码可以按 MIT/Apache/GPL 等许可证再分发。
 
-JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。MOBI 实现参考 foliate-js 的 PalmDOC / HUFF-CDIC 算法，保留其 MIT 许可；HTML 实体处理使用固定版本 `html-escape = 0.2.13`（及间接依赖 `utf8-width`），不引入整个第三方电子书引擎。`readall licenses` 显示内置字体与 foliate-js 参考许可，不是所有 Cargo 依赖的完整许可清单。
+JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。MOBI / KF8 实现参考 foliate-js 的 PalmDOC / HUFF-CDIC、INDX 与 KF8 重建格式，保留其 MIT 许可；HTML 实体处理使用固定版本 `html-escape = 0.2.13`（及间接依赖 `utf8-width`），不引入整个第三方电子书引擎。`readall licenses` 显示内置字体与 foliate-js 参考许可，不是所有 Cargo 依赖的完整许可清单。
 
 已捆绑的第三方资源分别遵循其自己的许可证：
 
