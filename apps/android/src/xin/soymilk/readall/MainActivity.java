@@ -111,12 +111,12 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     private void startReader(File file,String name,File font,int token){
         if(token!=epoch||destroyed)return;if(page.getWidth()==0||page.getHeight()==0){page.post(()->startReader(file,name,font,token));return;}
         try{
-            int[] v=page.viewportSize();reader=new NativeReader(file.getAbsolutePath(),font.getAbsolutePath(),new File(getFilesDir(),"reader-state").getAbsolutePath(),v[0],v[1],20,16);
+            int[] v=page.viewportSize();reader=new NativeReader(file.getAbsolutePath(),font.getAbsolutePath(),new File(getFilesDir(),"reader-state").getAbsolutePath(),v[0],v[1],20,16,v[2],v[3]);
             currentFile=file;currentName=name;shownSerial=0;remembered=false;lastState=null;busySince=0;home.setVisibility(View.GONE);showProgress("准备正文",0,0);requestFrame();
         }catch(Exception|LinkageError e){showError(e);}
     }
     @Override public void viewport(int w,int h){ui.removeCallbacks(resizeTask);ui.postDelayed(resizeTask,90);}
-    private void resizeNative(){if(reader==null)return;int[] v=page.viewportSize();action(NativeReader.RESIZE,v[0],v[1]);}
+    private void resizeNative(){if(reader==null)return;int[] v=page.viewportSize();try{reader.viewport(v[0],v[1],v[2],v[3]);requestFrame();}catch(Exception e){showError(e);}}
     @Override public void action(int code,int a,int b){
         if(reader==null)return;
         if(code>=NativeReader.TOUCH && code<=NativeReader.TOUCH+9 && (lastState==null||lastState.serial==0||lastState.closed()) && code!=NativeReader.TOUCH+4 && code!=NativeReader.TOUCH+7 && code!=NativeReader.TOUCH+8)return;
@@ -160,7 +160,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
                 if(owner.copyPixels(state,pixelBuffer)){
                     image=spare.getAndSet(null);
                     if(image!=null&&(image.getWidth()!=state.width||image.getHeight()!=state.height)){recycle(image);image=null;}
-                    if(image==null)image=Bitmap.createBitmap(state.width,state.height,Bitmap.Config.ARGB_8888);
+                    if(image==null){image=Bitmap.createBitmap(state.width,state.height,Bitmap.Config.ARGB_8888);image.setDensity(Bitmap.DENSITY_NONE);}
                     pixelBuffer.position(0);image.copyPixelsFromBuffer(pixelBuffer);
                 }
             }catch(Exception|OutOfMemoryError e){problem=e;}
@@ -169,7 +169,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
                 if(token!=epoch||destroyed||reader!=owner){recycle(ready);return;}
                 copyPending=false;
                 if(error!=null){recycle(ready);showError(error);return;}
-                if(ready!=null){release(page.picture(ready));shownSerial=state.serial;}
+                if(ready!=null){release(page.picture(ready,state));shownSerial=state.serial;}
                 requestFrame();
             });
         });

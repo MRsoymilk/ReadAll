@@ -18,6 +18,7 @@ import android.view.inputmethod.InputMethodManager;
 final class ReaderView extends View {
     interface Listener { void viewport(int width,int height);void action(int code,int a,int b);void input(String mode,String text); }
     private Bitmap bitmap;
+    private int layoutWidth,layoutHeight;
     private final Paint paint=new Paint(Paint.FILTER_BITMAP_FLAG);
     private final Listener listener;
     private final TouchRouter touch;
@@ -37,15 +38,22 @@ final class ReaderView extends View {
         longPress=()-> { if(ready)touch.longPress(); };
     }
     int[] viewportSize() {
-        float density=Math.max(1,getResources().getDisplayMetrics().density);
-        int w=Math.max(320,Math.min(1024,Math.round(getWidth()/density)));
-        int h=Math.max(256,Math.min(2048,Math.round(getHeight()*(float)w/Math.max(1,getWidth()))));
-        return new int[]{w,h};
+        return ReaderViewport.sizes(Math.max(1,getWidth()),Math.max(1,getHeight()),getResources().getDisplayMetrics().density);
     }
-    Bitmap picture(Bitmap image) { Bitmap old=bitmap;bitmap=image;ready=image!=null;invalidate();return old; }
+    Bitmap picture(Bitmap image) { return picture(image,null); }
+    Bitmap picture(Bitmap image,NativeReader.State frame) {
+        Bitmap old=bitmap;bitmap=image;
+        if(frame!=null){layoutWidth=frame.logicalWidth;layoutHeight=frame.logicalHeight;}
+        ready=image!=null&&layoutWidth>0&&layoutHeight>0;invalidate();return old;
+    }
     boolean touching() { return touch.active(); }
     void state(NativeReader.State next) {
         state=next;
+        if(bitmap!=null) {
+            boolean matches=next.logicalWidth==layoutWidth&&next.logicalHeight==layoutHeight&&next.width==bitmap.getWidth()&&next.height==bitmap.getHeight();
+            if(!matches&&touch.active())cancelTouch();
+            ready=matches;
+        }
         String mode=next.editing?next.uiMode:"";
         if(!mode.equals(editorMode)) {
             editorMode=mode;connection=null;
@@ -60,13 +68,12 @@ final class ReaderView extends View {
     void closeInput() { editorMode="";connection=null;((InputMethodManager)getContext().getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(getWindowToken(),0); }
     private float scale() { return bitmap==null?1:Math.min((float)getWidth()/bitmap.getWidth(),(float)getHeight()/bitmap.getHeight()); }
     private int[] point(float x,float y) {
-        float s=scale();float left=bitmap==null?0:(getWidth()-bitmap.getWidth()*s)/2;float top=bitmap==null?0:(getHeight()-bitmap.getHeight()*s)/2;
-        return new int[]{Math.round((x-left)/s),Math.round((y-top)/s)};
+        return ReaderViewport.point(x,y,getWidth(),getHeight(),bitmap.getWidth(),bitmap.getHeight(),layoutWidth,layoutHeight);
     }
     @Override protected void onSizeChanged(int w,int h,int oldw,int oldh) { super.onSizeChanged(w,h,oldw,oldh);cancelTouch();if(w>0&&h>0)listener.viewport(w,h); }
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);canvas.drawColor(0xfff5f6f8);
-        if(bitmap!=null) { float s=scale(),w=bitmap.getWidth()*s,h=bitmap.getHeight()*s;canvas.drawBitmap(bitmap,null,new RectF((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2),paint); }
+        if(bitmap!=null) { float s=scale(),w=bitmap.getWidth()*s,h=bitmap.getHeight()*s;paint.setFilterBitmap(bitmap.getWidth()!=getWidth()||bitmap.getHeight()!=getHeight());canvas.drawBitmap(bitmap,null,new RectF((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2),paint); }
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
         if(!ready)return true;
@@ -79,7 +86,7 @@ final class ReaderView extends View {
                 if(velocity!=null)velocity.addMovement(event);touch.move(p[0],p[1]);return true;
             case MotionEvent.ACTION_UP:
                 removeCallbacks(longPress);int fling=0;
-                if(velocity!=null){velocity.addMovement(event);velocity.computeCurrentVelocity(1000);if(state!=null&&"scroll".equals(state.pageMode))fling=Math.round(-velocity.getYVelocity()/scale()*0.15f);velocity.recycle();velocity=null;}
+                if(velocity!=null){velocity.addMovement(event);velocity.computeCurrentVelocity(1000);if(state!=null&&"scroll".equals(state.pageMode))fling=Math.round(-velocity.getYVelocity()/scale()*layoutHeight/bitmap.getHeight()*0.15f);velocity.recycle();velocity=null;}
                 touch.up(p[0],p[1],fling);performClick();
                 if(!editorMode.isEmpty()&&p[1]>=78&&p[1]<122)((InputMethodManager)getContext().getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(this,InputMethodManager.SHOW_IMPLICIT);
                 return true;

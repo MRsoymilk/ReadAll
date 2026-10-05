@@ -24,8 +24,12 @@ public final class UiCapture {
     public static void main(String[] args) throws Exception {
         File root=new File(args[0]),font=new File(args[1]),out=new File(root,"screens");out.mkdirs();
         int width=args.length>2?Integer.parseInt(args[2]):400,height=args.length>3?Integer.parseInt(args[3]):800;
-        try(NativeReader reader=new NativeReader(new File(root,"book.epub").getPath(),font.getPath(),new File(root,"capture-state-"+width+"-"+height).getPath(),width,height,20,20)){
+        int pixelWidth=args.length>4?Integer.parseInt(args[4]):width,pixelHeight=args.length>5?Integer.parseInt(args[5]):height;
+        out=new File(out,pixelWidth+"x"+pixelHeight);out.mkdirs();
+        long started=System.nanoTime();
+        try(NativeReader reader=new NativeReader(new File(root,"book.epub").getPath(),font.getPath(),new File(root,"capture-state-"+width+"-"+height+"-"+pixelWidth+"-"+pixelHeight).getPath(),width,height,20,16,pixelWidth,pixelHeight)){
             JniSmoke.waitFor(reader,s->s.serial>0&&!s.busy());long revision=reader.state().revision;reader.command(NativeReader.PAUSE,1,0);JniSmoke.waitFor(reader,s->s.revision>revision&&!s.busy());
+            System.out.println("First frame ms="+(System.nanoTime()-started)/1000000+" logical="+width+"x"+height+" pixels="+pixelWidth+"x"+pixelHeight);
             save(reader,new File(out,width+"-expanded.png"));
             reader.command(NativeReader.TOUCH+1,width/2,height-176);JniSmoke.waitFor(reader,s->s.uiMode.equals("collapsed"));save(reader,new File(out,width+"-collapsed.png"));
             reader.command(NativeReader.CONTENTS);JniSmoke.waitFor(reader,s->s.uiMode.equals("toc"));save(reader,new File(out,width+"-toc.png"));
