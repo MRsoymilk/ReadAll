@@ -1,0 +1,12 @@
+[package]
+name = "readall-pdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+readall-core.workspace = true
+hayro = { version = "=0.5.0", default-features = true }
+
+[lints]
+workspace = true

@@ -17,6 +17,7 @@ readall-font.workspace = true
 [dependencies]
 readall-epub.workspace = true
 readall-mobi.workspace = true
+readall-pdf.workspace = true
 readall-font.workspace = true
 readall-core.workspace = true
 readall-render.workspace = true

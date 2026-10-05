@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/readall-archive", "crates/readall-core", "crates/readall-epub", "crates/readall-font", "crates/readall-image", "crates/readall-mobi", "crates/readall-render", "crates/readall-platform", "crates/readall-android", "apps/readall"]
+members = ["crates/readall-archive", "crates/readall-core", "crates/readall-epub", "crates/readall-font", "crates/readall-image", "crates/readall-mobi", "crates/readall-pdf", "crates/readall-render", "crates/readall-platform", "crates/readall-android", "apps/readall"]
 resolver = "3"
 
 [workspace.package]
@@ -15,6 +15,7 @@ readall-core = { path = "crates/readall-core" }
 readall-render = { path = "crates/readall-render" }
 readall-image = { path = "crates/readall-image" }
 readall-mobi = { path = "crates/readall-mobi" }
+readall-pdf = { path = "crates/readall-pdf" }
 readall-platform = { path = "crates/readall-platform" }
 
 [workspace.lints.rust]

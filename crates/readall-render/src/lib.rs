@@ -203,6 +203,44 @@ impl Surface {
             .copied()
     }
 
+    /// Copy an already-rasterized straight-alpha RGBA rectangle in device pixels.
+    /// This is used by fixed-page formats such as PDF; callers render at the final
+    /// device resolution so no second image scaling pass is introduced here.
+    pub fn write_rgba_pixels(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), RenderError> {
+        let right = x.checked_add(width).ok_or(RenderError::InvalidDimensions)?;
+        let bottom = y.checked_add(height).ok_or(RenderError::InvalidDimensions)?;
+        if width == 0 || height == 0 || right > self.width || bottom > self.height {
+            return Err(RenderError::InvalidDimensions);
+        }
+        let pixels = usize::try_from(u64::from(width) * u64::from(height))
+            .map_err(|_| RenderError::InvalidDimensions)?;
+        if rgba.len() != pixels.checked_mul(4).ok_or(RenderError::InvalidDimensions)? {
+            return Err(RenderError::InvalidGeometry("RGBA byte length does not match rectangle"));
+        }
+        if u64::from(width) * u64::from(height) > self.limits.max_blended_pixels {
+            return Err(RenderError::BudgetExceeded("pixel work"));
+        }
+        let destination = std::sync::Arc::make_mut(&mut self.pixels);
+        for row in 0..height as usize {
+            let dst = (y as usize + row) * self.width as usize + x as usize;
+            let src = row * width as usize * 4;
+            for (color, bytes) in destination[dst..dst + width as usize]
+                .iter_mut()
+                .zip(rgba[src..src + width as usize * 4].chunks_exact(4))
+            {
+                *color = Color::rgba(bytes[0], bytes[1], bytes[2], bytes[3]);
+            }
+        }
+        Ok(())
+    }
+
     /// Validates budgets and clipping before modifying any pixel.
     pub fn draw(&mut self, commands: &[DrawCommand]) -> Result<(), RenderError> {
         if self.logical == (self.width, self.height) {
@@ -344,6 +382,30 @@ mod tests {
         assert_eq!(copy.pixel(0, 0), Some(BLUE));
         assert_eq!(original.pixel(0, 0), Some(RED));
     }
+    #[test]
+    fn fixed_page_rgba_copy_is_exact_bounded_and_copy_on_write() {
+        let mut image = surface();
+        let snapshot = image.clone();
+        image
+            .write_rgba_pixels(
+                1,
+                1,
+                2,
+                2,
+                &[
+                    1, 2, 3, 255, 4, 5, 6, 128, 7, 8, 9, 255, 10, 11, 12, 0,
+                ],
+            )
+            .unwrap();
+        assert_eq!(image.pixel(1, 1), Some(Color::rgba(1, 2, 3, 255)));
+        assert_eq!(image.pixel(2, 1), Some(Color::rgba(4, 5, 6, 128)));
+        assert_eq!(image.pixel(1, 2), Some(Color::rgba(7, 8, 9, 255)));
+        assert_eq!(image.pixel(2, 2), Some(Color::rgba(10, 11, 12, 0)));
+        assert_eq!(snapshot.pixel(1, 1), Some(Color::default()));
+        assert!(image.write_rgba_pixels(3, 3, 2, 2, &[0; 16]).is_err());
+        assert!(image.write_rgba_pixels(0, 0, 1, 1, &[0; 3]).is_err());
+    }
+
     #[test]
     fn straight_alpha_handles_transparent_and_opaque_destinations() {
         let half_red = Color::rgba(255, 0, 0, 128);
