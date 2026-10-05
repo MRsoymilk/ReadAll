@@ -8,7 +8,6 @@ import android.content.res.AssetManager;
 import java.io.*;
 import java.security.MessageDigest;
 import java.util.Arrays;
-import java.util.Comparator;
 
 /** Only caller-granted content URIs; never attempts to derive a filesystem path. */
 final class BookFiles {
@@ -62,18 +61,20 @@ final class BookFiles {
             }
             StringBuilder hex=new StringBuilder(64);for(byte b:digest.digest()) hex.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
             File result=new File(cache,hex+extension);
+            checkRoom(cache,result,temporary.length());
             if(result.isFile()) { if(!temporary.delete()) throw new IOException("无法清理重复导入缓存"); }
             else if(!temporary.renameTo(result)) throw new IOException("无法完成图书缓存写入");
             moved=true;result.setLastModified(System.currentTimeMillis());
-            prune(cache,result,preserve);
+            // Managed bookshelf copies are persistent, never evicted by importing another book.
             return new Imported(result,name);
         } finally { if(!moved) temporary.delete(); }
     }
-    private static void prune(File directory,File current,File preserve) {
-        File[] files=directory.listFiles(f->f.isFile() && f.getName().matches("[0-9a-f]{64}\\.(epub|mobi)"));
-        if(files==null) return;
-        Arrays.sort(files,Comparator.comparingLong(File::lastModified).reversed());
-        for(int i=4;i<files.length;i++) if(!files[i].equals(current) && !files[i].equals(preserve)) files[i].delete();
+    static void checkRoom(File directory,File current,long incoming)throws IOException {
+        if(current.isFile())return;
+        File[] files=directory.listFiles(f->f.isFile()&&f.getName().matches("[0-9a-f]{64}\\.(epub|mobi)"));
+        if(files==null)throw new IOException("无法检查图书存储");
+        long used=incoming;for(File f:files)used+=f.length();
+        if(used>2L*1024*1024*1024)throw new IOException("应用内图书副本达到 2 GiB 上限；没有自动删除任何图书");
     }
     static File font(AssetManager assets,File directory) throws IOException {
         if(!directory.isDirectory() && !directory.mkdirs()) throw new IOException("无法创建字体目录");

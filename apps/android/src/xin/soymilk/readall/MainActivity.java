@@ -46,10 +46,12 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     private NativeReader reader;
     private NativeReader.State lastState;
     private File currentFile;
-    private String currentName="ReadAll",currentUri="";
+    private String currentName="ReadAll",currentUri="",currentShelfId="";
     private ReaderView page;
     private FrameLayout root;
-    private LinearLayout home,loading;
+    private ShelfHome home;
+    private LinearLayout loading;
+    private ShelfController shelf;
     private Button themeButton;
     private NativeReader.Appearance appearance;
     private boolean themeBusy;
@@ -75,11 +77,10 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
             });
         }
         page=new ReaderView(this,this);root.addView(page,new FrameLayout.LayoutParams(-1,-1));
-        home=new LinearLayout(this);home.setOrientation(LinearLayout.VERTICAL);home.setGravity(Gravity.CENTER);home.setPadding(dp(24),dp(24),dp(24),dp(24));home.setBackgroundColor(appearance.canvas);
-        TextView title=text("ReadAll",30);title.setGravity(Gravity.CENTER);home.addView(title);
-        TextView hint=text("EPUB · MOBI · AZW3\n与 Linux 共用阅读界面、目录和翻页模式",14);hint.setGravity(Gravity.CENTER);home.addView(hint);
-        button(home,"打开图书",this::pick);button(home,"继续阅读",this::openLast);
-        themeButton=button(home,"切换到暗色",this::toggleTheme);
+        shelf=new ShelfController(this,io,appearance,new ShelfController.Host(){
+            public void pickBooks(){pick();}public void toggleTheme(){MainActivity.this.toggleTheme();}
+            public void openBook(File file,String name,String uri,String id){openShelfBook(file,name,uri,id);}
+        });home=shelf.view;themeButton=home.themeButton;
         root.addView(home,new FrameLayout.LayoutParams(-1,-1));
         loading=new LinearLayout(this);loading.setOrientation(LinearLayout.VERTICAL);loading.setPadding(dp(20),dp(16),dp(20),dp(16));loading.setBackgroundColor(appearance.panel);
         status=text("准备打开",14);loading.addView(status);
@@ -90,7 +91,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         FrameLayout.LayoutParams spinner=new FrameLayout.LayoutParams(dp(22),dp(22),Gravity.BOTTOM|Gravity.RIGHT);spinner.setMargins(0,0,dp(12),dp(10));
         // Overlay inside the root's system-bar/keyboard insets; never resize the page.
         root.addView(pageLoading,spinner);
-        setContentView(root);applyAppearance(appearance);loadAppearance();
+        setContentView(root);applyAppearance(appearance);loadAppearance();shelf.load();
         if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::goBack);
         if(saved!=null&&saved.getBoolean("reading",false))page.post(this::openLast);
     }
@@ -100,7 +101,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     private String stateDirectory(){return new File(getFilesDir(),"reader-state").getAbsolutePath();}
     private void applyAppearance(NativeReader.Appearance value){
         appearance=value;AndroidTheme.apply(this,root,home,loading,page,progress,pageLoading,value);
-        themeButton.setText(value.dark()?"切换到亮色":"切换到暗色");
+        shelf.theme(value);
         SharedPreferences mirror=getSharedPreferences("appearance",MODE_PRIVATE);
         if(!value.name.equals(mirror.getString("theme","")))mirror.edit().putString("theme",value.name).apply();
     }
@@ -114,29 +115,37 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         final String state=stateDirectory(),next=appearance.dark()?"light":"dark";
         io.execute(()->{try{NativeReader.Appearance value=NativeReader.saveTheme(state,next);ui.post(()->{if(destroyed)return;themeBusy=false;themeButton.setEnabled(true);if(request==appearanceEpoch&&reader==null)applyAppearance(value);});}catch(Exception e){ui.post(()->{if(destroyed)return;themeBusy=false;themeButton.setEnabled(true);showError(e);});}});
     }
-    private void pick(){if(themeBusy)return;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("*/*");i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(i,PICK_BOOK);}
+    private void pick(){if(themeBusy||shelf.busy())return;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("*/*");i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(i,PICK_BOOK);}
     @Override protected void onActivityResult(int request,int result,Intent data){
-        super.onActivityResult(request,result,data);if(request!=PICK_BOOK||result!=RESULT_OK||data==null||data.getData()==null)return;
-        Uri uri=data.getData();try{getContentResolver().takePersistableUriPermission(uri,data.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException ignored){}
-        importBook(uri);
+        super.onActivityResult(request,result,data);if(request!=PICK_BOOK||result!=RESULT_OK||data==null)return;
+        java.util.LinkedHashSet<Uri> selected=new java.util.LinkedHashSet<>();ClipData clip=data.getClipData();
+        if(clip!=null){if(clip.getItemCount()>64){home.message("每批最多导入 64 本图书");return;}for(int i=0;i<clip.getItemCount();i++)if(clip.getItemAt(i).getUri()!=null)selected.add(clip.getItemAt(i).getUri());}else if(data.getData()!=null)selected.add(data.getData());
+        for(Uri uri:selected)try{getContentResolver().takePersistableUriPermission(uri,data.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException ignored){}
+        shelf.importBooks(new java.util.ArrayList<>(selected));
     }
     private void importBook(Uri uri){
         File preserve=currentFile;closeReader();int token=++epoch;importing=true;imported=total=0;currentUri=uri.toString();home.setVisibility(View.GONE);showProgress("读取图书",0,0);requestFrame();
         io.execute(()->{
             try{
-                BookFiles.Imported b=BookFiles.read(getContentResolver(),uri,new File(getCacheDir(),"books"),preserve,(done,all)->{if(token==epoch){imported=done;total=all;}},()->token!=epoch||destroyed||Thread.currentThread().isInterrupted());
+                BookFiles.Imported b=BookFiles.read(getContentResolver(),uri,shelf.booksDirectory(),preserve,(done,all)->{if(token==epoch){imported=done;total=all;}},()->token!=epoch||destroyed||Thread.currentThread().isInterrupted());
+                ShelfStore.Book saved=shelf.accept(b.file,b.name,uri.toString());
                 File font=BookFiles.font(getAssets(),new File(getFilesDir(),"fonts"));
-                ui.post(()->{if(token!=epoch||destroyed)return;importing=false;startReader(b.file,b.name,font,token);});
+                ui.post(()->{if(token!=epoch||destroyed)return;currentShelfId=saved.id;importing=false;startReader(b.file,saved.label(),font,token);});
             }catch(Exception e){ui.post(()->{if(token==epoch&&!destroyed){importing=false;showError(e);}});}
         });
     }
+    private void openShelfBook(File file,String name,String uri,String id){
+        if(importing||themeBusy||destroyed)return;closeReader();int token=++epoch;currentUri=uri;currentShelfId=id;importing=true;home.setVisibility(View.GONE);showProgress("准备打开图书",0,0);requestFrame();
+        io.execute(()->{try{File font=BookFiles.font(getAssets(),new File(getFilesDir(),"fonts"));ui.post(()->{if(token!=epoch||destroyed)return;importing=false;startReader(file,name,font,token);});}catch(Exception e){ui.post(()->{if(token==epoch&&!destroyed){importing=false;showError(e);}});}});
+    }
     private void openLast(){
         if(importing||themeBusy)return;
+        if(shelf.openLast())return;
         SharedPreferences saved=getSharedPreferences("library",MODE_PRIVATE);String path=saved.getString("book",""),uri=saved.getString("uri","");File file=new File(path);
         try{
-            if(path.isEmpty()||!file.isFile()||!file.getCanonicalPath().startsWith(new File(getCacheDir(),"books").getCanonicalPath()+File.separator)){if(!uri.isEmpty())importBook(Uri.parse(uri));else pick();return;}
+            if(path.isEmpty()||!file.isFile()||(!file.getCanonicalPath().startsWith(new File(getCacheDir(),"books").getCanonicalPath()+File.separator)&&!file.getCanonicalPath().startsWith(shelf.booksDirectory().getCanonicalPath()+File.separator))){if(!uri.isEmpty())importBook(Uri.parse(uri));else pick();return;}
         }catch(Exception e){showError(e);return;}
-        closeReader();int token=++epoch;currentUri=uri;importing=true;imported=total=0;home.setVisibility(View.GONE);showProgress("准备继续阅读",0,0);requestFrame();
+        closeReader();int token=++epoch;currentUri=uri;currentShelfId=file.getName().matches("[0-9a-f]{64}\\.(epub|mobi)")?file.getName().substring(0,64):"";importing=true;imported=total=0;home.setVisibility(View.GONE);showProgress("准备继续阅读",0,0);requestFrame();
         io.execute(()->{try{File font=BookFiles.font(getAssets(),new File(getFilesDir(),"fonts"));ui.post(()->{if(token!=epoch||destroyed)return;importing=false;startReader(file,saved.getString("name","图书"),font,token);});}catch(Exception e){ui.post(()->{if(token==epoch&&!destroyed){importing=false;showError(e);}});}});
     }
     private void startReader(File file,String name,File font,int token){
@@ -170,7 +179,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
             updateLoading(s);
             if(s.serial>0){
                 if(!appearance.name.equals(s.appearance.name))applyAppearance(s.appearance);
-                if(!remembered){remembered=true;getSharedPreferences("library",MODE_PRIVATE).edit().putString("book",currentFile.getAbsolutePath()).putString("name",currentName).putString("uri",currentUri).apply();}
+                if(!remembered){remembered=true;getSharedPreferences("library",MODE_PRIVATE).edit().putString("book",currentFile.getAbsolutePath()).putString("name",currentName).putString("uri",currentUri).apply();shelf.progress(currentShelfId,s.percent);}
                 page.state(s);
                 if(s.serial!=shownSerial&&!copyPending)copyFrame(owner,s,epoch);
             }
@@ -230,20 +239,22 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     }
     private void showError(Throwable e){hidePageLoading();loading.setVisibility(View.VISIBLE);progress.setVisibility(View.GONE);status.setText("ReadAll："+(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));}
     private void closeReader(){
-        hidePageLoading();shownSerial=0;
+        if(shelf!=null&&lastState!=null&&lastState.serial>0)shelf.progress(currentShelfId,lastState.percent);
+        currentShelfId="";hidePageLoading();shownSerial=0;
         page.cancelTouch();page.closeInput();ui.removeCallbacks(schedule);ui.removeCallbacks(resizeTask);choreographer.removeFrameCallback(frames);frameScheduled=false;copyPending=false;
         NativeReader owner=reader;reader=null;lastState=null;if(owner!=null)owner.close();
     }
-    private void returnHome(){++epoch;importing=false;closeReader();release(page.picture(null));loading.setVisibility(View.GONE);home.setVisibility(View.VISIBLE);loadAppearance();}
+    private void returnHome(){++epoch;importing=false;closeReader();release(page.picture(null));loading.setVisibility(View.GONE);home.setVisibility(View.VISIBLE);loadAppearance();shelf.resume();}
     private void goBack(){
+        if(reader==null&&shelf.busy()){shelf.cancelImport();return;}
         if(importing){returnHome();return;}
         if(reader!=null){if(lastState==null||lastState.serial==0||lastState.closed())returnHome();else action(NativeReader.BACK,0,0);return;}
         finish();
     }
-    @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appearance!=null&&root!=null)AndroidTheme.apply(this,root,home,loading,page,progress,pageLoading,appearance);}
+    @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appearance!=null&&root!=null){AndroidTheme.apply(this,root,home,loading,page,progress,pageLoading,appearance);shelf.theme(appearance);}}
     @Override public void onBackPressed(){goBack();}
     @Override protected void onResume(){super.onResume();resumed=true;if(reader!=null)action(NativeReader.PAUSE,0,0);requestFrame();}
-    @Override protected void onPause(){resumed=false;hidePageLoading();page.cancelTouch();ui.removeCallbacks(schedule);choreographer.removeFrameCallback(frames);frameScheduled=false;if(reader!=null)try{reader.command(NativeReader.PAUSE,1,0);}catch(Exception ignored){}super.onPause();}
+    @Override protected void onPause(){resumed=false;shelf.pause();if(lastState!=null&&lastState.serial>0)shelf.progress(currentShelfId,lastState.percent);hidePageLoading();page.cancelTouch();ui.removeCallbacks(schedule);choreographer.removeFrameCallback(frames);frameScheduled=false;if(reader!=null)try{reader.command(NativeReader.PAUSE,1,0);}catch(Exception ignored){}super.onPause();}
     @Override protected void onSaveInstanceState(Bundle state){state.putBoolean("reading",reader!=null);super.onSaveInstanceState(state);}
-    @Override protected void onDestroy(){destroyed=true;++epoch;closeReader();io.shutdownNow();pixels.shutdownNow();release(null);super.onDestroy();}
+    @Override protected void onDestroy(){destroyed=true;++epoch;closeReader();shelf.close();io.shutdown();pixels.shutdownNow();release(null);super.onDestroy();}
 }
