@@ -4,9 +4,6 @@ use super::*;
 use std::time::{Duration, Instant};
 
 const REMOVE_WIDTH: u32 = 48;
-const REMOVE_INK: Color = Color::rgba(167, 55, 58, 255);
-const REMOVE_HOVER: Color = Color::rgba(253, 235, 234, 255);
-const REMOVE_PRESSED: Color = Color::rgba(245, 213, 212, 255);
 const SCROLL_SPEED: f64 = 28.0;
 const END_PAUSE: f64 = 1.0;
 
@@ -116,6 +113,7 @@ impl Home<'_> {
     }
 
     fn paint_recent_row(&mut self, index: usize) -> WindowResult<()> {
+        let palette = self.theme.palette();
         let row = self.recent_row_rect(index);
         let button = self.recent_delete_rect(index);
         let hover = self.hover_target();
@@ -127,15 +125,27 @@ impl Home<'_> {
         self.surface.draw(&[
             DrawCommand::FillRect {
                 rect: row,
-                color: if hovered { HOVER_SOFT } else { PANEL },
+                color: if hovered {
+                    palette.hover
+                } else {
+                    palette.panel
+                },
             },
             DrawCommand::FillRect {
                 rect: Rect::new(row.x, row.y, if hovered { 4 } else { 2 }, row.height),
-                color: if hovered { ACCENT } else { BORDER },
+                color: if hovered {
+                    palette.accent
+                } else {
+                    palette.border
+                },
             },
             DrawCommand::FillRect {
                 rect: button,
-                color: if delete_hover { REMOVE_INK } else { BORDER },
+                color: if delete_hover {
+                    palette.danger
+                } else {
+                    palette.border
+                },
             },
             DrawCommand::FillRect {
                 rect: Rect::new(
@@ -145,11 +155,11 @@ impl Home<'_> {
                     button.height - 2,
                 ),
                 color: if pressed {
-                    REMOVE_PRESSED
+                    palette.danger_pressed
                 } else if delete_hover {
-                    REMOVE_HOVER
+                    palette.danger_hover
                 } else {
-                    PANEL
+                    palette.panel
                 },
             },
         ])?;
@@ -159,7 +169,7 @@ impl Home<'_> {
             row.y + 7,
             14,
             &view.name,
-            INK,
+            palette.ink,
             view.clip,
         )?;
         let width = text.measure(12, "删除")?;
@@ -168,7 +178,11 @@ impl Home<'_> {
             button.y + 6,
             12,
             "删除",
-            if delete_hover { REMOVE_INK } else { MUTED },
+            if delete_hover {
+                palette.danger
+            } else {
+                palette.muted
+            },
             button,
         )?;
         Ok(())

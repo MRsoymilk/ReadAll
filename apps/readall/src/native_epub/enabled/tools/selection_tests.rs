@@ -5,7 +5,8 @@ use super::*;
 fn assert_highlight(reader: &ReaderWindow<'_, '_, '_, '_>, selected: usize) {
     assert_eq!(reader.tools.selected, selected);
     let panel = reader.tool_panel();
-    let background = reader.session.settings().theme.colors().0;
+    let palette = reader.session.settings().theme.palette();
+    let background = palette.panel;
     let visible = reader
         .tool_rows()
         .min(reader.tool_count().saturating_sub(reader.tools.scroll));
@@ -19,7 +20,7 @@ fn assert_highlight(reader: &ReaderWindow<'_, '_, '_, '_>, selected: usize) {
             )
             .unwrap();
         let expected = if reader.tools.scroll + row == selected {
-            Color::rgba(75, 125, 200, 45).over(background)
+            palette.selected
         } else {
             background
         };

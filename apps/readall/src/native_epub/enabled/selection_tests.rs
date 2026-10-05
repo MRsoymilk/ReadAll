@@ -40,12 +40,12 @@ fn assert_highlight(reader: &ReaderWindow<'_, '_, '_, '_>, selected: usize) {
     let mut active = 0;
     for row in 0..visible {
         let y = (panel.y + 48 + row as i32 * 38 + 2) as u32;
-        // Sample outside text, reconstructing the unchanged panel background.
-        let page = reader.session.frame().surface.pixel(x, y).unwrap();
-        let background = Color::rgba(250, 251, 253, 246).over(Color::rgba(0, 0, 0, 35).over(page));
+        // Sample outside text; one selected row in the active theme palette.
+        let palette = reader.session.settings().theme.palette();
+        let background = palette.panel;
         let current = reader.toc_scroll + row == selected;
         let expected = if current {
-            Color::rgba(220, 232, 249, 245).over(background)
+            palette.selected
         } else {
             background
         };

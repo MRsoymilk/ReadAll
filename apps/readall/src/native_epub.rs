@@ -26,6 +26,8 @@ mod enabled {
     mod motion;
     #[cfg(test)]
     mod selection_tests;
+    #[cfg(test)]
+    mod theme_tests;
     mod tools;
     use super::*;
     #[cfg(all(target_os = "linux", feature = "wayland"))]
@@ -50,7 +52,9 @@ mod enabled {
         LocalFileSource,
         window::{Action, WindowHandler, WindowOptions, WindowResult},
     };
-    use readall_render::{Color, DrawCommand, Rect, Surface};
+    #[cfg(test)]
+    use readall_render::Color;
+    use readall_render::{DrawCommand, Rect, Surface};
     use std::{
         path::{Path, PathBuf},
         time::Duration,
@@ -287,15 +291,12 @@ mod enabled {
             self.draw_page_motion()?;
             let width = self.surface.width();
             let height = self.surface.height();
-            let (background, theme_ink) = self.session.settings().theme.colors();
-            let header = Color {
-                a: 245,
-                ..background
-            };
-            let border = Color::rgba(224, 228, 234, 255);
-            let ink = theme_ink;
-            let muted = Color::rgba(112, 121, 133, 255);
-            let accent = Color::rgba(55, 104, 190, 255);
+            let palette = self.session.settings().theme.palette();
+            let header = self.session.settings().theme.colors().0;
+            let border = palette.border;
+            let ink = palette.ink;
+            let muted = palette.muted;
+            let accent = palette.accent;
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(0, 0, width, 32),
@@ -346,7 +347,7 @@ mod enabled {
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(16, height.saturating_sub(3) as i32, track_w, 2),
-                    color: Color::rgba(200, 206, 214, 150),
+                    color: palette.border,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(16, height.saturating_sub(3) as i32, filled.min(track_w), 2),
@@ -367,19 +368,20 @@ mod enabled {
         }
 
         fn draw_collapsed_control(&mut self) -> WindowResult<()> {
+            let palette = self.session.settings().theme.palette();
             let rect = self.collapsed_rect();
             let hovered = self.hover_target() == ReaderHover::Collapsed;
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(rect.x + 2, rect.y + 2, rect.width, rect.height),
-                    color: Color::rgba(0, 0, 0, 28),
+                    color: palette.shadow,
                 },
                 DrawCommand::FillRect {
                     rect,
                     color: if hovered {
-                        Color::rgba(31, 37, 47, 232)
+                        palette.hover
                     } else {
-                        Color::rgba(31, 37, 47, 185)
+                        palette.panel
                     },
                 },
             ])?;
@@ -387,12 +389,13 @@ mod enabled {
                 &mut self.surface,
                 CHEVRON_UP,
                 Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 4, 22, 22),
-                Color::rgba(245, 248, 252, if hovered { 255 } else { 220 }),
+                palette.ink,
             )?;
             Ok(())
         }
 
         fn draw_toolbar(&mut self) -> WindowResult<()> {
+            let palette = self.session.settings().theme.palette();
             let rect = self.toolbar_rect();
             let hover = self.hover_target();
             let handle = self.toolbar_button_rect(5);
@@ -401,14 +404,14 @@ mod enabled {
             let smaller = self.toolbar_button_rect(2);
             let larger = self.toolbar_button_rect(3);
             let next = self.toolbar_button_rect(4);
-            let line = Color::rgba(255, 255, 255, 28);
-            let panel = Color::rgba(31, 37, 47, 225);
-            let hover_fill = Color::rgba(255, 255, 255, 34);
-            let active_fill = Color::rgba(70, 117, 195, 225);
+            let line = palette.border;
+            let panel = palette.panel;
+            let hover_fill = palette.hover;
+            let active_fill = palette.selected;
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(rect.x + 3, rect.y + 4, rect.width, rect.height),
-                    color: Color::rgba(0, 0, 0, 34),
+                    color: palette.shadow,
                 },
                 DrawCommand::FillRect { rect, color: panel },
                 DrawCommand::FillRect {
@@ -467,7 +470,7 @@ mod enabled {
                 }
             }
 
-            let icon = Color::rgba(244, 247, 252, 235);
+            let icon = palette.ink;
             svg_icon::draw(
                 &mut self.surface,
                 CHEVRON_DOWN,
@@ -506,7 +509,7 @@ mod enabled {
             )?;
 
             let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            let label = Color::rgba(239, 243, 249, 235);
+            let label = palette.ink;
             text.draw(prev.x + 25, prev.y + 74, 13, "上一页", label)?;
             text.draw(next.x + 25, next.y + 74, 13, "下一页", label)?;
             text.draw(toc.x + 45, toc.y + 9, 14, "目录", label)?;
@@ -516,19 +519,20 @@ mod enabled {
         }
 
         fn draw_toc(&mut self) -> WindowResult<()> {
+            let palette = self.session.settings().theme.palette();
             let panel = self.toc_panel_rect();
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(panel.x + 3, panel.y + 4, panel.width, panel.height),
-                    color: Color::rgba(0, 0, 0, 35),
+                    color: palette.shadow,
                 },
                 DrawCommand::FillRect {
                     rect: panel,
-                    color: Color::rgba(250, 251, 253, 246),
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(panel.x, panel.y + 46, panel.width, 1),
-                    color: Color::rgba(221, 226, 233, 255),
+                    color: palette.border,
                 },
             ])?;
             let visible = self.visible_toc_rows();
@@ -544,18 +548,12 @@ mod enabled {
                 if index == self.toc_selected {
                     self.surface.draw(&[DrawCommand::FillRect {
                         rect: Rect::new(panel.x + 8, y, panel.width.saturating_sub(16), 34),
-                        color: Color::rgba(220, 232, 249, 245),
+                        color: palette.selected,
                     }])?;
                 }
             }
             let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            text.draw(
-                panel.x + 18,
-                panel.y + 13,
-                17,
-                "目录",
-                Color::rgba(42, 48, 57, 255),
-            )?;
+            text.draw(panel.x + 18, panel.y + 13, 17, "目录", palette.ink)?;
             for (row, entry) in self
                 .toc
                 .iter()
@@ -569,13 +567,7 @@ mod enabled {
                     .width
                     .saturating_sub(56_u32.saturating_add(indent as u32));
                 let title = text.fit(14, &entry.title, text_width)?;
-                text.draw(
-                    panel.x + 20 + indent,
-                    y,
-                    14,
-                    &title,
-                    Color::rgba(60, 67, 78, 255),
-                )?;
+                text.draw(panel.x + 20 + indent, y, 14, &title, palette.ink)?;
             }
             Ok(())
         }
@@ -911,6 +903,9 @@ mod enabled {
 
         fn title(&self) -> String {
             self.session.title()
+        }
+        fn dark_theme(&self) -> bool {
+            self.session.settings().theme == crate::reader_data::Theme::Dark
         }
 
         fn animation_interval(&self) -> Option<Duration> {
@@ -1267,25 +1262,22 @@ mod enabled {
             let width = reader.surface.width();
             let mut expected = reader.session.frame().surface.clone();
             let background = reader.session.settings().theme.colors().0;
+            let palette = reader.session.settings().theme.palette();
             expected
                 .draw(&[
                     DrawCommand::FillRect {
                         rect: Rect::new(0, 0, width, 32),
-                        color: Color {
-                            a: 245,
-                            ..background
-                        },
+                        color: background,
                     },
                     DrawCommand::FillRect {
                         rect: Rect::new(0, 31, width, 1),
-                        color: Color::rgba(224, 228, 234, 255),
+                        color: palette.border,
                     },
                 ])
                 .unwrap();
             let mut text = UiPainter::new(&reader.ui_font, &mut expected).unwrap();
             let x = width.saturating_sub(text.measure(12, status).unwrap() + 16);
-            text.draw(x as i32, 9, 12, status, Color::rgba(112, 121, 133, 255))
-                .unwrap();
+            text.draw(x as i32, 9, 12, status, palette.muted).unwrap();
             for y in 0..32 {
                 for x in x..width {
                     assert_eq!(

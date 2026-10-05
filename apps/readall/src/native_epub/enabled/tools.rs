@@ -633,6 +633,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         }
     }
     pub(super) fn draw_marks(&mut self) -> WindowResult<()> {
+        let palette = self.session.settings().theme.palette();
         let mut commands = Vec::new();
         let mut ranges: Vec<_> = self
             .tools
@@ -658,7 +659,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             if merged.get(at).is_some_and(|(start, _)| *start < hit.end) {
                 commands.push(DrawCommand::FillRect {
                     rect: hit.rect,
-                    color: Color::rgba(250, 196, 40, 70),
+                    color: palette.highlight,
                 });
             }
         }
@@ -667,7 +668,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 if hit.start < range.end && hit.end > range.start {
                     commands.push(DrawCommand::FillRect {
                         rect: hit.rect,
-                        color: Color::rgba(70, 135, 240, 65),
+                        color: palette.selection,
                     });
                 }
             }
@@ -678,6 +679,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     pub(super) fn draw_tools(&mut self) -> WindowResult<()> {
+        let palette = self.session.settings().theme.palette();
         if self.tools.mode == Mode::External {
             return self.draw_external_link();
         }
@@ -690,17 +692,10 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     let rect = self.tool_dock(index);
                     self.surface.draw(&[DrawCommand::FillRect {
                         rect,
-                        color: Color::rgba(255, 255, 255, 22),
+                        color: palette.button,
                     }])?;
                     let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-                    text.draw_clipped(
-                        rect.x + 8,
-                        rect.y + 7,
-                        13,
-                        label,
-                        Color::rgba(240, 243, 248, 255),
-                        rect,
-                    )?;
+                    text.draw_clipped(rect.x + 8, rect.y + 7, 13, label, palette.ink, rect)?;
                 }
             }
             if !self.tools.selecting
@@ -712,14 +707,14 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 let rect = Rect::new(8, 34, w.saturating_sub(16), 26);
                 self.surface.draw(&[DrawCommand::FillRect {
                     rect,
-                    color: Color::rgba(35, 42, 52, 230),
+                    color: palette.panel,
                 }])?;
                 let back = self.link_back_rect();
                 let has_back = !self.tools.link_history.is_empty();
                 if has_back {
                     self.surface.draw(&[DrawCommand::FillRect {
                         rect: back,
-                        color: Color::rgba(55, 104, 190, 255),
+                        color: palette.accent,
                     }])?;
                 }
                 let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
@@ -728,16 +723,23 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     &self.tools.status,
                     rect.width.saturating_sub(if has_back { 100 } else { 16 }),
                 )?;
-                text.draw_clipped(rect.x + 8, rect.y + 6, 12, &status, Color::WHITE, rect)?;
+                text.draw_clipped(rect.x + 8, rect.y + 6, 12, &status, palette.ink, rect)?;
                 if has_back {
-                    text.draw_clipped(back.x + 18, back.y + 6, 12, "返回", Color::WHITE, back)?;
+                    text.draw_clipped(
+                        back.x + 18,
+                        back.y + 6,
+                        12,
+                        "返回",
+                        palette.on_accent,
+                        back,
+                    )?;
                 }
             }
             self.draw_selection_actions()?;
             return Ok(());
         }
         let panel = self.tool_panel();
-        let (background, ink) = self.session.settings().theme.colors();
+        let (background, ink) = (palette.panel, palette.ink);
         self.surface.draw(&[
             DrawCommand::FillRect {
                 rect: Rect::new(
@@ -746,7 +748,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                     self.surface.width(),
                     self.surface.height().saturating_sub(32),
                 ),
-                color: Color::rgba(0, 0, 0, 90),
+                color: palette.scrim,
             },
             DrawCommand::FillRect {
                 rect: panel,
@@ -795,7 +797,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         if editing {
             self.surface.draw(&[DrawCommand::FillRect {
                 rect,
-                color: Color::rgba(120, 140, 170, 35),
+                color: palette.button,
             }])?;
         }
         let visible = self.tool_rows();
@@ -840,7 +842,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             Mode::Settings => {
                 let s = self.session.settings();
                 for (index, label) in [
-                    format!("主题：{}", s.theme.name()),
+                    format!("主题：{}", s.theme.label()),
                     format!("字号：{} px", s.size),
                     format!("页边距：{} px", s.margin),
                     format!("行距：{:.1} 倍", s.line_spacing),
@@ -865,7 +867,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                         panel.width.saturating_sub(16),
                         38,
                     ),
-                    color: Color::rgba(75, 125, 200, 45),
+                    color: palette.selected,
                 }])?;
             }
         }

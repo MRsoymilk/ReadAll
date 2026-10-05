@@ -175,7 +175,8 @@ impl ReaderWindow<'_, '_, '_, '_> {
         };
         let panel = self.tool_panel();
         let (cancel, open) = self.external_buttons();
-        let (background, ink) = self.session.settings().theme.colors();
+        let palette = self.session.settings().theme.palette();
+        let (background, ink) = (palette.panel, palette.ink);
         self.surface.draw(&[
             DrawCommand::FillRect {
                 rect: Rect::new(
@@ -184,7 +185,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                     self.surface.width(),
                     self.surface.height().saturating_sub(32),
                 ),
-                color: Color::rgba(0, 0, 0, 120),
+                color: palette.scrim,
             },
             DrawCommand::FillRect {
                 rect: panel,
@@ -192,11 +193,11 @@ impl ReaderWindow<'_, '_, '_, '_> {
             },
             DrawCommand::FillRect {
                 rect: cancel,
-                color: Color::rgba(110, 130, 155, 45),
+                color: palette.button,
             },
             DrawCommand::FillRect {
                 rect: open,
-                color: Color::rgba(48, 101, 184, 255),
+                color: palette.accent,
             },
         ])?;
         let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
@@ -245,7 +246,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
             open.y + 8,
             12,
             "在浏览器打开",
-            Color::WHITE,
+            palette.on_accent,
             open,
         )?;
         Ok(())

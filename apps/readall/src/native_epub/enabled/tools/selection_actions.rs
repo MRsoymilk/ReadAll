@@ -76,28 +76,29 @@ impl ReaderWindow<'_, '_, '_, '_> {
         Ok(Some(false))
     }
     pub(super) fn draw_selection_actions(&mut self) -> WindowResult<()> {
+        let palette = self.session.settings().theme.palette();
         let Some(bar) = self.selection_actions_rect() else {
             return Ok(());
         };
         self.surface.draw(&[
             DrawCommand::FillRect {
                 rect: Rect::new(bar.x + 2, bar.y + 2, bar.width, bar.height),
-                color: Color::rgba(0, 0, 0, 40),
+                color: palette.shadow,
             },
             DrawCommand::FillRect {
                 rect: bar,
-                color: Color::rgba(35, 42, 52, 255),
+                color: palette.panel,
             },
             DrawCommand::FillRect {
                 rect: Rect::new(bar.x, bar.y + BUTTON_HEIGHT as i32, bar.width, 1),
-                color: Color::rgba(85, 100, 120, 255),
+                color: palette.border,
             },
         ])?;
         for i in 1..4 {
             let cell = Self::selection_button(bar, i);
             self.surface.draw(&[DrawCommand::FillRect {
                 rect: Rect::new(cell.x, cell.y + 7, 1, 18),
-                color: Color::rgba(85, 100, 120, 255),
+                color: palette.border,
             }])?;
         }
         let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
@@ -109,7 +110,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 cell.y + 8,
                 13,
                 label,
-                Color::WHITE,
+                palette.ink,
                 cell,
             )?;
         }
@@ -119,14 +120,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
             &self.tools.status
         };
         let hint = text.fit(11, hint, bar.width.saturating_sub(16))?;
-        text.draw_clipped(
-            bar.x + 8,
-            bar.y + 36,
-            11,
-            &hint,
-            Color::rgba(197, 211, 230, 255),
-            bar,
-        )?;
+        text.draw_clipped(bar.x + 8, bar.y + 36, 11, &hint, palette.muted, bar)?;
         Ok(())
     }
 }

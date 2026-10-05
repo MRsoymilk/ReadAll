@@ -76,7 +76,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                     rect.width,
                     1,
                 ),
-                color: Color::rgba(74, 142, 220, 230),
+                color: self.session.settings().theme.palette().accent,
             }])?;
         }
         Ok(())

@@ -70,7 +70,11 @@ fn delete_button_removes_only_history_and_updates_visible_rows_without_opening()
         let row = home.recent_row_rect(i);
         assert_eq!(
             home.surface.pixel((row.x + 8) as u32, (row.y + 1) as u32),
-            Some(if i == 1 { HOVER_SOFT } else { PANEL })
+            Some(if i == 1 {
+                home.theme.palette().hover
+            } else {
+                home.theme.palette().panel
+            })
         );
     }
     home.action(Action::Click { x, y }).unwrap();

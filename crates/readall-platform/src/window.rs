@@ -96,6 +96,10 @@ pub trait WindowHandler {
     }
     fn surface(&self) -> &Surface;
     fn title(&self) -> String;
+    /// Presentation hint for loading/error chrome surrounding an immutable frame.
+    fn dark_theme(&self) -> bool {
+        false
+    }
     fn animation_interval(&self) -> Option<Duration> {
         None
     }

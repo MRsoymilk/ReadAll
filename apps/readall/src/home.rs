@@ -15,6 +15,7 @@ mod enabled {
     mod recent_tests;
     use super::*;
     use crate::{
+        reader_data::{Store, Theme},
         recent::RecentStore,
         ui::{UiFont, UiPainter},
     };
@@ -24,25 +25,13 @@ mod enabled {
         LocalFileSource,
         window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
     };
-    use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
+    use readall_render::{DrawCommand, Rect, RenderLimits, Surface};
     use recent_rows::RecentRowView;
     use std::{
         fs,
         path::{Path, PathBuf},
     };
 
-    const BG: Color = Color::rgba(244, 246, 249, 255);
-    const SIDEBAR: Color = Color::rgba(26, 31, 39, 255);
-    const PANEL: Color = Color::rgba(255, 255, 255, 255);
-    const INK: Color = Color::rgba(34, 40, 49, 255);
-    const MUTED: Color = Color::rgba(105, 115, 128, 255);
-    const ACCENT: Color = Color::rgba(52, 103, 190, 255);
-    const ACCENT_SOFT: Color = Color::rgba(231, 238, 251, 255);
-    const HOVER_SOFT: Color = Color::rgba(220, 232, 249, 255);
-    const HOVER_STRONG: Color = Color::rgba(210, 226, 248, 255);
-    const BORDER: Color = Color::rgba(224, 229, 236, 255);
-    const SIDEBAR_TEXT: Color = Color::rgba(239, 243, 248, 255);
-    const SIDEBAR_MUTED: Color = Color::rgba(152, 164, 181, 255);
     const ROW_HEIGHT: i32 = 48;
     const LIST_TOP: i32 = 150;
     const LIST_BOTTOM_MARGIN: i32 = 96;
@@ -232,6 +221,8 @@ mod enabled {
     }
 
     struct Home<'font> {
+        theme: Theme,
+        theme_store: Option<Store>,
         surface: Surface,
         ui_font: &'font UiFont,
         mode: Mode,
@@ -253,6 +244,8 @@ mod enabled {
                 .and_then(|store| store.load().ok())
                 .unwrap_or_default();
             let mut home = Self {
+                theme: Theme::Paper,
+                theme_store: None,
                 surface: Surface::new(width, height, RenderLimits::default())?,
                 ui_font,
                 mode: Mode::Library,
@@ -269,6 +262,23 @@ mod enabled {
             Ok(home)
         }
 
+        fn theme_rect(&self) -> Rect {
+            Rect::new(24, self.surface.height().saturating_sub(82) as i32, 166, 42)
+        }
+        fn toggle_theme(&mut self) -> WindowResult<bool> {
+            let theme = self.theme.next();
+            if let Some(store) = &self.theme_store
+                && let Err(error) = store.save_theme(theme)
+            {
+                self.status = format!("主题保存失败：{error}");
+                self.paint()?;
+                return Ok(true);
+            }
+            self.theme = theme;
+            self.status = format!("已切换为{}主题", theme.label());
+            self.paint()?;
+            Ok(true)
+        }
         fn default_directory() -> PathBuf {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
@@ -433,9 +443,10 @@ mod enabled {
         }
 
         fn paint(&mut self) -> WindowResult<()> {
+            let palette = self.theme.palette();
             self.surface.draw(&[DrawCommand::FillRect {
                 rect: Rect::new(0, 0, self.surface.width(), self.surface.height()),
-                color: BG,
+                color: palette.canvas,
             }])?;
             match &self.mode {
                 Mode::Library => self.paint_library(),
@@ -447,34 +458,48 @@ mod enabled {
         }
 
         fn paint_shell(&mut self, section: &str) -> WindowResult<()> {
+            let palette = self.theme.palette();
             let h = self.surface.height();
             let w = self.surface.width();
+            let theme_button = self.theme_rect();
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(0, 0, 218, h),
-                    color: SIDEBAR,
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(218, 0, w.saturating_sub(218), 86),
-                    color: PANEL,
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(218, 85, w.saturating_sub(218), 1),
-                    color: BORDER,
+                    color: palette.border,
                 },
             ])?;
 
+            self.surface.draw(&[DrawCommand::FillRect {
+                rect: theme_button,
+                color: palette.button,
+            }])?;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(28, 24, 28, "ReadAll", SIDEBAR_TEXT)?;
-            text.draw(30, 62, 13, "原生 Rust 阅读器", SIDEBAR_MUTED)?;
-            text.draw(30, 126, 14, "书库", Color::rgba(126, 174, 244, 255))?;
-            text.draw(30, 166, 15, "打开图书", SIDEBAR_TEXT)?;
-            text.draw(30, 206, 15, "最近阅读", SIDEBAR_MUTED)?;
-            text.draw(250, 28, 24, section, INK)?;
+            text.draw(
+                theme_button.x + 12,
+                theme_button.y + 13,
+                13,
+                &format!("{}主题 · F6 切换", self.theme.label()),
+                palette.ink,
+            )?;
+            text.draw(28, 24, 28, "ReadAll", palette.ink)?;
+            text.draw(30, 62, 13, "原生 Rust 阅读器", palette.muted)?;
+            text.draw(30, 126, 14, "书库", palette.accent)?;
+            text.draw(30, 166, 15, "打开图书", palette.ink)?;
+            text.draw(30, 206, 15, "最近阅读", palette.muted)?;
+            text.draw(250, 28, 24, section, palette.ink)?;
             Ok(())
         }
 
         fn paint_library(&mut self) -> WindowResult<()> {
+            let palette = self.theme.palette();
             self.paint_shell("书库")?;
             let content_w = self.surface.width().saturating_sub(280);
             let card = self.open_card_rect();
@@ -482,15 +507,19 @@ mod enabled {
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: card,
-                    color: ACCENT,
+                    color: palette.accent,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(card.x + 3, card.y + 3, card.width - 6, card.height - 6),
-                    color: if hovered { HOVER_SOFT } else { PANEL },
+                    color: if hovered {
+                        palette.hover
+                    } else {
+                        palette.panel
+                    },
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(card.x + 3, card.y + 3, 8, card.height - 6),
-                    color: ACCENT,
+                    color: palette.accent,
                 },
             ])?;
 
@@ -505,41 +534,54 @@ mod enabled {
                         .saturating_sub(info_y as u32 + 54)
                         .min(158),
                 ),
-                color: PANEL,
+                color: palette.panel,
             }])?;
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(282, 148, 24, "打开电子书", INK)?;
-            text.draw(282, 190, 15, "支持 EPUB / MOBI / AZW3，选择后阅读", MUTED)?;
-            text.draw(282, 230, 14, "点击卡片或按 Enter", ACCENT)?;
-            text.draw(282, info_y + 20, 17, "最近阅读", INK)?;
+            text.draw(282, 148, 24, "打开电子书", palette.ink)?;
+            text.draw(
+                282,
+                190,
+                15,
+                "支持 EPUB / MOBI / AZW3，选择后阅读",
+                palette.muted,
+            )?;
+            text.draw(282, 230, 14, "点击卡片或按 Enter", palette.accent)?;
+            text.draw(282, info_y + 20, 17, "最近阅读", palette.ink)?;
             if self.recent.is_empty() {
-                text.draw(282, info_y + 62, 14, "暂无最近阅读", MUTED)?;
+                text.draw(282, info_y + 62, 14, "暂无最近阅读", palette.muted)?;
                 if info_y + 112 < footer_y - 8 {
-                    text.draw(282, info_y + 96, 13, "成功关闭图书后会自动记录", MUTED)?;
+                    text.draw(
+                        282,
+                        info_y + 96,
+                        13,
+                        "成功关闭图书后会自动记录",
+                        palette.muted,
+                    )?;
                 }
             }
             let status = text.fit(14, &self.status, content_w.saturating_sub(24))?;
-            text.draw(250, footer_y, 14, &status, MUTED)?;
+            text.draw(250, footer_y, 14, &status, palette.muted)?;
             self.paint_recent_rows(std::time::Instant::now())?;
             Ok(())
         }
 
         fn paint_browser(&mut self, browser: &Browser) -> WindowResult<()> {
+            let palette = self.theme.palette();
             self.paint_shell("打开图书")?;
             let top_w = self.surface.width().saturating_sub(278);
             let hover = self.hover_target();
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(242, 102, top_w, 40),
-                    color: PANEL,
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(250, 108, 76, 28),
                     color: if hover == HoverTarget::BrowserBack {
-                        HOVER_STRONG
+                        palette.pressed
                     } else {
-                        PANEL
+                        palette.panel
                     },
                 },
             ])?;
@@ -556,7 +598,11 @@ mod enabled {
                 let index = browser.scroll + row;
                 let y = LIST_TOP + row as i32 * ROW_HEIGHT;
                 let selected = index == browser.selected;
-                let row_color = if selected { ACCENT_SOFT } else { PANEL };
+                let row_color = if selected {
+                    palette.button
+                } else {
+                    palette.panel
+                };
                 self.surface.draw(&[
                     DrawCommand::FillRect {
                         rect: Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
@@ -569,7 +615,11 @@ mod enabled {
                             if selected { 5 } else { 1 },
                             (ROW_HEIGHT - 5) as u32,
                         ),
-                        color: if selected { ACCENT } else { BORDER },
+                        color: if selected {
+                            palette.accent
+                        } else {
+                            palette.border
+                        },
                     },
                 ])?;
             }
@@ -579,9 +629,9 @@ mod enabled {
             let path_width = self.surface.width().saturating_sub(360);
             let footer_width = self.surface.width().saturating_sub(280);
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(260, 114, 14, "‹ 返回", ACCENT)?;
+            text.draw(260, 114, 14, "‹ 返回", palette.accent)?;
             let path = text.fit(13, &browser.directory.display().to_string(), path_width)?;
-            text.draw(350, 115, 13, &path, MUTED)?;
+            text.draw(350, 115, 13, &path, palette.muted)?;
 
             for (row, entry) in browser
                 .entries
@@ -600,10 +650,14 @@ mod enabled {
                     } else {
                         crate::publication::path_format(&entry.path).map_or("图书", |f| f.label())
                     },
-                    if entry.directory { MUTED } else { ACCENT },
+                    if entry.directory {
+                        palette.muted
+                    } else {
+                        palette.accent
+                    },
                 )?;
                 let name = text.fit(15, &entry.name, row_width.saturating_sub(120))?;
-                text.draw(350, y + 11, 15, &name, INK)?;
+                text.draw(350, y + 11, 15, &name, palette.ink)?;
             }
 
             if browser.entries.is_empty() {
@@ -612,19 +666,19 @@ mod enabled {
                     LIST_TOP + 30,
                     15,
                     "当前目录没有 EPUB / MOBI / AZW3 文件",
-                    MUTED,
+                    palette.muted,
                 )?;
             }
             if let Some(preview) = &browser.preview {
                 let preview = text.fit(13, preview, footer_width)?;
-                text.draw(250, preview_y, 13, &preview, ACCENT)?;
+                text.draw(250, preview_y, 13, &preview, palette.accent)?;
             }
             let footer = format!(
                 "{} 项 · Enter 打开 · Backspace 上一级 · Esc 退出",
                 browser.entries.len()
             );
             let footer = text.fit(13, &footer, footer_width)?;
-            text.draw(250, footer_y, 13, &footer, MUTED)?;
+            text.draw(250, footer_y, 13, &footer, palette.muted)?;
             Ok(())
         }
 
@@ -711,6 +765,12 @@ mod enabled {
         }
 
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if action == Action::Command(readall_platform::window::ReaderCommand::Theme)
+                || matches!(action, Action::Click { x, y } if point_in(self.theme_rect(), x, y))
+            {
+                self.pending_recent_delete = None;
+                return self.toggle_theme();
+            }
             if matches!(self.mode, Mode::Browser(_)) {
                 return self.browser_action(action);
             }
@@ -785,6 +845,14 @@ mod enabled {
         writeln!(output, "GUI 字体: {:?}", ui_font.path())?;
         loop {
             let mut home = Home::new(1040, 700, &ui_font)?;
+            if let Ok(store) = Store::from_environment() {
+                match store.settings() {
+                    Ok(settings) => home.theme = settings.theme,
+                    Err(error) => home.status = format!("读取主题失败：{error}"),
+                }
+                home.theme_store = Some(store);
+                home.paint()?;
+            }
             let report: WindowReport = window::run(&mut home, WindowOptions::default())?;
             let Some(book) = home.selected_book.take() else {
                 writeln!(
@@ -980,15 +1048,23 @@ mod enabled {
                 let current = browser.scroll + row == selected;
                 assert_eq!(
                     pixel,
-                    if current { ACCENT_SOFT } else { PANEL },
+                    if current {
+                        Theme::Paper.palette().button
+                    } else {
+                        Theme::Paper.palette().panel
+                    },
                     "row {}",
                     browser.scroll + row
                 );
                 assert_eq!(
                     home.surface.pixel(252, y),
-                    Some(if current { ACCENT } else { PANEL })
+                    Some(if current {
+                        Theme::Paper.palette().accent
+                    } else {
+                        Theme::Paper.palette().panel
+                    })
                 );
-                active += usize::from(pixel == ACCENT_SOFT);
+                active += usize::from(pixel == Theme::Paper.palette().button);
             }
             assert_eq!(active, usize::from(!browser.entries.is_empty()));
         }
