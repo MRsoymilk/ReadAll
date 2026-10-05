@@ -1,0 +1,29 @@
+ReadAll Android Kotlin runtime attribution
+
+The Android APK includes the unmodified JVM runtime artifacts below, converted
+from class files to DEX using the Android SDK. The Kotlin compiler, reflection
+implementation and compiler coroutine dependencies are build-time tools only.
+
+* org.jetbrains.kotlin:kotlin-stdlib:2.1.21
+  Kotlin standard library, JetBrains and respective authors and developers.
+  Source: https://github.com/JetBrains/kotlin/tree/v2.1.21/libraries/stdlib
+  Artifact: https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.1.21/
+  License: Apache License, Version 2.0; see Kotlin-Apache-2.0.txt.
+
+* org.jetbrains:annotations:13.0
+  IntelliJ IDEA Annotations, JetBrains Team.
+  Source: https://github.com/JetBrains/intellij-community
+  Artifact and license declaration: https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0.pom
+  License: Apache License, Version 2.0; see Kotlin-Apache-2.0.txt.
+
+Upstream Kotlin distribution notice, retained for attribution:
+https://github.com/JetBrains/kotlin/blob/v2.1.21/license/NOTICE.txt
+
+=========================================================================
+==  NOTICE file corresponding to the section 4 d of                      ==
+==  the Apache License, Version 2.0,                                    ==
+==  in this case for the Kotlin Compiler distribution.                   ==
+=========================================================================
+
+Kotlin Compiler
+Copyright 2010-2024 JetBrains s.r.o and respective authors and developers

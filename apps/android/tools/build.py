@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""SDK-only Android build. All tools are absolute paths; never edits shell profiles.
+"""Kotlin/Rust Android build. All tools are absolute paths; never edits shell profiles.
 
 Examples:
   /usr/bin/python3 apps/android/tools/build.py doctor --sdk /opt/android-sdk
@@ -100,9 +100,12 @@ def kotlin_home(args: argparse.Namespace) -> Path:
     return getattr(args, "kotlin", None) or kotlin_toolchain.default_home(ROOT)
 
 def preferred_sources(directory: Path) -> list[Path]:
-    # During a staged migration the reviewed Kotlin replacement wins. The final
-    # tree contains no handwritten Java; AAPT2-generated R.java is still compiled.
-    return sorted(directory.rglob("*.kt")) + sorted(p for p in directory.rglob("*.java") if not p.with_suffix(".kt").exists())
+    # Do not silently restore a Java fallback or retain two divergent implementations.
+    # AAPT2's R.java is supplied separately from its temporary generated directory.
+    java = sorted(directory.rglob("*.java"))
+    if java:
+        raise BuildError("Handwritten Android code must be Kotlin: " + str(java[0]))
+    return sorted(directory.rglob("*.kt"))
 
 def compile_classes(args: argparse.Namespace, sources: list[Path], classes: Path, found: dict[str, Path] | None = None) -> list[Path]:
     classes.mkdir(parents=True, exist_ok=True)
@@ -252,7 +255,11 @@ def configured_manifest(destination: Path, min_api: int, target_api: int) -> Pat
     return destination
 
 def build(args: argparse.Namespace) -> int:
+    app_sources = preferred_sources(APP / "src")
+    preferred_sources(APP / "tests")
+    kotlin_toolchain.validate(kotlin_home(args))
     found = tools(args)
+    kotlin_toolchain.check_d8(found["java"], found["d8"])
     font = bundled_font(args)
     output = ROOT / "target/android"
     output.mkdir(parents=True, exist_ok=True)
@@ -269,14 +276,14 @@ def build(args: argparse.Namespace) -> int:
         for path in [assets, classes, generated, dex]:
             path.mkdir()
         shutil.copy2(font, assets / "LXGWWenKaiLite-Regular.ttf")
-        for name in ["LXGW_WenKai_Lite_OFL.txt", "foliate-js-MIT.txt"]:
+        for name in ["LXGW_WenKai_Lite_OFL.txt", "foliate-js-MIT.txt", "Kotlin-Apache-2.0.txt", "Kotlin-runtime-NOTICE.txt"]:
             shutil.copy2(ROOT / "licenses" / name, assets / name)
         compiled = stage / "resources.zip"
         run([found["aapt2"], "compile", "--dir", APP / "res", "-o", compiled])
         base = stage / "resources.apk"
         manifest = configured_manifest(stage / "AndroidManifest.xml", args.min_api, args.api)
         run([found["aapt2"], "link", "-o", base, "--manifest", manifest, "-I", found["platform"], compiled, "-A", assets, "--java", generated, "--min-sdk-version", str(args.min_api), "--target-sdk-version", str(args.api), "--version-name", version_name, "--replace-version"])
-        sources = preferred_sources(APP / "src") + sorted(generated.rglob("*.java"))
+        sources = app_sources + sorted(generated.rglob("*.java"))
         libraries = compile_classes(args, sources, classes, found)
         jar = stage / "classes.jar"
         with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -301,11 +308,14 @@ def build(args: argparse.Namespace) -> int:
         run([found["zipalign"], "-c", "-P", "16", "4", signed])
         apk = output / f"readall-android-debug-{args.abi}.apk"
         os.replace(signed, apk)
-        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True, "kotlin_version": kotlin_toolchain.VERSION, "kotlin_home": str(kotlin_home(args)), "kotlin_sources": sum(p.suffix == ".kt" for p in sources)}, indent=2)+"\n")
+        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True, "kotlin_version": kotlin_toolchain.VERSION, "kotlin_home": str(kotlin_home(args)), "kotlin_sources": len(app_sources), "handwritten_java_sources": 0, "jvm_runtime": [p.name for p in libraries]}, indent=2)+"\n")
         print("APK:", apk)
     return 0
 
 def host_test(args: argparse.Namespace) -> int:
+    preferred_sources(APP / "src")
+    test_sources = preferred_sources(APP / "tests")
+    kotlin_toolchain.validate(kotlin_home(args))
     output = ROOT / "target/android-host"
     output.mkdir(parents=True, exist_ok=True)
     shared = ["--target-dir", str(output), *cargo_options(args)]
@@ -320,12 +330,11 @@ def host_test(args: argparse.Namespace) -> int:
         shutil.rmtree(classes)  # Generated output only: never mix old Java bytecode into Kotlin tests.
     names = ["NativeReader", "TouchRouter", "ReaderViewport", "LoadingFeedback", "ShelfStore", "ShelfGeometry", "ShelfNotice"]
     source_root = APP / "src/xin/soymilk/readall"
-    sources = [next(p for p in [source_root / (name + ".kt"), source_root / (name + ".java")] if p.is_file()) for name in names]
-    sources += preferred_sources(APP / "tests")
+    sources = [source_root / (name + ".kt") for name in names] + test_sources
     libraries = compile_classes(args, sources, classes)
     cp = os.pathsep.join(map(str, [classes, *libraries]))
-    plain = {"TouchSmoke", "ViewportSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfNoticeSmoke"}
-    for name in ["JniSmoke", "TouchSmoke", "ViewportSmoke", "DensitySmoke", "ThemeSmoke", "TocDragSmoke", "SmoothScrollSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfPreviewSmoke", "ShelfNoticeSmoke", "ReaderMenuSmoke"]:
+    plain = {"TouchSmoke", "ViewportSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfNoticeSmoke", "KotlinMigrationSmoke"}
+    for name in ["JniSmoke", "TouchSmoke", "ViewportSmoke", "DensitySmoke", "ThemeSmoke", "TocDragSmoke", "SmoothScrollSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfPreviewSmoke", "ShelfNoticeSmoke", "ReaderMenuSmoke", "KotlinMigrationSmoke"]:
         run([executable(args.java / "bin/java"), "-Djava.awt.headless=true", "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", cp, "xin.soymilk.readall." + name, *([] if name in plain else [fixture])], timeout=120)
     print("PASS Kotlin/JVM JNI, reading/gestures/themes/loading, bookshelf persistence and menus; NOT Android device validation.")
     return 0

@@ -41,6 +41,21 @@ class KotlinToolchainTests(unittest.TestCase):
             self.assertEqual(args[-1], "/source file.kt")
             self.assertNotIn("-include-runtime", args)
             with self.assertRaises(k.KotlinError): k.compile_command(Path("relative"), Path("/kotlin"), [], Path("/classes"), [])
+    def test_handwritten_java_is_refused_even_with_a_kotlin_replacement(self):
+        import build
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "Example.kt").write_text("class Example")
+            self.assertEqual(build.preferred_sources(root), [root / "Example.kt"])
+            (root / "Example.java").write_text("class Example {}")
+            with self.assertRaises(build.BuildError): build.preferred_sources(root)
+    def test_current_application_and_tests_are_kotlin_only(self):
+        import build
+        for directory in (build.APP / "src", build.APP / "tests"):
+            sources = build.preferred_sources(directory)
+            self.assertTrue(sources)
+            self.assertTrue(all(p.suffix == ".kt" for p in sources))
+        self.assertTrue((build.ROOT / "licenses/Kotlin-Apache-2.0.txt").is_file())
+        self.assertTrue((build.ROOT / "licenses/Kotlin-runtime-NOTICE.txt").is_file())
     def test_host_uses_java8_api_surface(self):
         with patch.object(k, "validate"):
             args = k.compile_command(Path("/java"), Path("/kotlin"), [], Path("/classes"), [])

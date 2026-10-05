@@ -132,6 +132,6 @@ def compile_command(java_home: Path, kotlin: Path, sources: list[Path], output: 
     for path in (java_home, kotlin, output, *sources, *classpath):
         if not path.is_absolute():
             raise KotlinError("Compiler paths must be absolute: " + str(path))
-    command = [str(java_home / "bin/java"), "-Xmx768m", "-cp", str(kotlin / "lib/*"), "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler", "-kotlin-home", str(kotlin), "-jdk-home", str(java_home), "-no-stdlib", "-no-reflect", "-jvm-target", "1.8", "-module-name", "readall_android", "-classpath", os.pathsep.join(map(str, [*classpath, *runtime(kotlin)])), "-d", str(output)]
-    command += ["-no-jdk"] if android else ["-Xjdk-release=8"]
+    command = [str(java_home / "bin/java"), "-Xmx768m", "-cp", str(kotlin / "lib/*"), "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler", "-kotlin-home", str(kotlin), "-no-stdlib", "-no-reflect", "-jvm-target", "1.8", "-module-name", "readall_android", "-classpath", os.pathsep.join(map(str, [*classpath, *runtime(kotlin)])), "-d", str(output)]
+    command += ["-no-jdk"] if android else ["-jdk-home", str(java_home), "-Xjdk-release=8"]
     return command + [str(p) for p in sources]
