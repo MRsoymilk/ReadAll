@@ -289,12 +289,13 @@ def host_test(args: argparse.Namespace) -> int:
     run([output / "debug/examples/mobile_fixture", fixture])
     classes = output / "java"
     classes.mkdir(exist_ok=True)
-    run([executable(args.java / "bin/javac"), "-encoding", "UTF-8", "-d", classes, APP / "src/xin/soymilk/readall/NativeReader.java", APP / "src/xin/soymilk/readall/TouchRouter.java", APP / "tests/JniSmoke.java", APP / "tests/TouchSmoke.java", APP / "tests/UiCapture.java", APP / "src/xin/soymilk/readall/ReaderViewport.java", APP / "tests/ViewportSmoke.java", APP / "tests/DensitySmoke.java"])
+    run([executable(args.java / "bin/javac"), "-encoding", "UTF-8", "-d", classes, APP / "src/xin/soymilk/readall/NativeReader.java", APP / "src/xin/soymilk/readall/TouchRouter.java", APP / "tests/JniSmoke.java", APP / "tests/TouchSmoke.java", APP / "tests/UiCapture.java", APP / "src/xin/soymilk/readall/ReaderViewport.java", APP / "tests/ViewportSmoke.java", APP / "tests/DensitySmoke.java", APP / "tests/ThemeSmoke.java"])
     run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.JniSmoke", fixture], timeout=120)
     run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.TouchSmoke"], timeout=30)
     run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.ViewportSmoke"], timeout=30)
     run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.DensitySmoke", fixture], timeout=120)
-    print("PASS host JVM/JNI/shared UI, native density and touch smoke tests; this is NOT Android device validation.")
+    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.ThemeSmoke", fixture], timeout=120)
+    print("PASS host JVM/JNI/shared UI, light/dark themes, native density and touch smoke tests; this is NOT Android device validation.")
     return 0
 
 def install(args: argparse.Namespace) -> int:

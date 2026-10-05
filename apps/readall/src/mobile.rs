@@ -1,7 +1,9 @@
 //! Mobile worker for the SAME reader presenter used by the Linux window.
 //! Only immutable frames/state cross JNI. Parsing, interaction and animation live
 //! on this owner thread; Android supplies touch, IME, clipboard and browser services.
+mod appearance;
 mod input;
+pub use appearance::{Appearance, appearance};
 #[cfg(test)]
 mod tests;
 use crate::{
@@ -204,6 +206,7 @@ pub struct Snapshot {
     pub animating: bool,
     pub editing: bool,
     pub input: String,
+    pub appearance: Appearance,
 }
 impl Default for Snapshot {
     fn default() -> Self {
@@ -226,6 +229,7 @@ impl Default for Snapshot {
             animating: false,
             editing: false,
             input: String::new(),
+            appearance: Appearance::default(),
         }
     }
 }
@@ -383,6 +387,7 @@ fn publish(shared: &Shared, ui: &mut Presentation<'_, '_, '_, '_>, changed: bool
         snapshot.locator = session.anchor().to_string();
         snapshot.ui_mode = state.mode;
         snapshot.page_mode = state.page_mode;
+        snapshot.appearance = Appearance::from_theme(session.settings().theme);
         snapshot.animating = state.animating;
         snapshot.editing = state.editing;
         snapshot.input = state.input;

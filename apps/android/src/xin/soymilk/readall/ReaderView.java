@@ -18,7 +18,7 @@ import android.view.inputmethod.InputMethodManager;
 final class ReaderView extends View {
     interface Listener { void viewport(int width,int height);void action(int code,int a,int b);void input(String mode,String text); }
     private Bitmap bitmap;
-    private int layoutWidth,layoutHeight;
+    private int layoutWidth,layoutHeight,backgroundColor;
     private final Paint paint=new Paint(Paint.FILTER_BITMAP_FLAG);
     private final Listener listener;
     private final TouchRouter touch;
@@ -37,6 +37,7 @@ final class ReaderView extends View {
         touch=new TouchRouter(8,(kind,x,y)->listener.action(NativeReader.TOUCH+kind,x,y));
         longPress=()-> { if(ready)touch.longPress(); };
     }
+    void background(int color){backgroundColor=color;invalidate();}
     int[] viewportSize() {
         return ReaderViewport.sizes(Math.max(1,getWidth()),Math.max(1,getHeight()),getResources().getDisplayMetrics().density);
     }
@@ -72,7 +73,7 @@ final class ReaderView extends View {
     }
     @Override protected void onSizeChanged(int w,int h,int oldw,int oldh) { super.onSizeChanged(w,h,oldw,oldh);cancelTouch();if(w>0&&h>0)listener.viewport(w,h); }
     @Override protected void onDraw(Canvas canvas) {
-        super.onDraw(canvas);canvas.drawColor(0xfff5f6f8);
+        super.onDraw(canvas);canvas.drawColor(backgroundColor);
         if(bitmap!=null) { float s=scale(),w=bitmap.getWidth()*s,h=bitmap.getHeight()*s;paint.setFilterBitmap(bitmap.getWidth()!=getWidth()||bitmap.getHeight()!=getHeight());canvas.drawBitmap(bitmap,null,new RectF((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2),paint); }
     }
     @Override public boolean onTouchEvent(MotionEvent event) {

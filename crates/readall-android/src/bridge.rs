@@ -5,7 +5,7 @@ use jni::{
     objects::{JByteBuffer, JClass, JString},
     sys::{jboolean, jint, jlong, jobjectArray},
 };
-use readall::mobile::{Command, Config, Effect, Reader, Snapshot, UiAction, UiCommand};
+use readall::mobile::{Appearance, Command, Config, Effect, Reader, Snapshot, UiAction, UiCommand};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -72,6 +72,11 @@ fn strings(env: &mut JNIEnv<'_>, values: &[String]) -> Result<jobjectArray> {
     }
     Ok(array.into_raw())
 }
+fn appearance_fields(value: Appearance) -> Vec<String> {
+    std::iter::once(value.name.to_owned())
+        .chain(value.colors.map(|c| c.to_string()))
+        .collect()
+}
 fn state_fields(s: Snapshot) -> Vec<String> {
     let (serial, width, height, logical_width, logical_height) =
         s.frame.as_ref().map_or((0, 0, 0, 0, 0), |f| {
@@ -90,8 +95,8 @@ fn state_fields(s: Snapshot) -> Vec<String> {
     } else {
         "ready"
     };
-    vec![
-        "3".into(),
+    let mut values = vec![
+        "4".into(),
         status.into(),
         s.phase.into(),
         s.done.to_string(),
@@ -112,7 +117,9 @@ fn state_fields(s: Snapshot) -> Vec<String> {
         s.input,
         logical_width.to_string(),
         logical_height.to_string(),
-    ]
+    ];
+    values.extend(appearance_fields(s.appearance));
+    values
 }
 fn command(code: jint, a: jint, b: jint) -> Result<Command> {
     Ok(match code {
@@ -369,6 +376,23 @@ pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeViewport(
         })
     })
 }
+/// Empty state is a pure palette lookup. Disk-backed calls belong on the host IO thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeAppearance(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    state: JString<'_>,
+    requested: JString<'_>,
+) -> jobjectArray {
+    guard(&mut env, |env| {
+        let state = text(env, &state)?;
+        let requested = text(env, &requested)?;
+        let root = (!state.is_empty()).then(|| PathBuf::from(state));
+        let requested = (!requested.is_empty()).then_some(requested.as_str());
+        let appearance = readall::mobile::appearance(root.as_deref(), requested)?;
+        strings(env, &appearance_fields(appearance))
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,8 +424,10 @@ mod tests {
             ..Snapshot::default()
         };
         let values = state_fields(state);
-        assert_eq!(values.len(), 21);
-        assert_eq!(values[0], "3");
+        assert_eq!(values.len(), 33);
+        assert_eq!(values[0], "4");
+        assert_eq!(values[21], "light");
+        assert_eq!(values[23], u32::MAX.to_string());
         assert_eq!(values[14], "expanded");
         assert_eq!(values[15], "slide");
         assert_eq!(values[8], "中文\t\n😀");

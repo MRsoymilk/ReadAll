@@ -41,16 +41,34 @@ public final class NativeReader implements AutoCloseable {
         public final String title;public final int depth,spine,offset;
         Item(String title,int depth,int spine,int offset) { this.title=title;this.depth=depth;this.spine=spine;this.offset=offset; }
     }
+    /** Colors are supplied by the same Rust palette used to draw Linux/Android reader UI. */
+    public static final class Appearance {
+        public final String name;
+        public final int canvas,page,panel,ink,muted,border,accent,onAccent,button,selected,hover;
+        Appearance(String[] f,int offset) {
+            if(f==null||f.length!=offset+12||!("light".equals(f[offset])||"dark".equals(f[offset])))throw new IllegalStateException("invalid theme protocol");
+            name=f[offset];int[] c=new int[11];
+            for(int i=0;i<c.length;i++){long v=Long.parseLong(f[offset+1+i]);if(v<0xff000000L||v>0xffffffffL)throw new IllegalStateException("invalid theme color");c[i]=(int)v;}
+            canvas=c[0];page=c[1];panel=c[2];ink=c[3];muted=c[4];border=c[5];accent=c[6];onAccent=c[7];button=c[8];selected=c[9];hover=c[10];
+        }
+        public boolean dark(){return "dark".equals(name);}
+    }
+    /** Pure lookup; does not read or write settings. */
+    public static Appearance appearance(String name){return new Appearance(nativeAppearance("",name),0);}
+    /** Call disk-backed appearance operations only on the Android IO executor. */
+    public static Appearance loadAppearance(String state){return new Appearance(nativeAppearance(state,""),0);}
+    public static Appearance saveTheme(String state,String name){return new Appearance(nativeAppearance(state,name),0);}
     public static final class State {
         public final String status,phase,title,position,percent,locator,notice,uiMode,pageMode,input;
         public final boolean animating,editing;
+        public final Appearance appearance;
         public final long done,total,serial,revision;
         public final int width,height,logicalWidth,logicalHeight;
         State(String[] f) {
-            if(f==null || f.length!=21 || !"3".equals(f[0])) throw new IllegalStateException("unsupported ReadAll native protocol");
+            if(f==null || f.length!=33 || !"4".equals(f[0])) throw new IllegalStateException("unsupported ReadAll native protocol");
             status=f[1];phase=f[2];done=Long.parseLong(f[3]);total=Long.parseLong(f[4]);serial=Long.parseLong(f[5]);width=Integer.parseInt(f[6]);height=Integer.parseInt(f[7]);title=f[8];position=f[9];percent=f[10];locator=f[11];notice=f[12];revision=Long.parseLong(f[13]);
             uiMode=f[14];pageMode=f[15];animating="1".equals(f[16]);editing="1".equals(f[17]);input=f[18];
-            logicalWidth=Integer.parseInt(f[19]);logicalHeight=Integer.parseInt(f[20]);
+            logicalWidth=Integer.parseInt(f[19]);logicalHeight=Integer.parseInt(f[20]);appearance=new Appearance(f,21);
             if(width<0 || height<0 || logicalWidth<0 || logicalHeight<0 || (long)width*height>4194304L) throw new IllegalStateException("invalid native frame geometry");
         }
         public boolean busy() { return "loading".equals(status); }
@@ -67,4 +85,5 @@ public final class NativeReader implements AutoCloseable {
     private static native void nativeInput(long handle,String mode,String text);
     private static native void nativeHostReply(long handle,int kind,String text);
     private static native String[] nativeEffects(long handle);
+    private static native String[] nativeAppearance(String state,String requested);
 }

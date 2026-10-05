@@ -46,7 +46,12 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     private File currentFile;
     private String currentName="ReadAll",currentUri="";
     private ReaderView page;
+    private FrameLayout root;
     private LinearLayout home,loading;
+    private Button themeButton;
+    private NativeReader.Appearance appearance;
+    private boolean themeBusy;
+    private int appearanceEpoch;
     private TextView status;
     private ProgressBar progress;
     private Choreographer choreographer;
@@ -56,7 +61,9 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
 
     @Override public void onCreate(Bundle saved){
         super.onCreate(saved);choreographer=Choreographer.getInstance();
-        FrameLayout root=new FrameLayout(this);root.setBackgroundColor(0xfff5f6f8);
+        String savedTheme=getSharedPreferences("appearance",MODE_PRIVATE).getString("theme","light");
+        try{appearance=NativeReader.appearance(savedTheme);}catch(IllegalStateException e){appearance=NativeReader.appearance("light");}
+        root=new FrameLayout(this);root.setBackgroundColor(appearance.canvas);
         if(Build.VERSION.SDK_INT>=30){
             getWindow().setDecorFitsSystemWindows(false);
             root.setOnApplyWindowInsetsListener((view,insets)->{
@@ -66,24 +73,42 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
             });
         }
         page=new ReaderView(this,this);root.addView(page,new FrameLayout.LayoutParams(-1,-1));
-        home=new LinearLayout(this);home.setOrientation(LinearLayout.VERTICAL);home.setGravity(Gravity.CENTER);home.setPadding(dp(24),dp(24),dp(24),dp(24));home.setBackgroundColor(0xfff5f6f8);
+        home=new LinearLayout(this);home.setOrientation(LinearLayout.VERTICAL);home.setGravity(Gravity.CENTER);home.setPadding(dp(24),dp(24),dp(24),dp(24));home.setBackgroundColor(appearance.canvas);
         TextView title=text("ReadAll",30);title.setGravity(Gravity.CENTER);home.addView(title);
         TextView hint=text("EPUB · MOBI · AZW3\n与 Linux 共用阅读界面、目录和翻页模式",14);hint.setGravity(Gravity.CENTER);home.addView(hint);
         button(home,"打开图书",this::pick);button(home,"继续阅读",this::openLast);
+        themeButton=button(home,"切换到暗色",this::toggleTheme);
         root.addView(home,new FrameLayout.LayoutParams(-1,-1));
-        loading=new LinearLayout(this);loading.setOrientation(LinearLayout.VERTICAL);loading.setPadding(dp(20),dp(16),dp(20),dp(16));loading.setBackgroundColor(0xf5ffffff);
+        loading=new LinearLayout(this);loading.setOrientation(LinearLayout.VERTICAL);loading.setPadding(dp(20),dp(16),dp(20),dp(16));loading.setBackgroundColor(appearance.panel);
         status=text("准备打开",14);loading.addView(status);
         progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);progress.setMax(1000);loading.addView(progress,new LinearLayout.LayoutParams(-1,dp(5)));
         LinearLayout actions=new LinearLayout(this);loading.addView(actions);button(actions,"返回 / 取消",this::returnHome);button(actions,"重试",()->{if(!currentUri.isEmpty())importBook(Uri.parse(currentUri));else openLast();});
         FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER);lp.setMargins(dp(20),0,dp(20),0);root.addView(loading,lp);loading.setVisibility(View.GONE);
-        setContentView(root);
+        setContentView(root);applyAppearance(appearance);loadAppearance();
         if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::goBack);
         if(saved!=null&&saved.getBoolean("reading",false))page.post(this::openLast);
     }
     private int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
-    private TextView text(String value,int size){TextView v=new TextView(this);v.setText(value);v.setTextSize(size);v.setTextColor(0xff27364b);v.setPadding(0,dp(8),0,dp(8));return v;}
-    private void button(LinearLayout parent,String label,Runnable action){Button b=new Button(this);b.setText(label);b.setAllCaps(false);b.setOnClickListener(v->action.run());parent.addView(b,new LinearLayout.LayoutParams(parent.getOrientation()==LinearLayout.HORIZONTAL?0:-1,dp(48),parent.getOrientation()==LinearLayout.HORIZONTAL?1:0));}
-    private void pick(){Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("*/*");i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(i,PICK_BOOK);}
+    private TextView text(String value,int size){TextView v=new TextView(this);v.setText(value);v.setTextSize(size);v.setTextColor(appearance.ink);v.setPadding(0,dp(8),0,dp(8));return v;}
+    private Button button(LinearLayout parent,String label,Runnable action){Button b=new Button(this);b.setText(label);b.setAllCaps(false);b.setOnClickListener(v->action.run());parent.addView(b,new LinearLayout.LayoutParams(parent.getOrientation()==LinearLayout.HORIZONTAL?0:-1,dp(48),parent.getOrientation()==LinearLayout.HORIZONTAL?1:0));return b;}
+    private String stateDirectory(){return new File(getFilesDir(),"reader-state").getAbsolutePath();}
+    private void applyAppearance(NativeReader.Appearance value){
+        appearance=value;AndroidTheme.apply(this,root,home,loading,page,progress,value);
+        themeButton.setText(value.dark()?"切换到亮色":"切换到暗色");
+        SharedPreferences mirror=getSharedPreferences("appearance",MODE_PRIVATE);
+        if(!value.name.equals(mirror.getString("theme","")))mirror.edit().putString("theme",value.name).apply();
+    }
+    private void loadAppearance(){
+        final int request=++appearanceEpoch;final String state=stateDirectory();
+        io.execute(()->{try{NativeReader.Appearance value=NativeReader.loadAppearance(state);ui.post(()->{if(!destroyed&&request==appearanceEpoch&&reader==null)applyAppearance(value);});}catch(Exception e){ui.post(()->{if(!destroyed&&request==appearanceEpoch&&reader==null)showError(e);});}});
+    }
+    private void toggleTheme(){
+        if(themeBusy||reader!=null||importing)return;
+        themeBusy=true;themeButton.setEnabled(false);final int request=++appearanceEpoch;
+        final String state=stateDirectory(),next=appearance.dark()?"light":"dark";
+        io.execute(()->{try{NativeReader.Appearance value=NativeReader.saveTheme(state,next);ui.post(()->{if(destroyed)return;themeBusy=false;themeButton.setEnabled(true);if(request==appearanceEpoch&&reader==null)applyAppearance(value);});}catch(Exception e){ui.post(()->{if(destroyed)return;themeBusy=false;themeButton.setEnabled(true);showError(e);});}});
+    }
+    private void pick(){if(themeBusy)return;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("*/*");i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);startActivityForResult(i,PICK_BOOK);}
     @Override protected void onActivityResult(int request,int result,Intent data){
         super.onActivityResult(request,result,data);if(request!=PICK_BOOK||result!=RESULT_OK||data==null||data.getData()==null)return;
         Uri uri=data.getData();try{getContentResolver().takePersistableUriPermission(uri,data.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException ignored){}
@@ -100,7 +125,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         });
     }
     private void openLast(){
-        if(importing)return;
+        if(importing||themeBusy)return;
         SharedPreferences saved=getSharedPreferences("library",MODE_PRIVATE);String path=saved.getString("book",""),uri=saved.getString("uri","");File file=new File(path);
         try{
             if(path.isEmpty()||!file.isFile()||!file.getCanonicalPath().startsWith(new File(getCacheDir(),"books").getCanonicalPath()+File.separator)){if(!uri.isEmpty())importBook(Uri.parse(uri));else pick();return;}
@@ -141,6 +166,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
                 if(s.serial==0||SystemClock.uptimeMillis()-busySince>180)showProgress(s.phase,s.done,s.total);
             }else{busySince=0;loading.setVisibility(View.GONE);}
             if(s.serial>0){
+                if(!appearance.name.equals(s.appearance.name))applyAppearance(s.appearance);
                 if(!remembered){remembered=true;getSharedPreferences("library",MODE_PRIVATE).edit().putString("book",currentFile.getAbsolutePath()).putString("name",currentName).putString("uri",currentUri).apply();}
                 page.state(s);
                 if(s.serial!=shownSerial&&!copyPending)copyFrame(owner,s,epoch);
@@ -194,12 +220,13 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         page.cancelTouch();page.closeInput();ui.removeCallbacks(schedule);ui.removeCallbacks(resizeTask);choreographer.removeFrameCallback(frames);frameScheduled=false;copyPending=false;
         NativeReader owner=reader;reader=null;lastState=null;if(owner!=null)owner.close();
     }
-    private void returnHome(){++epoch;importing=false;closeReader();release(page.picture(null));loading.setVisibility(View.GONE);home.setVisibility(View.VISIBLE);}
+    private void returnHome(){++epoch;importing=false;closeReader();release(page.picture(null));loading.setVisibility(View.GONE);home.setVisibility(View.VISIBLE);loadAppearance();}
     private void goBack(){
         if(importing){returnHome();return;}
         if(reader!=null){if(lastState==null||lastState.serial==0||lastState.closed())returnHome();else action(NativeReader.BACK,0,0);return;}
         finish();
     }
+    @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appearance!=null&&root!=null)AndroidTheme.apply(this,root,home,loading,page,progress,appearance);}
     @Override public void onBackPressed(){goBack();}
     @Override protected void onResume(){super.onResume();resumed=true;if(reader!=null)action(NativeReader.PAUSE,0,0);requestFrame();}
     @Override protected void onPause(){resumed=false;page.cancelTouch();ui.removeCallbacks(schedule);choreographer.removeFrameCallback(frames);frameScheduled=false;if(reader!=null)try{reader.command(NativeReader.PAUSE,1,0);}catch(Exception ignored){}super.onPause();}
