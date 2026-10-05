@@ -24,10 +24,12 @@ mod enabled {
     #[cfg(feature = "mobile")]
     pub(crate) mod mobile_ui;
     mod motion;
+    mod scroll_physics;
     #[cfg(test)]
     mod selection_tests;
     #[cfg(test)]
     mod theme_tests;
+    mod toc_view;
     mod tools;
     use super::*;
     #[cfg(all(target_os = "linux", feature = "wayland"))]
@@ -91,6 +93,9 @@ mod enabled {
         toc_loaded: bool,
         toc_selected: usize,
         toc_scroll: usize,
+        toc_view: toc_view::TocView,
+        defer_paint: bool,
+        paint_pending: bool,
         toolbar: ToolbarMode,
         pointer: Option<(i32, i32)>,
         title_scroll: u32,
@@ -147,6 +152,9 @@ mod enabled {
                 toc_loaded: false,
                 toc_selected: 0,
                 toc_scroll: 0,
+                toc_view: toc_view::TocView::default(),
+                defer_paint: false,
+                paint_pending: false,
                 toolbar: ToolbarMode::Expanded,
                 pointer: None,
                 title_scroll: 0,
@@ -250,6 +258,8 @@ mod enabled {
         }
 
         fn keep_toc_selected_visible(&mut self) {
+            // Keyboard selection remains row-based; touch scrolling retains fractions elsewhere.
+            self.toc_view.fraction = 0.0;
             let visible = self.visible_toc_rows();
             if self.toc_selected < self.toc_scroll {
                 self.toc_scroll = self.toc_selected;
@@ -285,6 +295,11 @@ mod enabled {
         }
 
         fn refresh_surface(&mut self) -> WindowResult<()> {
+            if self.defer_paint {
+                self.paint_pending = true;
+                return Ok(());
+            }
+            self.paint_pending = false;
             self.surface = self.session.frame().surface.clone();
             self.draw_link_marks()?;
             self.draw_marks()?;
@@ -535,41 +550,9 @@ mod enabled {
                     color: palette.border,
                 },
             ])?;
-            let visible = self.visible_toc_rows();
-            for (row, _entry) in self
-                .toc
-                .iter()
-                .skip(self.toc_scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let index = self.toc_scroll + row;
-                let y = panel.y + 48 + row as i32 * 38;
-                if index == self.toc_selected {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: Rect::new(panel.x + 8, y, panel.width.saturating_sub(16), 34),
-                        color: palette.selected,
-                    }])?;
-                }
-            }
             let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
             text.draw(panel.x + 18, panel.y + 13, 17, "目录", palette.ink)?;
-            for (row, entry) in self
-                .toc
-                .iter()
-                .skip(self.toc_scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let y = panel.y + 57 + row as i32 * 38;
-                let indent = entry.depth.min(6) as i32 * 16;
-                let text_width = panel
-                    .width
-                    .saturating_sub(56_u32.saturating_add(indent as u32));
-                let title = text.fit(14, &entry.title, text_width)?;
-                text.draw(panel.x + 20 + indent, y, 14, &title, palette.ink)?;
-            }
-            Ok(())
+            self.draw_toc_rows()
         }
 
         fn current_toc_index(&self) -> Option<usize> {
@@ -742,29 +725,10 @@ mod enabled {
                     }
                 }
                 ToolbarMode::Expanded | ToolbarMode::Toc => {
-                    if self.toolbar == ToolbarMode::Toc {
-                        let panel = self.toc_panel_rect();
-                        let row_area_y = panel.y + 48;
-                        if x >= panel.x
-                            && x < panel.x + panel.width as i32
-                            && y >= row_area_y
-                            && y < panel.y + panel.height as i32
-                        {
-                            let row = ((y - row_area_y) / 38) as usize;
-                            let index = self.toc_scroll.saturating_add(row);
-                            let rect = Rect::new(
-                                panel.x + 8,
-                                row_area_y + row as i32 * 38,
-                                panel.width.saturating_sub(16),
-                                34,
-                            );
-                            if row < self.visible_toc_rows()
-                                && index < self.toc.len()
-                                && point_in(rect, x, y)
-                            {
-                                return ReaderHover::TocRow(index);
-                            }
-                        }
+                    if self.toolbar == ToolbarMode::Toc
+                        && let Some(target) = self.toc_hover_at(x, y)
+                    {
+                        return target;
                     }
                     if self.compact_toc() {
                         return if point_in(self.collapsed_rect(), x, y) {

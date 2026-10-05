@@ -73,8 +73,11 @@ final class ReaderView extends View {
     }
     @Override protected void onSizeChanged(int w,int h,int oldw,int oldh) { super.onSizeChanged(w,h,oldw,oldh);cancelTouch();if(w>0&&h>0)listener.viewport(w,h); }
     @Override protected void onDraw(Canvas canvas) {
-        super.onDraw(canvas);canvas.drawColor(backgroundColor);
-        if(bitmap!=null) { float s=scale(),w=bitmap.getWidth()*s,h=bitmap.getHeight()*s;paint.setFilterBitmap(bitmap.getWidth()!=getWidth()||bitmap.getHeight()!=getHeight());canvas.drawBitmap(bitmap,null,new RectF((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2),paint); }
+        android.os.Trace.beginSection("ReadAll.present");
+        try {
+            super.onDraw(canvas);canvas.drawColor(backgroundColor);
+            if(bitmap!=null) { float s=scale(),w=bitmap.getWidth()*s,h=bitmap.getHeight()*s;paint.setFilterBitmap(bitmap.getWidth()!=getWidth()||bitmap.getHeight()!=getHeight());canvas.drawBitmap(bitmap,null,new RectF((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2),paint); }
+        } finally { android.os.Trace.endSection(); }
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
         if(!ready)return true;
@@ -87,7 +90,7 @@ final class ReaderView extends View {
                 if(velocity!=null)velocity.addMovement(event);touch.move(p[0],p[1]);return true;
             case MotionEvent.ACTION_UP:
                 removeCallbacks(longPress);int fling=0;
-                if(velocity!=null){velocity.addMovement(event);velocity.computeCurrentVelocity(1000);if(state!=null&&"scroll".equals(state.pageMode))fling=Math.round(-velocity.getYVelocity()/scale()*layoutHeight/bitmap.getHeight()*0.15f);velocity.recycle();velocity=null;}
+                if(velocity!=null){velocity.addMovement(event);velocity.computeCurrentVelocity(1000);if(state!=null&&("toc".equals(state.uiMode)||"scroll".equals(state.pageMode)))fling=Math.round(-velocity.getYVelocity()/scale()*layoutHeight/bitmap.getHeight()*0.15f);velocity.recycle();velocity=null;}
                 touch.up(p[0],p[1],fling);performClick();
                 if(!editorMode.isEmpty()&&p[1]>=78&&p[1]<122)((InputMethodManager)getContext().getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(this,InputMethodManager.SHOW_IMPLICIT);
                 return true;

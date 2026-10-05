@@ -1,5 +1,6 @@
 //! Time-based page presentation. Left-button text selection is never a swipe.
 //! Cached source pages are translated/composited; no text/image raster on a tick.
+use super::scroll_physics::Inertia;
 use super::*;
 use crate::reader_data::PageMode;
 use readall_render::PageEffect;
@@ -29,6 +30,8 @@ pub(super) struct Motion {
     wheel: f64,
     wheel_at: Option<Instant>,
     dirty_progress: bool,
+    direct: bool,
+    fling: Option<Inertia>,
 }
 struct Pan {
     start: (i32, i32),
@@ -36,7 +39,7 @@ struct Pan {
 }
 impl Motion {
     pub(super) fn active(&self) -> bool {
-        self.turn.is_some() || (self.target - self.offset).abs() > 0.1
+        self.turn.is_some() || self.fling.is_some() || (self.target - self.offset).abs() > 0.1
     }
     fn preview(&self) -> Option<(i32, f32)> {
         let pan = self.pan.as_ref()?;
@@ -59,6 +62,8 @@ impl ReaderWindow<'_, '_, '_, '_> {
     pub(super) fn freeze_motion(&mut self) -> WindowResult<()> {
         self.motion.turn = None;
         self.motion.pan = None;
+        self.motion.fling = None;
+        self.motion.direct = false;
         self.motion.target = self.motion.offset;
         if self.session.settings().page_mode == PageMode::Scroll {
             self.session.remember_scroll_position()?;
@@ -158,6 +163,15 @@ impl ReaderWindow<'_, '_, '_, '_> {
             }
         }
     }
+    #[cfg(feature = "mobile")]
+    pub(super) fn start_touch_fling(&mut self, displacement: i32) -> bool {
+        if self.session.settings().page_mode != PageMode::Scroll {
+            return false;
+        }
+        self.motion.fling = Inertia::from_displacement(displacement, Instant::now());
+        self.motion.direct = true;
+        self.motion.fling.is_some()
+    }
     fn scroll_request(&mut self, delta: f64) -> WindowResult<bool> {
         if !delta.is_finite() || delta.abs() < 0.001 || self.tools.dragging() {
             return Ok(false);
@@ -194,6 +208,8 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 Ok(Some(true))
             }
             Action::Scroll { dx, dy } => {
+                self.motion.fling = None;
+                self.motion.direct = false;
                 if self.tools.dragging() {
                     return Ok(Some(false));
                 }
@@ -256,6 +272,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 }
                 self.freeze_motion()?;
                 self.tools.clear_selection();
+                self.motion.direct = true;
                 self.motion.pan = Some(Pan {
                     start: (x, y),
                     last: (x, y),
@@ -345,6 +362,16 @@ impl ReaderWindow<'_, '_, '_, '_> {
             }
             changed = true;
         }
+        if let Some(fling) = &mut self.motion.fling {
+            let delta = fling.step(now);
+            let active = fling.active();
+            let before = self.motion.target;
+            self.scroll_request(delta)?;
+            if !active || (delta.abs() > 0.001 && (self.motion.target - before).abs() < 0.001) {
+                self.motion.fling = None;
+                changed = true; // Deliver the final idle state, including at book boundaries.
+            }
+        }
         if self.session.settings().page_mode == PageMode::Scroll
             && (self.motion.target - self.motion.offset).abs() > 0.1
         {
@@ -353,8 +380,14 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 .last_tick
                 .map_or(0.016, |at| now.saturating_duration_since(at).as_secs_f64())
                 .clamp(0.0, 0.05);
-            let next = self.motion.offset
-                + (self.motion.target - self.motion.offset) * (1.0 - (-dt / 0.065).exp());
+            // Direct manipulation must track the finger, not chase it through a
+            // second easing filter. Wheel/key scrolling keeps its existing smoothing.
+            let next = if self.motion.direct {
+                self.motion.target
+            } else {
+                self.motion.offset
+                    + (self.motion.target - self.motion.offset) * (1.0 - (-dt / 0.065).exp())
+            };
             self.motion.offset = if (self.motion.target - next).abs() < 0.1 {
                 self.motion.target
             } else {
@@ -377,6 +410,12 @@ impl ReaderWindow<'_, '_, '_, '_> {
             changed = true;
         }
         self.motion.last_tick = Some(now);
+        if self.motion.pan.is_none()
+            && self.motion.fling.is_none()
+            && (self.motion.target - self.motion.offset).abs() <= 0.1
+        {
+            self.motion.direct = false;
+        }
         if self.motion.dirty_progress && !self.motion.active() && self.motion.pan.is_none() {
             self.session.remember_scroll_position()?;
             self.save_progress();

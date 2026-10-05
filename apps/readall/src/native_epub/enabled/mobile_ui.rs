@@ -1,10 +1,11 @@
 //! Android uses the desktop ReaderWindow, not a second toolbar/TOC renderer.
 //! This adapter translates touch and host services; layout, panels, hit testing,
 //! selection, page effects and settings stay in the shared implementation.
+use super::scroll_physics::Inertia;
 use super::*;
 use crate::reader_data::{PageMode, Store};
 use readall_platform::window::ReaderCommand;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Instant};
 mod toc_drag;
 use toc_drag::TocDrag;
 
@@ -28,6 +29,8 @@ pub(crate) struct Presentation<'b, 'a, 'f, 'd> {
     window: ReaderWindow<'b, 'a, 'f, 'd>,
     drag: Drag,
     allow_fling: bool,
+    allow_toc_fling: bool,
+    toc_fling: Option<Inertia>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct UiState {
@@ -52,6 +55,8 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
             window,
             drag: Drag::None,
             allow_fling: false,
+            allow_toc_fling: false,
+            toc_fling: None,
         })
     }
     pub(crate) fn load_annotations(&mut self) -> WindowResult<bool> {
@@ -82,11 +87,50 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
     pub(crate) fn closed(&self) -> bool {
         self.window.close_requested()
     }
+    /// The mobile actor enables frame-batched painting; direct presenter tests stay immediate.
+    pub(crate) fn defer_frames(&mut self) {
+        self.window.defer_paint = true;
+    }
+    pub(crate) fn flush_frame(&mut self) -> WindowResult<()> {
+        if self.window.paint_pending {
+            let deferred = self.window.defer_paint;
+            self.window.defer_paint = false;
+            let result = self.window.refresh_surface();
+            self.window.defer_paint = deferred;
+            result?;
+        }
+        Ok(())
+    }
     pub(crate) fn interval(&self) -> Option<Duration> {
-        self.window.animation_interval()
+        if self.toc_fling.is_some() {
+            Some(Duration::from_millis(16))
+        } else {
+            self.window.animation_interval()
+        }
     }
     pub(crate) fn tick(&mut self) -> WindowResult<bool> {
-        self.window.animation_tick()
+        let toc_changed = self.tick_toc(Instant::now())?;
+        self.window
+            .animation_tick()
+            .map(|changed| changed || toc_changed || self.window.paint_pending)
+    }
+    fn tick_toc(&mut self, now: Instant) -> WindowResult<bool> {
+        let Some(fling) = &mut self.toc_fling else {
+            return Ok(false);
+        };
+        let delta = fling.step(now);
+        let active = fling.active();
+        let changed = self.window.scroll_toc_pixels(delta);
+        let stopped = !active || (!changed && delta.abs() > 0.0001);
+        if stopped {
+            self.toc_fling = None;
+        }
+        // Publish the final idle state even if an edge prevented pixel movement.
+        // Otherwise Android keeps polling the preceding animating=true snapshot.
+        if changed || stopped {
+            self.window.refresh_surface()?;
+        }
+        Ok(changed || stopped)
     }
     pub(crate) fn idle(&mut self) -> WindowResult<bool> {
         if self.window.motion.active() || !matches!(self.drag, Drag::None) {
@@ -111,7 +155,7 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
         UiState {
             mode,
             page_mode: self.window.session.settings().page_mode.name(),
-            animating: self.window.motion.active(),
+            animating: self.window.motion.active() || self.toc_fling.is_some(),
             editing: self.window.text_input_active(),
             input: self.window.tools.query.clone(),
             notice: self.window.tools.status.clone(),
@@ -183,17 +227,21 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
         Ok(true)
     }
     pub(crate) fn action(&mut self, action: Action) -> WindowResult<bool> {
+        self.toc_fling = None;
+        self.allow_toc_fling = false;
         self.window.action(action)
     }
     pub(crate) fn contents(&mut self) -> WindowResult<Vec<TocEntry>> {
+        self.cancel_touch()?;
         self.window.ensure_toc()?;
         self.window.toolbar = ToolbarMode::Toc;
         self.window.sync_toc_selection();
+        self.window.scroll_toc_pixels(0.0);
         self.window.refresh_surface()?;
         Ok(self.window.toc.clone())
     }
     pub(crate) fn jump(&mut self, spine: usize, offset: usize) -> WindowResult<bool> {
-        self.window.freeze_motion()?;
+        self.cancel_touch()?;
         let changed = self.window.session.jump_to_toc_target(spine, offset)?;
         self.window.toolbar = ToolbarMode::Expanded;
         self.window.tools.mode = tools::Mode::None;
@@ -234,6 +282,9 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
         Ok(true)
     }
     pub(crate) fn back(&mut self) -> WindowResult<bool> {
+        if self.toc_fling.take().is_some() {
+            return Ok(true);
+        }
         if self.window.motion.active()
             || self.window.tools.mode != tools::Mode::None
             || self.window.tools.selection.is_some()
@@ -259,6 +310,8 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
         }
         self.drag = Drag::None;
         self.allow_fling = false;
+        self.allow_toc_fling = false;
+        self.toc_fling = None;
         self.window.action(Action::PointerLeave)?;
         self.window.freeze_motion()?;
         Ok(true)
@@ -276,16 +329,20 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
                 self.window.action(Action::Click { x, y })?;
                 self.window.action(Action::PointerRelease { x, y })?;
                 self.window.action(Action::PointerLeave)?;
+                self.window.scroll_toc_pixels(0.0);
                 true
             }
             2 => {
                 self.allow_fling = false;
+                self.allow_toc_fling = false;
+                self.toc_fling = None;
                 if self.window.tools.mode != tools::Mode::None {
                     self.drag = Drag::List {
                         last_y: y,
                         remainder: 0,
                     };
                 } else if self.window.toolbar == ToolbarMode::Toc {
+                    self.window.scroll_toc_pixels(0.0);
                     self.drag = TocDrag::start(&self.window, x, y).map_or(Drag::None, Drag::Toc);
                 } else if self.body(x, y) {
                     self.window.action(Action::PanStart { x, y })?;
@@ -314,6 +371,10 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
             },
             4 => {
                 let was_page = matches!(self.drag, Drag::Page);
+                self.allow_toc_fling = matches!(self.drag, Drag::Toc(_));
+                if let Drag::Toc(drag) = &mut self.drag {
+                    drag.move_to(&mut self.window, y);
+                }
                 self.drag = Drag::None;
                 self.allow_fling =
                     was_page && self.window.session.settings().page_mode == PageMode::Scroll;
@@ -342,12 +403,14 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
             }
             6 | 7 => false,
             8 => self.cancel_touch()?,
+            9 if self.allow_toc_fling => {
+                self.allow_toc_fling = false;
+                self.toc_fling = Inertia::from_displacement(y, Instant::now());
+                self.toc_fling.is_some()
+            }
             9 if self.allow_fling => {
                 self.allow_fling = false;
-                self.window.action(Action::Scroll {
-                    dx: 0,
-                    dy: y.clamp(-2048, 2048).saturating_mul(256),
-                })?
+                self.window.start_touch_fling(y)
             }
             9 => false,
             _ => return Err("unknown mobile touch event".into()),

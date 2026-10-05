@@ -126,6 +126,101 @@ fn with_long_toc(dense: bool, test: impl FnOnce(&mut Presentation<'_, '_, '_, '_
 }
 
 #[test]
+fn toc_moves_by_single_pixels_and_clips_and_picks_partial_rows() {
+    for dense in [false, true] {
+        with_long_toc(dense, |ui| {
+            let (x, y) = center(ui.window.toc_panel_rect());
+            let before = ui.surface().clone();
+            ui.touch(2, x, y).unwrap();
+            ui.touch(3, x, y - 2).unwrap();
+            assert_eq!(ui.window.toc_scroll, 0);
+            assert_eq!(ui.window.toc_view.fraction, 2.0);
+            assert_ne!(
+                ui.surface().pixels(),
+                before.pixels(),
+                "no row-sized dead zone"
+            );
+            let rows = ui.window.toc_rows_rect();
+            let header = ui
+                .surface()
+                .pixel_rect(Rect::new(rows.x, rows.y - 12, rows.width, 10));
+            for yy in header.y..header.y + header.height as i32 {
+                for xx in header.x..header.x + header.width as i32 {
+                    assert_eq!(
+                        ui.surface().pixel(xx as u32, yy as u32),
+                        before.pixel(xx as u32, yy as u32)
+                    );
+                }
+            }
+            ui.touch(3, x, y - 20).unwrap();
+            assert_eq!(
+                ui.window.toc_hover_at(rows.x + 24, rows.y + 30),
+                Some(ReaderHover::TocRow(1))
+            );
+            ui.touch(4, x, y - 20).unwrap();
+            assert_eq!(
+                ui.window.toc_view.fraction, 20.0,
+                "no snapping after release"
+            );
+            let anchor = ui.session().anchor().clone();
+            ui.touch(9, 0, 150).unwrap();
+            assert!(ui.ui_state().animating);
+            let now = Instant::now();
+            ui.tick_toc(now + Duration::from_millis(20)).unwrap();
+            assert!(ui.window.toc_offset() > 20.0);
+            assert_eq!(ui.session().anchor(), &anchor);
+            ui.touch(0, x, y).unwrap();
+            assert!(!ui.ui_state().animating, "finger down stops inertia");
+            let offset = ui.window.toc_offset();
+            ui.tick_toc(now + Duration::from_millis(100)).unwrap();
+            assert_eq!(ui.window.toc_offset(), offset);
+        });
+    }
+}
+#[test]
+fn toc_edge_fling_publishes_a_final_idle_frame_without_displacement() {
+    with_long_toc(false, |ui| {
+        ui.defer_frames();
+        let (x, y) = center(ui.window.toc_panel_rect());
+        ui.touch(2, x, y).unwrap();
+        ui.touch(4, x, y).unwrap();
+        ui.touch(9, 0, -150).unwrap();
+        ui.flush_frame().unwrap();
+        assert!(ui.ui_state().animating);
+        assert!(
+            ui.tick_toc(Instant::now() + Duration::from_millis(20))
+                .unwrap()
+        );
+        assert!(!ui.ui_state().animating);
+        assert_eq!(ui.window.toc_offset(), 0.0);
+        assert!(
+            ui.window.paint_pending,
+            "Android must receive animating=false at a boundary"
+        );
+    });
+}
+#[test]
+fn mobile_frame_batching_keeps_updates_without_painting_every_move() {
+    with_long_toc(false, |ui| {
+        ui.defer_frames();
+        let before = ui.surface().clone();
+        let (x, y) = center(ui.window.toc_panel_rect());
+        ui.touch(2, x, y).unwrap();
+        for distance in 1..=75 {
+            ui.touch(3, x, y - distance).unwrap();
+        }
+        assert_eq!(ui.window.toc_offset(), 75.0);
+        assert_eq!(
+            ui.surface().pixels(),
+            before.pixels(),
+            "input should only mark a dirty frame"
+        );
+        ui.flush_frame().unwrap();
+        assert_ne!(ui.surface().pixels(), before.pixels());
+        assert!(!ui.window.paint_pending);
+    });
+}
+#[test]
 fn toc_touch_moves_list_content_with_the_finger_not_keyboard_focus() {
     for dense in [false, true] {
         with_long_toc(dense, |ui| {
@@ -160,7 +255,7 @@ fn toc_touch_moves_list_content_with_the_finger_not_keyboard_focus() {
                     "a still-visible selected entry stays selected"
                 );
                 ui.touch(4, x, y - 38).unwrap();
-                ui.touch(9, 0, 600).unwrap();
+                ui.touch(9, 0, 0).unwrap();
                 assert_eq!(
                     ui.window.toc_scroll, 1,
                     "TOC release must not fling the book"
@@ -188,7 +283,7 @@ fn toc_touch_moves_list_content_with_the_finger_not_keyboard_focus() {
 fn toc_drag_boundaries_reverse_immediately_and_do_not_accumulate_overscroll() {
     with_long_toc(false, |ui| {
         let (x, y) = center(ui.window.toc_panel_rect());
-        let last = ui.window.toc.len() - ui.window.visible_toc_rows();
+        let last = (ui.window.toc_max_offset() / 38.0).floor() as usize;
         let anchor = ui.session().anchor().clone();
         ui.touch(2, x, y).unwrap();
         ui.touch(3, x, y + 200).unwrap();
@@ -218,7 +313,7 @@ fn toc_drag_boundaries_reverse_immediately_and_do_not_accumulate_overscroll() {
         assert!(ui.window.toc_selected < ui.window.toc_scroll + ui.window.visible_toc_rows());
         ui.touch(8, x, y).unwrap();
         ui.touch(3, x, y).unwrap();
-        ui.touch(9, 0, 600).unwrap();
+        ui.touch(9, 0, 0).unwrap();
         assert_eq!(ui.window.toc_scroll, last - 1);
         assert_eq!(ui.session().anchor(), &anchor);
     });
@@ -253,8 +348,8 @@ fn toc_drag_coalescing_keeps_distance_and_only_rows_start_a_drag() {
             ui.touch(2, x, y).unwrap();
             ui.touch(3, x, y - 21).unwrap();
             assert_eq!(
-                ui.window.toc_scroll, 6,
-                "release clears partial-row distance"
+                ui.window.toc_scroll, 7,
+                "release preserves the visible fractional offset"
             );
             ui.touch(3, x, y - 38).unwrap();
             assert_eq!(ui.window.toc_scroll, 7);
@@ -329,7 +424,7 @@ fn touch_toolbar_expands_collapses_and_toc_drag_never_turns_book_pages() {
     ui.touch(2, x, y).unwrap();
     ui.touch(3, x, y - 180).unwrap();
     ui.touch(4, x, y - 180).unwrap();
-    ui.touch(9, 0, 600).unwrap();
+    ui.touch(9, 0, 0).unwrap();
     assert_eq!(ui.session().anchor(), &anchor);
     assert_eq!(ui.ui_state().mode, "toc");
     assert!(ui.window.toc_selected > 0);
