@@ -56,7 +56,7 @@ fn tap(ui: &mut Presentation<'_, '_, '_, '_>, rect: Rect) {
 }
 
 #[test]
-fn android_menu_skin_differs_but_linux_geometry_document_and_actions_stay_shared() {
+fn modern_desktop_and_android_menus_keep_document_geometry_and_actions_shared() {
     let bytes = test_epub::make_epub();
     let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
     let data = test_font::make_font();
@@ -67,7 +67,8 @@ fn android_menu_skin_differs_but_linux_geometry_document_and_actions_stay_shared
     let mut linux = ReaderWindow::new_lazy(session(), None, ui_font()).unwrap();
     linux.tools.store = Some(temp.store());
     let mut mobile = Presentation::new(session(), None, ui_font(), temp.store()).unwrap();
-    assert_ne!(linux.surface().pixels(), mobile.surface().pixels());
+    assert_eq!(linux.toolbar, mobile.window.toolbar);
+    assert_eq!(linux.tools.mode, mobile.window.tools.mode);
     assert_eq!(
         linux.session.frame().surface.pixels(),
         mobile.session().frame().surface.pixels()
@@ -91,7 +92,8 @@ fn android_menu_skin_differs_but_linux_geometry_document_and_actions_stay_shared
             linux.action(action).unwrap();
             mobile.action(action).unwrap();
         }
-        assert_ne!(linux.surface().pixels(), mobile.surface().pixels());
+        assert_eq!(linux.toolbar, mobile.window.toolbar);
+        assert_eq!(linux.tools.mode, mobile.window.tools.mode);
         assert_eq!(
             linux.session.frame().surface.pixels(),
             mobile.session().frame().surface.pixels()
@@ -112,7 +114,8 @@ fn android_menu_skin_differs_but_linux_geometry_document_and_actions_stay_shared
     ] {
         linux.action(action).unwrap();
         mobile.action(action).unwrap();
-        assert_ne!(linux.surface().pixels(), mobile.surface().pixels());
+        assert_eq!(linux.toolbar, mobile.window.toolbar);
+        assert_eq!(linux.tools.mode, mobile.window.tools.mode);
         assert_eq!(
             linux.session.frame().surface.pixels(),
             mobile.session().frame().surface.pixels()

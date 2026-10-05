@@ -1,4 +1,5 @@
 //! Native search, annotations, settings, selection and image inspection overlays.
+mod desktop;
 mod external;
 mod gestures;
 #[cfg(test)]
@@ -46,6 +47,7 @@ pub(super) struct Tools {
     hits: Vec<SearchHit>,
     selected: usize,
     scroll: usize,
+    desktop_wheel: f64,
     pub(super) status: String,
     pub(super) link_history: Vec<readall_epub::EpubLocator>,
     external: external::ExternalLink,
@@ -114,7 +116,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             self.surface.height().saturating_sub(54),
         )
     }
-    fn tool_dock(&self, index: usize) -> Rect {
+    pub(super) fn tool_dock(&self, index: usize) -> Rect {
         let prev = self.toolbar_button_rect(0);
         let next = self.toolbar_button_rect(4);
         let left = prev.x + prev.width as i32 + 20;
@@ -443,21 +445,11 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 return Ok(Some(true));
             }
             if self.tools.mode == Mode::Zoom {
-                if self.mobile_chrome() {
-                    let (minus, plus) = self.mobile_zoom_buttons();
-                    if point_in(minus, x, y) {
-                        self.tools.factor = (self.tools.factor / 1.25).max(0.25);
-                    } else if point_in(plus, x, y) {
-                        self.tools.factor = (self.tools.factor * 1.25).min(8.0);
-                    }
-                    return Ok(Some(true));
-                }
-                if y < panel.y + 40 {
-                    if x < panel.x + 120 {
-                        self.tools.factor = (self.tools.factor / 1.25).max(0.25);
-                    } else {
-                        self.tools.factor = (self.tools.factor * 1.25).min(8.0);
-                    }
+                let (minus, plus) = self.mobile_zoom_buttons();
+                if point_in(minus, x, y) {
+                    self.tools.factor = (self.tools.factor / 1.25).max(0.25);
+                } else if point_in(plus, x, y) {
+                    self.tools.factor = (self.tools.factor * 1.25).min(8.0);
                 }
                 return Ok(Some(true));
             }
@@ -474,20 +466,12 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             if let Some(index) = self.tool_row_at(x, y) {
                 self.tools.selected = index;
                 if self.tools.mode == Mode::Settings {
-                    if self.mobile_chrome() {
-                        let row_y = panel.y + 88 + (index - self.tools.scroll) as i32 * 42;
-                        let (minus, plus) = self.mobile_setting_buttons(row_y);
-                        if point_in(minus, x, y) {
-                            self.change_setting(-1)?;
-                        } else if point_in(plus, x, y) {
-                            self.change_setting(1)?;
-                        }
-                    } else {
-                        self.change_setting(if x < panel.x + panel.width as i32 - 64 {
-                            -1
-                        } else {
-                            1
-                        })?;
+                    let row_y = panel.y + 88 + (index - self.tools.scroll) as i32 * 42;
+                    let (minus, plus) = self.mobile_setting_buttons(row_y);
+                    if point_in(minus, x, y) {
+                        self.change_setting(-1)?;
+                    } else if point_in(plus, x, y) {
+                        self.change_setting(1)?;
                     }
                 } else {
                     self.tool_activate()?;
@@ -667,18 +651,21 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 Ok(Some(true))
             }
             Action::PointerMove { x, y } if self.tools.mode != Mode::None => {
+                let before = self.menu_hover_control();
                 self.pointer = Some((x, y));
+                let hover_changed = before != self.menu_hover_control();
                 if let Some(index) = self.tool_row_at(x, y)
                     && self.tools.selected != index
                 {
                     self.tools.selected = index;
                     return Ok(Some(true));
                 }
-                Ok(Some(false))
+                Ok(Some(hover_changed))
             }
             Action::PointerLeave if self.tools.mode != Mode::None => {
+                let hovered = self.menu_hover_control().is_some();
                 self.pointer = None;
-                Ok(Some(false))
+                Ok(Some(hovered))
             }
             _ => Ok(None),
         }
@@ -730,264 +717,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     pub(super) fn draw_tools(&mut self) -> WindowResult<()> {
-        if self.mobile_chrome() {
-            return self.draw_mobile_tools();
-        }
-        let palette = self.session.settings().theme.palette();
-        if self.tools.mode == Mode::External {
-            return self.draw_external_link();
-        }
-        if self.tools.mode == Mode::None {
-            if self.compact_toc() {
-                return Ok(());
-            }
-            if self.toolbar != ToolbarMode::Collapsed {
-                for (index, label) in ["查找", "标注", "设置"].into_iter().enumerate() {
-                    let rect = self.tool_dock(index);
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect,
-                        color: palette.button,
-                    }])?;
-                    let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-                    text.draw_clipped(rect.x + 8, rect.y + 7, 13, label, palette.ink, rect)?;
-                }
-            }
-            if !self.tools.selecting
-                && self.tools.selection.is_none()
-                && self.tools.drag.is_none()
-                && (!self.tools.status.is_empty() || !self.tools.link_history.is_empty())
-            {
-                let w = self.surface.width();
-                let rect = Rect::new(8, 34, w.saturating_sub(16), 26);
-                self.surface.draw(&[DrawCommand::FillRect {
-                    rect,
-                    color: palette.panel,
-                }])?;
-                let back = self.link_back_rect();
-                let has_back = !self.tools.link_history.is_empty();
-                if has_back {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: back,
-                        color: palette.accent,
-                    }])?;
-                }
-                let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-                let status = text.fit(
-                    12,
-                    &self.tools.status,
-                    rect.width.saturating_sub(if has_back { 100 } else { 16 }),
-                )?;
-                text.draw_clipped(rect.x + 8, rect.y + 6, 12, &status, palette.ink, rect)?;
-                if has_back {
-                    text.draw_clipped(
-                        back.x + 18,
-                        back.y + 6,
-                        12,
-                        "返回",
-                        palette.on_accent,
-                        back,
-                    )?;
-                }
-            }
-            self.draw_selection_actions()?;
-            return Ok(());
-        }
-        let panel = self.tool_panel();
-        let (background, ink) = (palette.panel, palette.ink);
-        self.surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(
-                    0,
-                    32,
-                    self.surface.width(),
-                    self.surface.height().saturating_sub(32),
-                ),
-                color: palette.scrim,
-            },
-            DrawCommand::FillRect {
-                rect: panel,
-                color: background,
-            },
-        ])?;
-        if self.tools.mode == Mode::Zoom
-            && let Some(image) = &self.tools.zoom
-        {
-            let clip = Rect::new(
-                panel.x + 8,
-                panel.y + 44,
-                panel.width.saturating_sub(16),
-                panel.height.saturating_sub(94),
-            );
-            let scale = (clip.width as f32 / image.width() as f32)
-                .min(clip.height as f32 / image.height() as f32)
-                * self.tools.factor;
-            let w = (image.width() as f32 * scale).round().clamp(1.0, 32768.0) as u32;
-            let h = (image.height() as f32 * scale).round().clamp(1.0, 32768.0) as u32;
-            let rect = Rect::new(
-                clip.x + (clip.width as i32 - w as i32) / 2 + self.tools.pan.0,
-                clip.y + (clip.height as i32 - h as i32) / 2 + self.tools.pan.1,
-                w,
-                h,
-            );
-            self.surface
-                .draw_rgba(image.pixels(), (image.width(), image.height()), rect, clip)?;
-        }
-        let title = match self.tools.mode {
-            Mode::Search => "全文搜索",
-            Mode::Annotations => "书签 / 高亮 / 笔记",
-            Mode::Note => "添加笔记",
-            Mode::Settings => "阅读设置",
-            Mode::Zoom => "图片查看   −       +",
-            Mode::External => "打开外部网页",
-            Mode::None => "",
-        };
-        let editing = self.tools.editing();
-        let rect = Rect::new(
-            panel.x + 12,
-            panel.y + 40,
-            panel.width.saturating_sub(24),
-            38,
-        );
-        if editing {
-            self.surface.draw(&[DrawCommand::FillRect {
-                rect,
-                color: palette.button,
-            }])?;
-        }
-        let visible = self.tool_rows();
-        let mut rows = Vec::new();
-        match self.tools.mode {
-            Mode::Search => {
-                for (index, hit) in self
-                    .tools
-                    .hits
-                    .iter()
-                    .enumerate()
-                    .skip(self.tools.scroll)
-                    .take(visible)
-                {
-                    rows.push((
-                        index,
-                        format!("第 {} 章 · {}", hit.locator.spine_index() + 1, hit.excerpt),
-                    ));
-                }
-            }
-            Mode::Annotations => {
-                for (index, row) in self
-                    .tools
-                    .annotations
-                    .iter()
-                    .enumerate()
-                    .skip(self.tools.scroll)
-                    .take(visible)
-                {
-                    rows.push((
-                        index,
-                        format!(
-                            "#{} {} · 第 {} 章 · {}",
-                            row.id,
-                            row.kind.name(),
-                            row.locator.spine_index() + 1,
-                            row.text.replace('\n', " ")
-                        ),
-                    ));
-                }
-            }
-            Mode::Settings => {
-                let s = self.session.settings();
-                for (index, label) in [
-                    format!("主题：{}", s.theme.label()),
-                    format!("字号：{} px", s.size),
-                    format!("页边距：{} px", s.margin),
-                    format!("行距：{:.1} 倍", s.line_spacing),
-                    format!("翻页模式：{}", s.page_mode.label()),
-                ]
-                .into_iter()
-                .enumerate()
-                .skip(self.tools.scroll)
-                .take(visible)
-                {
-                    rows.push((index, label));
-                }
-            }
-            _ => {}
-        }
-        for (row, (index, _)) in rows.iter().enumerate() {
-            if *index == self.tools.selected {
-                self.surface.draw(&[DrawCommand::FillRect {
-                    rect: Rect::new(
-                        panel.x + 8,
-                        panel.y + 88 + row as i32 * 42,
-                        panel.width.saturating_sub(16),
-                        38,
-                    ),
-                    color: palette.selected,
-                }])?;
-            }
-        }
-        let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-        text.draw_clipped(panel.x + 16, panel.y + 12, 17, title, ink, panel)?;
-        text.draw_clipped(
-            panel.x + panel.width as i32 - 32,
-            panel.y + 10,
-            18,
-            "×",
-            ink,
-            panel,
-        )?;
-        if editing {
-            let width = rect.width.saturating_sub(90);
-            let content = text.fit(
-                14,
-                &format!("{}▏", self.tools.query.replace('\n', " ")),
-                width,
-            )?;
-            text.draw_clipped(rect.x + 8, rect.y + 10, 14, &content, ink, rect)?;
-            text.draw_clipped(
-                rect.x + rect.width as i32 - 60,
-                rect.y + 10,
-                14,
-                if self.tools.mode == Mode::Search {
-                    "搜索"
-                } else {
-                    "保存"
-                },
-                ink,
-                rect,
-            )?;
-        }
-        for (row, (_, label)) in rows.iter().enumerate() {
-            let y = panel.y + 98 + row as i32 * 42;
-            let width = panel
-                .width
-                .saturating_sub(if self.tools.mode == Mode::Settings {
-                    140
-                } else {
-                    40
-                });
-            let label = text.fit(13, label, width)?;
-            text.draw_clipped(panel.x + 18, y, 13, &label, ink, panel)?;
-            if self.tools.mode == Mode::Settings {
-                text.draw_clipped(
-                    panel.x + panel.width as i32 - 108,
-                    y,
-                    16,
-                    "−      +",
-                    ink,
-                    panel,
-                )?;
-            }
-        }
-        let status = text.fit(12, &self.tools.status, panel.width.saturating_sub(28))?;
-        text.draw_clipped(
-            panel.x + 14,
-            panel.y + panel.height as i32 - 30,
-            12,
-            &status,
-            ink,
-            panel,
-        )?;
-        Ok(())
+        self.draw_modern_tools()
     }
     fn start_clipboard(&mut self, text: Option<String>) -> WindowResult<()> {
         if let Some(effects) = &mut self.host_effects {

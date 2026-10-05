@@ -1,4 +1,4 @@
-//! Compact rounded Android menus; same actions, anchors, page cache and input coordinates.
+//! Shared compact rounded menus, with host-specific hints and desktop pointer feedback.
 use super::*;
 use crate::native_epub::enabled::menu_style;
 
@@ -20,7 +20,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
             Rect::new(right - 92, p.y + 4, 36, 30),
         )
     }
-    pub(super) fn draw_mobile_tools(&mut self) -> WindowResult<()> {
+    pub(super) fn draw_modern_tools(&mut self) -> WindowResult<()> {
         let p = self.session.settings().theme.palette();
         if self.tools.mode == Mode::External {
             return self.draw_external_link();
@@ -32,7 +32,12 @@ impl ReaderWindow<'_, '_, '_, '_> {
             if self.toolbar != ToolbarMode::Collapsed {
                 for (index, label) in ["查找", "标注", "设置"].into_iter().enumerate() {
                     let r = self.tool_dock(index);
-                    self.menu_fill(r, p.button, 9)?;
+                    self.menu_button(r, p.button, 9)?;
+                    let label = if !self.mobile_chrome() && r.width >= 56 {
+                        ["查找 F2", "标注 F3", "设置 F5"][index]
+                    } else {
+                        label
+                    };
                     self.menu_label(r, label, 12, p.ink)?;
                 }
             }
@@ -49,11 +54,23 @@ impl ReaderWindow<'_, '_, '_, '_> {
                     self.menu_fill(back, p.selected, 9)?;
                     self.menu_label(back, "返回", 12, p.accent)?;
                 }
+                let dismiss = !self.mobile_chrome() && !self.tools.status.is_empty();
+                if dismiss {
+                    let close = self.desktop_notice_close();
+                    svg_icon::draw(
+                        &mut self.surface,
+                        menu_style::CLOSE,
+                        Rect::new(close.x + 4, close.y + 4, 16, 16),
+                        p.muted,
+                    )?;
+                }
                 let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
                 let hint = text.fit(
                     12,
                     &self.tools.status,
-                    r.width.saturating_sub(if has_back { 100 } else { 16 }),
+                    r.width.saturating_sub(
+                        (if has_back { 100 } else { 16 }) + if dismiss { 30 } else { 0 },
+                    ),
                 )?;
                 text.draw_clipped(r.x + 8, r.y + 6, 12, &hint, p.muted, r)?;
             }
@@ -72,7 +89,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
         }])?;
         self.menu_fill(panel, p.panel, 20)?;
         let close = Rect::new(panel.x + panel.width as i32 - 40, panel.y + 5, 30, 28);
-        self.menu_fill(close, p.button, 10)?;
+        self.menu_button(close, p.button, 10)?;
         svg_icon::draw(
             &mut self.surface,
             menu_style::CLOSE,
@@ -103,7 +120,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 (self.mobile_zoom_buttons().0, "−"),
                 (self.mobile_zoom_buttons().1, "+"),
             ] {
-                self.menu_fill(r, p.button, 9)?;
+                self.menu_button(r, p.button, 9)?;
                 self.menu_label(r, label, 18, p.ink)?;
             }
             if let Some(image) = &self.tools.zoom {
@@ -137,7 +154,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
             );
             let submit = Rect::new(panel.x + panel.width as i32 - 78, r.y, 66, r.height);
             self.menu_fill(r, p.button, 11)?;
-            self.menu_fill(submit, p.accent, 11)?;
+            self.menu_button(submit, p.accent, 11)?;
             self.menu_label(
                 submit,
                 if mode == Mode::Search {
@@ -245,7 +262,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                     (self.mobile_setting_buttons(r.y).0, "−"),
                     (self.mobile_setting_buttons(r.y).1, "+"),
                 ] {
-                    self.menu_fill(button, p.button, 9)?;
+                    self.menu_button(button, p.button, 9)?;
                     self.menu_label(button, label, 18, p.ink)?;
                 }
             }
@@ -304,7 +321,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 p.muted,
             )?;
         }
-        let hint = if mode == Mode::Zoom {
+        let hint = if mode == Mode::Zoom && self.mobile_chrome() {
             "轻点加减缩放图片"
         } else {
             &self.tools.status

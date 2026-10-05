@@ -17,7 +17,6 @@ struct Key {
     logical: (u32, u32),
     pixels: (u32, u32),
     theme: Theme,
-    mobile: bool,
 }
 impl ReaderWindow<'_, '_, '_, '_> {
     pub(super) fn toc_rows_rect(&self) -> Rect {
@@ -78,7 +77,6 @@ impl ReaderWindow<'_, '_, '_, '_> {
             count: self.toc.len(),
             panel: self.toc_panel_rect(),
             theme,
-            mobile: self.mobile_chrome(),
             logical: (self.surface.width(), self.surface.height()),
             pixels: (self.surface.pixel_width(), self.surface.pixel_height()),
         };
@@ -106,14 +104,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 let y = rows.y + row as i32 * 38;
                 if self.toc_scroll + row == self.toc_selected {
                     let selected = Rect::new(rows.x + 8, y, rows.width.saturating_sub(16), 34);
-                    if key.mobile {
-                        super::menu_style::rounded(&mut surface, selected, 9, p.selected)?;
-                    } else {
-                        surface.draw(&[DrawCommand::FillRect {
-                            rect: selected,
-                            color: p.selected,
-                        }])?;
-                    }
+                    super::menu_style::rounded(&mut surface, selected, 9, p.selected)?;
                 }
                 let indent = entry.depth.min(6) as i32 * 16;
                 let mut text = UiPainter::new(&self.ui_font, &mut surface)?;
@@ -122,7 +113,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                     &entry.title,
                     rows.width.saturating_sub(56 + indent as u32),
                 )?;
-                let ink = if key.mobile && self.toc_scroll + row == self.toc_selected {
+                let ink = if self.toc_scroll + row == self.toc_selected {
                     p.accent
                 } else {
                     p.ink
@@ -133,16 +124,12 @@ impl ReaderWindow<'_, '_, '_, '_> {
         }
         let (_, cached) = self.toc_view.cache.as_ref().unwrap();
         let destination = self.surface.pixel_rect(rows);
-        let clip = self.surface.pixel_rect(if self.mobile_chrome() {
-            Rect::new(
-                rows.x + 8,
-                rows.y,
-                rows.width.saturating_sub(16),
-                rows.height,
-            )
-        } else {
-            rows
-        });
+        let clip = self.surface.pixel_rect(Rect::new(
+            rows.x + 8,
+            rows.y,
+            rows.width.saturating_sub(16),
+            rows.height,
+        ));
         let band = cached.pixel_rect(Rect::new(rows.x, rows.y, rows.width, rows.height + 38));
         let shift =
             (self.toc_view.fraction * f64::from(self.surface.pixel_scale().1)).round() as i32;
@@ -163,13 +150,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
                     * (self.toc_offset() / extent).clamp(0.0, 1.0))
                 .round() as i32;
             self.surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(
-                    rows.x + rows.width as i32 - if self.mobile_chrome() { 10 } else { 4 },
-                    y,
-                    2,
-                    height,
-                )
-                .intersection(rows),
+                rect: Rect::new(rows.x + rows.width as i32 - 10, y, 2, height).intersection(rows),
                 color: p.border,
             }])?;
         }

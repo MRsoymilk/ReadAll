@@ -1,95 +1,31 @@
-//! Android-only menu skin over the shared reader; document layout and hit rectangles stay unchanged.
+//! Shared modern reader menus; desktop hover/keyboard hints do not change document layout.
 use super::*;
 use readall_render::Color;
 
 pub(super) const CLOSE: &str = r#"<svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>"#;
 
-/// Scanline rounded fill at device resolution. Work grows with corner radius, not panel area.
-/// The middle is a single fill; partial-coverage edge pixels are never painted twice.
-pub(super) fn rounded(
-    surface: &mut Surface,
-    rect: Rect,
-    radius: u32,
-    color: Color,
-) -> WindowResult<()> {
-    let bounds = surface.pixel_rect(rect);
-    if bounds.width == 0 || bounds.height == 0 {
-        return Ok(());
-    }
-    let scale = surface.pixel_scale();
-    let rx = (radius.min(24) as f64 * f64::from(scale.0)).min(f64::from(bounds.width) / 2.0);
-    let ry = (radius.min(24) as f64 * f64::from(scale.1)).min(f64::from(bounds.height) / 2.0);
-    if rx < 1.0 || ry < 1.0 {
-        surface.draw_pixels(&[DrawCommand::FillRect {
-            rect: bounds,
-            color,
-        }])?;
-        return Ok(());
-    }
-    let rows = ry.ceil() as u32;
-    let mut commands = Vec::with_capacity((rows * 6 + 1) as usize);
-    let center = bounds.height.saturating_sub(rows * 2);
-    if center > 0 {
-        commands.push(DrawCommand::FillRect {
-            rect: Rect::new(bounds.x, bounds.y + rows as i32, bounds.width, center),
-            color,
-        });
-    }
-    for row in 0..rows.min(bounds.height.div_ceil(2)) {
-        let y = (ry - f64::from(row) - 0.5).max(0.0) / ry;
-        let inset =
-            (rx * (1.0 - (1.0 - y * y).max(0.0).sqrt())).clamp(0.0, f64::from(bounds.width) / 2.0);
-        let edge = inset.floor() as u32;
-        let alpha = (f64::from(color.a) * (1.0 - inset.fract())).round() as u8;
-        for (side, yy) in [
-            bounds.y + row as i32,
-            bounds.y + bounds.height as i32 - 1 - row as i32,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if side == 1 && row * 2 + 1 == bounds.height {
-                continue;
-            }
-            let left = bounds.x + edge as i32;
-            let right = bounds.x + bounds.width as i32 - 1 - edge as i32;
-            if right < left {
-                continue;
-            }
-            commands.push(DrawCommand::FillRect {
-                rect: Rect::new(left, yy, 1, 1),
-                color: Color { a: alpha, ..color },
-            });
-            if right > left {
-                commands.push(DrawCommand::FillRect {
-                    rect: Rect::new(right, yy, 1, 1),
-                    color: Color { a: alpha, ..color },
-                });
-            }
-            if right > left + 1 {
-                commands.push(DrawCommand::FillRect {
-                    rect: Rect::new(left + 1, yy, (right - left - 1) as u32, 1),
-                    color,
-                });
-            }
-        }
-    }
-    surface.draw_pixels(&commands)?;
-    Ok(())
-}
+pub(super) use crate::ui::rounded;
 
 impl ReaderWindow<'_, '_, '_, '_> {
     pub(super) fn mobile_chrome(&self) -> bool {
         self.host_effects.is_some()
     }
     pub(super) fn menu_fill(&mut self, rect: Rect, color: Color, radius: u32) -> WindowResult<()> {
-        if self.mobile_chrome() {
-            rounded(&mut self.surface, rect, radius, color)
-        } else {
-            self.surface
-                .draw(&[DrawCommand::FillRect { rect, color }])?;
-            Ok(())
-        }
+        rounded(&mut self.surface, rect, radius, color)
+    }
+    pub(super) fn menu_button(&mut self, rect: Rect, fill: Color, radius: u32) -> WindowResult<()> {
+        let p = self.session.settings().theme.palette();
+        let hover =
+            !self.mobile_chrome() && self.pointer.is_some_and(|(x, y)| point_in(rect, x, y));
+        self.menu_fill(
+            rect,
+            if hover && fill != p.accent {
+                p.hover
+            } else {
+                fill
+            },
+            radius,
+        )
     }
     pub(super) fn menu_label(
         &mut self,
@@ -111,7 +47,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
         )?;
         Ok(())
     }
-    pub(super) fn draw_mobile_collapsed(&mut self) -> WindowResult<()> {
+    pub(super) fn draw_modern_collapsed(&mut self) -> WindowResult<()> {
         let p = self.session.settings().theme.palette();
         let r = self.collapsed_rect();
         self.menu_fill(
@@ -131,16 +67,48 @@ impl ReaderWindow<'_, '_, '_, '_> {
         )?;
         Ok(())
     }
-    pub(super) fn draw_mobile_toolbar(&mut self) -> WindowResult<()> {
+    pub(super) fn draw_modern_toolbar(&mut self) -> WindowResult<()> {
         let p = self.session.settings().theme.palette();
         let r = self.toolbar_rect();
         let hover = self.hover_target();
+        if !self.mobile_chrome() {
+            self.menu_fill(
+                Rect::new(r.x, r.y + 1, r.width, r.height),
+                Color {
+                    a: p.shadow.a.min(16),
+                    ..p.shadow
+                },
+                20,
+            )?;
+        }
         self.menu_fill(r, p.panel, 20)?;
-        self.menu_fill(
-            Rect::new(r.x + r.width as i32 / 2 - 16, r.y + 12, 32, 3),
-            p.border,
-            2,
-        )?;
+        if self.mobile_chrome() {
+            self.menu_fill(
+                Rect::new(r.x + r.width as i32 / 2 - 16, r.y + 12, 32, 3),
+                p.border,
+                2,
+            )?;
+        } else {
+            let handle = self.toolbar_button_rect(5);
+            if hover == ReaderHover::Toolbar(5) {
+                self.menu_fill(
+                    Rect::new(
+                        handle.x + 8,
+                        handle.y + 3,
+                        handle.width.saturating_sub(16),
+                        22,
+                    ),
+                    p.hover,
+                    10,
+                )?;
+            }
+            svg_icon::draw(
+                &mut self.surface,
+                CHEVRON_DOWN,
+                Rect::new(r.x + r.width as i32 / 2 - 9, r.y + 5, 18, 18),
+                p.muted,
+            )?;
+        }
         for (i, source, label) in [(0, CHEVRON_LEFT, "上一页"), (4, CHEVRON_RIGHT, "下一页")]
         {
             let b = self.toolbar_button_rect(i);
@@ -187,7 +155,7 @@ impl ReaderWindow<'_, '_, '_, '_> {
         }
         Ok(())
     }
-    pub(super) fn draw_mobile_toc(&mut self) -> WindowResult<()> {
+    pub(super) fn draw_modern_toc(&mut self) -> WindowResult<()> {
         let p = self.session.settings().theme.palette();
         let r = self.toc_panel_rect();
         self.menu_fill(r, p.panel, 18)?;

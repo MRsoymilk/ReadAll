@@ -14,6 +14,8 @@ use std::{
 };
 
 pub(crate) type UiResult<T> = Result<T, Box<dyn Error>>;
+mod shapes;
+pub(crate) use shapes::rounded;
 
 const BUILTIN_FONT_FILE: &str = "LXGWWenKaiLite-Regular.ttf";
 const BUILTIN_FONT_LABEL: &str = "<built-in>/LXGWWenKaiLite-Regular.ttf";

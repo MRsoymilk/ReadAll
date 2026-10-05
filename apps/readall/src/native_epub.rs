@@ -17,6 +17,7 @@ mod enabled {
     mod async_reader;
     #[cfg(test)]
     mod azw3_tests;
+    mod desktop;
     #[cfg(test)]
     mod loading_tests;
     mod menu_style;
@@ -41,9 +42,7 @@ mod enabled {
     use crate::{
         epub_session::{Action as ReaderAction, EpubSession, Start, TocEntry},
         progress::EpubProgressStore,
-        svg_icon::{
-            self, CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, LIST, MINUS, PLUS,
-        },
+        svg_icon::{self, CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP},
         text_page::Options,
         ui::{UiFont, UiPainter},
     };
@@ -76,6 +75,7 @@ mod enabled {
         Collapsed,
         Toolbar(usize),
         TocRow(usize),
+        ToolDock(usize),
     }
 
     #[derive(Debug, Clone)]
@@ -101,6 +101,7 @@ mod enabled {
         pointer: Option<(i32, i32)>,
         title_scroll: u32,
         title_marquee_span: u32,
+        desktop_notice: Option<(String, std::time::Instant)>,
         close_requested: bool,
         tools: tools::Tools,
         motion: motion::Motion,
@@ -160,6 +161,7 @@ mod enabled {
                 pointer: None,
                 title_scroll: 0,
                 title_marquee_span: 0,
+                desktop_notice: None,
                 close_requested: false,
                 tools: tools::Tools::default(),
                 motion: motion::Motion::default(),
@@ -301,6 +303,7 @@ mod enabled {
                 return Ok(());
             }
             self.paint_pending = false;
+            self.observe_desktop_notice(std::time::Instant::now());
             self.surface = self.session.frame().surface.clone();
             self.draw_link_marks()?;
             self.draw_marks()?;
@@ -384,185 +387,13 @@ mod enabled {
         }
 
         fn draw_collapsed_control(&mut self) -> WindowResult<()> {
-            if self.mobile_chrome() {
-                return self.draw_mobile_collapsed();
-            }
-            let palette = self.session.settings().theme.palette();
-            let rect = self.collapsed_rect();
-            let hovered = self.hover_target() == ReaderHover::Collapsed;
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 2, rect.y + 2, rect.width, rect.height),
-                    color: palette.shadow,
-                },
-                DrawCommand::FillRect {
-                    rect,
-                    color: if hovered {
-                        palette.hover
-                    } else {
-                        palette.panel
-                    },
-                },
-            ])?;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_UP,
-                Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 4, 22, 22),
-                palette.ink,
-            )?;
-            Ok(())
+            self.draw_modern_collapsed()
         }
-
         fn draw_toolbar(&mut self) -> WindowResult<()> {
-            if self.mobile_chrome() {
-                return self.draw_mobile_toolbar();
-            }
-            let palette = self.session.settings().theme.palette();
-            let rect = self.toolbar_rect();
-            let hover = self.hover_target();
-            let handle = self.toolbar_button_rect(5);
-            let prev = self.toolbar_button_rect(0);
-            let toc = self.toolbar_button_rect(1);
-            let smaller = self.toolbar_button_rect(2);
-            let larger = self.toolbar_button_rect(3);
-            let next = self.toolbar_button_rect(4);
-            let line = palette.border;
-            let panel = palette.panel;
-            let hover_fill = palette.hover;
-            let active_fill = palette.selected;
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 3, rect.y + 4, rect.width, rect.height),
-                    color: palette.shadow,
-                },
-                DrawCommand::FillRect { rect, color: panel },
-                DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 10, rect.y + 28, rect.width.saturating_sub(20), 1),
-                    color: line,
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(
-                        prev.x + prev.width as i32 + 10,
-                        prev.y + 43,
-                        next.x.saturating_sub(prev.x + prev.width as i32 + 20) as u32,
-                        1,
-                    ),
-                    color: line,
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(
-                        prev.x + prev.width as i32 + 10,
-                        prev.y + 87,
-                        next.x.saturating_sub(prev.x + prev.width as i32 + 20) as u32,
-                        1,
-                    ),
-                    color: line,
-                },
-            ])?;
-
-            for (index, button) in [
-                (0, prev),
-                (1, toc),
-                (2, smaller),
-                (3, larger),
-                (4, next),
-                (5, handle),
-            ] {
-                let hovered = hover == ReaderHover::Toolbar(index);
-                let active = index == 1 && self.toolbar == ToolbarMode::Toc;
-                if hovered || active {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: if index == 5 {
-                            Rect::new(
-                                button.x + 8,
-                                button.y + 3,
-                                button.width.saturating_sub(16),
-                                22,
-                            )
-                        } else {
-                            Rect::new(
-                                button.x + 3,
-                                button.y + 3,
-                                button.width.saturating_sub(6),
-                                button.height.saturating_sub(6),
-                            )
-                        },
-                        color: if active { active_fill } else { hover_fill },
-                    }])?;
-                }
-            }
-
-            let icon = palette.ink;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_DOWN,
-                Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 3, 22, 22),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_LEFT,
-                Rect::new(prev.x + prev.width as i32 / 2 - 14, prev.y + 30, 28, 28),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_RIGHT,
-                Rect::new(next.x + next.width as i32 / 2 - 14, next.y + 30, 28, 28),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                LIST,
-                Rect::new(toc.x + 13, toc.y + 7, 24, 24),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                MINUS,
-                Rect::new(smaller.x + 10, smaller.y + 7, 24, 24),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                PLUS,
-                Rect::new(larger.x + 10, larger.y + 7, 24, 24),
-                icon,
-            )?;
-
-            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            let label = palette.ink;
-            text.draw(prev.x + 25, prev.y + 74, 13, "上一页", label)?;
-            text.draw(next.x + 25, next.y + 74, 13, "下一页", label)?;
-            text.draw(toc.x + 45, toc.y + 9, 14, "目录", label)?;
-            text.draw(smaller.x + 36, smaller.y + 9, 13, "字体", label)?;
-            text.draw(larger.x + 36, larger.y + 9, 13, "字体", label)?;
-            Ok(())
+            self.draw_modern_toolbar()
         }
-
         fn draw_toc(&mut self) -> WindowResult<()> {
-            if self.mobile_chrome() {
-                return self.draw_mobile_toc();
-            }
-            let palette = self.session.settings().theme.palette();
-            let panel = self.toc_panel_rect();
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(panel.x + 3, panel.y + 4, panel.width, panel.height),
-                    color: palette.shadow,
-                },
-                DrawCommand::FillRect {
-                    rect: panel,
-                    color: palette.panel,
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(panel.x, panel.y + 46, panel.width, 1),
-                    color: palette.border,
-                },
-            ])?;
-            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            text.draw(panel.x + 18, panel.y + 13, 17, "目录", palette.ink)?;
-            self.draw_toc_rows()
+            self.draw_modern_toc()
         }
 
         fn current_toc_index(&self) -> Option<usize> {
@@ -747,6 +578,13 @@ mod enabled {
                             ReaderHover::None
                         };
                     }
+                    if !self.mobile_chrome() {
+                        for index in 0..3 {
+                            if point_in(self.tool_dock(index), x, y) {
+                                return ReaderHover::ToolDock(index);
+                            }
+                        }
+                    }
                     for index in 0..6 {
                         if point_in(self.toolbar_button_rect(index), x, y) {
                             return ReaderHover::Toolbar(index);
@@ -791,6 +629,9 @@ mod enabled {
             self.prefetch_page()
         }
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if let Some(changed) = self.desktop_action(action)? {
+                return Ok(changed);
+            }
             if let Some(changed) = self.motion_action(action)? {
                 if changed {
                     self.refresh_surface()?;
@@ -886,14 +727,16 @@ mod enabled {
             if self.motion.active() {
                 return Some(Duration::from_millis(16));
             }
-            (self.title_marquee_span != 0 || self.tools.pending())
+            (self.title_marquee_span != 0 || self.tools.pending() || self.desktop_notice.is_some())
                 .then_some(Duration::from_millis(40))
         }
 
         fn animation_tick(&mut self) -> WindowResult<bool> {
             let motion_changed = self.tick_page_motion(std::time::Instant::now())?;
-            let clipboard_changed =
-                self.poll_clipboard() | self.poll_external_link() | motion_changed;
+            let clipboard_changed = self.poll_clipboard()
+                | self.poll_external_link()
+                | motion_changed
+                | self.expire_desktop_notice(std::time::Instant::now());
             if self.title_marquee_span == 0 {
                 if clipboard_changed {
                     self.refresh_surface()?;

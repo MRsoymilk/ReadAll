@@ -38,6 +38,9 @@ struct Pan {
     last: (i32, i32),
 }
 impl Motion {
+    pub(super) fn panning(&self) -> bool {
+        self.pan.is_some()
+    }
     pub(super) fn active(&self) -> bool {
         self.turn.is_some() || self.fling.is_some() || (self.target - self.offset).abs() > 0.1
     }
@@ -212,6 +215,18 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 self.motion.direct = false;
                 if self.tools.dragging() {
                     return Ok(Some(false));
+                }
+                if !self.mobile_chrome()
+                    && self.toolbar == ToolbarMode::Toc
+                    && self.tools.mode == tools::Mode::None
+                {
+                    if self
+                        .pointer
+                        .is_some_and(|(x, y)| !point_in(self.toc_panel_rect(), x, y))
+                    {
+                        return Ok(Some(false));
+                    }
+                    return Ok(Some(self.scroll_toc_pixels(f64::from(dy) / 256.0)));
                 }
                 if !unobstructed {
                     let delta = if dy != 0 { dy } else { dx };

@@ -20,14 +20,17 @@ pub(crate) const CHEVRON_DOWN: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/chevron-down.svg"
 ));
+#[cfg(test)]
 pub(crate) const LIST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/list.svg"
 ));
+#[cfg(test)]
 pub(crate) const MINUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/minus.svg"
 ));
+#[cfg(test)]
 pub(crate) const PLUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/plus.svg"

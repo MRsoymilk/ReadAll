@@ -156,7 +156,9 @@ fn selection_action_bar_fits_small_windows_and_is_hidden_behind_reader_panels() 
                 assert_eq!(button.intersection(bar), button);
             }
             assert_eq!(
-                reader.surface.pixel((bar.x + 2) as u32, (bar.y + 2) as u32),
+                reader
+                    .surface
+                    .pixel((bar.x + bar.width as i32 / 2) as u32, (bar.y + 2) as u32),
                 Some(reader.session.settings().theme.palette().panel)
             );
             reader.tools.mode = Mode::Settings;

@@ -23,9 +23,10 @@ impl Drop for Temp {
     }
 }
 fn pixel(reader: &ReaderWindow<'_, '_, '_, '_>, rect: Rect) -> Color {
-    let at = reader
-        .surface
-        .pixel_point((f64::from(rect.x + 2), f64::from(rect.y + 2)));
+    let at = reader.surface.pixel_point((
+        f64::from(rect.x + rect.width as i32 / 2),
+        f64::from(rect.y + 2),
+    ));
     reader.surface.pixel(at.0 as u32, at.1 as u32).unwrap()
 }
 fn options(dense: bool) -> Options {
@@ -85,6 +86,14 @@ fn light_and_dark_cover_toolbar_toc_settings_and_keep_geometry() {
             );
             assert_eq!(r.surface.pixel(0, 0), Some(theme.colors().0));
             assert_eq!(pixel(&r, r.toolbar_rect()), p.panel);
+            let corner = r
+                .surface
+                .pixel_point((f64::from(r.toolbar_rect().x), f64::from(r.toolbar_rect().y)));
+            assert_ne!(
+                r.surface.pixel(corner.0 as u32, corner.1 as u32),
+                Some(p.panel),
+                "rounded menu must expose the page at the corner"
+            );
             r.handle_toolbar_button(1).unwrap();
             assert_eq!(pixel(&r, r.toc_panel_rect()), p.panel);
             r.handle_toolbar_button(1).unwrap();

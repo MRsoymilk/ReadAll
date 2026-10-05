@@ -2,7 +2,7 @@
 use super::*;
 
 impl ReaderWindow<'_, '_, '_, '_> {
-    pub(super) fn link_back_rect(&self) -> Rect {
+    pub(in crate::native_epub::enabled) fn link_back_rect(&self) -> Rect {
         Rect::new(self.surface.width().saturating_sub(88) as i32, 34, 80, 26)
     }
     pub(super) fn follow_body_link(

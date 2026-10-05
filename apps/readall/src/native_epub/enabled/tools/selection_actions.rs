@@ -80,84 +80,44 @@ impl ReaderWindow<'_, '_, '_, '_> {
         let Some(bar) = self.selection_actions_rect() else {
             return Ok(());
         };
-        if self.mobile_chrome() {
-            self.menu_fill(bar, palette.panel, 13)?;
-            for (index, label) in ["复制", "高亮", "笔记", "取消"].into_iter().enumerate() {
-                let cell = Self::selection_button(bar, index);
-                if index == 0 {
-                    self.menu_fill(
-                        Rect::new(
-                            cell.x + 4,
-                            cell.y + 4,
-                            cell.width.saturating_sub(8),
-                            cell.height.saturating_sub(4),
-                        ),
-                        palette.selected,
-                        9,
-                    )?;
-                }
-                self.menu_label(
-                    cell,
-                    label,
-                    13,
-                    if index == 0 {
-                        palette.accent
-                    } else {
-                        palette.ink
-                    },
-                )?;
-            }
-            let hint = if self.tools.status.is_empty() {
-                "选中文字"
-            } else {
-                &self.tools.status
-            };
-            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            let hint = text.fit(10, hint, bar.width.saturating_sub(24))?;
-            text.draw_clipped(bar.x + 12, bar.y + 37, 10, &hint, palette.muted, bar)?;
-            return Ok(());
-        }
-        self.surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(bar.x + 2, bar.y + 2, bar.width, bar.height),
-                color: palette.shadow,
-            },
-            DrawCommand::FillRect {
-                rect: bar,
-                color: palette.panel,
-            },
-            DrawCommand::FillRect {
-                rect: Rect::new(bar.x, bar.y + BUTTON_HEIGHT as i32, bar.width, 1),
-                color: palette.border,
-            },
-        ])?;
-        for i in 1..4 {
-            let cell = Self::selection_button(bar, i);
-            self.surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(cell.x, cell.y + 7, 1, 18),
-                color: palette.border,
-            }])?;
-        }
-        let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
+        self.menu_fill(bar, palette.panel, 13)?;
         for (index, label) in ["复制", "高亮", "笔记", "取消"].into_iter().enumerate() {
             let cell = Self::selection_button(bar, index);
-            let width = text.measure(13, label)?;
-            text.draw_clipped(
-                cell.x + cell.width.saturating_sub(width) as i32 / 2,
-                cell.y + 8,
-                13,
-                label,
-                palette.ink,
+            if index == 0 {
+                self.menu_fill(
+                    Rect::new(
+                        cell.x + 4,
+                        cell.y + 4,
+                        cell.width.saturating_sub(8),
+                        cell.height.saturating_sub(4),
+                    ),
+                    palette.selected,
+                    9,
+                )?;
+            }
+            self.menu_label(
                 cell,
+                label,
+                13,
+                if index == 0 {
+                    palette.accent
+                } else {
+                    palette.ink
+                },
             )?;
         }
         let hint = if self.tools.status.is_empty() {
-            "Ctrl+C 复制 · F8 高亮 · F7 笔记"
+            if self.mobile_chrome() {
+                "选中文字"
+            } else {
+                "Ctrl+C 复制 · F8 高亮 · F7 笔记"
+            }
         } else {
             &self.tools.status
         };
-        let hint = text.fit(11, hint, bar.width.saturating_sub(16))?;
-        text.draw_clipped(bar.x + 8, bar.y + 36, 11, &hint, palette.muted, bar)?;
+        let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
+        let hint = text.fit(10, hint, bar.width.saturating_sub(24))?;
+        text.draw_clipped(bar.x + 12, bar.y + 37, 10, &hint, palette.muted, bar)?;
         Ok(())
     }
 }
