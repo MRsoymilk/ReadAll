@@ -1,15 +1,12 @@
 package xin.soymilk.readall;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.ContextThemeWrapper;
-import android.widget.CheckBox;
-import android.widget.EditText;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -36,6 +33,7 @@ final class ShelfController implements ShelfHome.Callbacks {
     private volatile int generation;
     private volatile boolean closed;
     private boolean busy;
+    private Dialog dialog;
     private int mode;
     private String sort;
     ShelfController(Activity activity,ExecutorService io,NativeReader.Appearance appearance,Host host){
@@ -120,16 +118,19 @@ final class ShelfController implements ShelfHome.Callbacks {
         io.execute(()->{try{File file=store.bookFile(book);if(!file.isFile())throw new IOException("副本已丢失，请重新导入此书；进度和标注保留");main.post(()->{if(!closed&&!busy)host.openBook(file,book.label(),book.uri,book.id);});}catch(Exception e){error(e);}});
     }
     boolean openLast(){ShelfStore.Book last=null;for(ShelfStore.Book b:books)if(last==null||b.opened>last.opened)last=b;if(last==null)return false;open(last);return true;}
-    private ContextThemeWrapper dialogContext(){return new ContextThemeWrapper(activity,appearance.dark()?android.R.style.Theme_Material_Dialog_Alert:android.R.style.Theme_Material_Light_Dialog_Alert);}
     @Override public void menu(ShelfStore.Book book){
-        if(busy)return;view.canvas.stop();String[] actions={"打开阅读",book.pinned?"取消置顶":"置顶图书","修改显示书名","重新读取封面","移出书库"};
-        new AlertDialog.Builder(dialogContext()).setTitle(book.label()).setItems(actions,(dialog,which)->{
+        if(busy||closed||activity.isFinishing())return;view.clearSearch();view.canvas.stop();if(dialog!=null)dialog.dismiss();
+        dialog=ShelfDialogs.actions(activity,appearance,book,which->{
+            if(closed)return;
             if(which==0){open(book);return;}if(which==1){change(()->store.pin(book.id,!book.pinned));return;}
-            if(which==2){EditText input=new EditText(dialogContext());input.setSingleLine();input.setText(book.label());input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(512)});new AlertDialog.Builder(dialogContext()).setTitle("修改显示书名").setMessage("只修改书架显示，不修改原书。留空恢复书籍标题。").setView(input).setNegativeButton("取消",null).setPositiveButton("保存",(d,w)->change(()->store.rename(book.id,input.getText().toString()))).show();return;}
+            if(which==2){dialog=ShelfDialogs.rename(activity,appearance,book,title->change(()->store.rename(book.id,title)));return;}
             if(which==3){change(()->accept(store.bookFile(book),book.name,book.uri));return;}
-            CheckBox clear=new CheckBox(dialogContext());clear.setText("同时清理应用内副本和封面");clear.setPadding(48,12,24,12);
-            new AlertDialog.Builder(dialogContext()).setTitle("移出书库？").setMessage(book.label()+"\n\n不会删除系统中的原书，也不会清除阅读进度、书签、高亮或笔记。").setView(clear).setNegativeButton("取消",null).setPositiveButton("移除",(d,w)->{final boolean purge=clear.isChecked();change(()->{store.remove(Collections.singleton(book.id));SharedPreferences legacy=activity.getSharedPreferences("library",Activity.MODE_PRIVATE);if(new File(legacy.getString("book","")).getName().equals(book.file))legacy.edit().remove("book").remove("uri").remove("name").apply();if(purge){try{Files.deleteIfExists(store.bookFile(book).toPath());Files.deleteIfExists(store.coverFile(book).toPath());}catch(IOException cleanup){error(new IOException("记录已移除，但副本清理失败"));}}main.post(()->{if(!closed)cache.refresh(book.id);});});}).show();
-        }).show();
+            dialog=ShelfDialogs.remove(activity,appearance,book,purge->change(()->{
+                store.remove(Collections.singleton(book.id));SharedPreferences legacy=activity.getSharedPreferences("library",Activity.MODE_PRIVATE);if(new File(legacy.getString("book","")).getName().equals(book.file))legacy.edit().remove("book").remove("uri").remove("name").apply();
+                if(purge){try{Files.deleteIfExists(store.bookFile(book).toPath());Files.deleteIfExists(store.coverFile(book).toPath());}catch(IOException cleanup){error(new IOException("记录已移除，但副本清理失败"));}}
+                main.post(()->{if(!closed)cache.refresh(book.id);});
+            }));
+        });
     }
     interface Operation {void run()throws Exception;}
     private void change(Operation op){io.execute(()->{try{op.run();reload();main.post(()->{if(!closed)view.message("书库已更新");});}catch(Exception e){error(e);}});}
@@ -137,5 +138,5 @@ final class ShelfController implements ShelfHome.Callbacks {
     void theme(NativeReader.Appearance value){appearance=value;view.theme(value);}
     void resume(){load();}
     void pause(){view.canvas.stop();}
-    void close(){closed=true;++generation;cache.close();view.canvas.stop();}
+    void close(){closed=true;++generation;if(dialog!=null){dialog.dismiss();dialog=null;}cache.close();view.canvas.stop();}
 }
