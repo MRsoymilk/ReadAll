@@ -1,6 +1,7 @@
 //! Bounded reader settings and annotations. Atomic writes, explicit corruption errors,
 //! and a cooperative lock prevent two ReadAll windows from losing each other's edits.
 mod page_mode;
+mod theme;
 pub(crate) use page_mode::PageMode;
 use readall_epub::{EpubBook, EpubLocator};
 use std::{
@@ -9,70 +10,10 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+pub(crate) use theme::Theme;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const MAX_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Theme {
-    #[default]
-    Paper,
-    Sepia,
-    Dark,
-}
-impl Theme {
-    pub(crate) fn colors(self) -> (readall_render::Color, readall_render::Color) {
-        use readall_render::Color;
-        match self {
-            Self::Paper => (Color::WHITE, Color::rgba(24, 24, 24, 255)),
-            Self::Sepia => (
-                Color::rgba(244, 236, 216, 255),
-                Color::rgba(68, 52, 37, 255),
-            ),
-            Self::Dark => (
-                Color::rgba(28, 31, 36, 255),
-                Color::rgba(222, 225, 230, 255),
-            ),
-        }
-    }
-    pub(crate) fn text_color(self, rgb: [u8; 3]) -> readall_render::Color {
-        let (_, ink) = self.colors();
-        if self == Self::Paper {
-            let [r, g, b] = rgb;
-            return readall_render::Color::rgba(r, g, b, 255);
-        }
-        if rgb.iter().all(|c| *c < 80) {
-            return ink;
-        }
-        let [r, g, b] = rgb;
-        if self == Self::Dark {
-            readall_render::Color::rgba(r.max(80), g.max(80), b.max(80), 255)
-        } else {
-            readall_render::Color::rgba(r, g, b, 255)
-        }
-    }
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Paper => "paper",
-            Self::Sepia => "sepia",
-            Self::Dark => "dark",
-        }
-    }
-    pub(crate) fn parse(value: &str) -> io::Result<Self> {
-        match value {
-            "paper" => Ok(Self::Paper),
-            "sepia" => Ok(Self::Sepia),
-            "dark" => Ok(Self::Dark),
-            _ => Err(invalid("theme expects paper, sepia or dark")),
-        }
-    }
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::Paper => Self::Sepia,
-            Self::Sepia => Self::Dark,
-            Self::Dark => Self::Paper,
-        }
-    }
-}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Settings {
     pub theme: Theme,
@@ -175,6 +116,28 @@ impl Store {
         let _lock = Lock::acquire(&self.root)?;
         // Do not silently replace a corrupt/foreign file.
         self.settings()?;
+        self.write_settings(settings)
+    }
+    /// Home theme switching must preserve reader size, margins and page mode.
+    pub(crate) fn save_theme(&self, theme: Theme) -> io::Result<Settings> {
+        self.save_theme_with_defaults(theme, Settings::default())
+    }
+    pub(crate) fn save_theme_with_defaults(
+        &self,
+        theme: Theme,
+        defaults: Settings,
+    ) -> io::Result<Settings> {
+        let _lock = Lock::acquire(&self.root)?;
+        let saved = read_text(&self.root.join("settings.conf"))?;
+        let base = match saved.as_deref() {
+            Some(text) => parse_settings(Some(text))?,
+            None => defaults.validate()?,
+        };
+        let settings = Settings { theme, ..base };
+        self.write_settings(settings)?;
+        Ok(settings)
+    }
+    fn write_settings(&self, settings: Settings) -> io::Result<()> {
         atomic(
             &self.root.join("settings.conf"),
             &format!(

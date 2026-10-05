@@ -1,6 +1,7 @@
 //! Dependency-free EPUB container/package foundation.
 //! This validates an intentionally small, explicit subset; XHTML/CSS layout is not implemented here.
 mod content;
+mod cover;
 mod search;
 mod svg_inline;
 pub use search::{SearchHit, SearchLimits, SearchReport};

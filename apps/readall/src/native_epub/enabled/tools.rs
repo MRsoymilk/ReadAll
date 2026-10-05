@@ -1,9 +1,11 @@
 //! Native search, annotations, settings, selection and image inspection overlays.
+mod desktop;
 mod external;
 mod gestures;
 #[cfg(test)]
 mod link_tests;
 mod links;
+mod mobile_menu;
 mod selection_actions;
 #[cfg(test)]
 mod selection_tests;
@@ -40,13 +42,14 @@ pub(super) struct Tools {
     pub(super) store: Option<Store>,
     pub(super) annotations: Vec<Annotation>,
     pub(super) mode: Mode,
-    query: String,
-    dirty: bool,
+    pub(super) query: String,
+    pub(super) dirty: bool,
     hits: Vec<SearchHit>,
     selected: usize,
     scroll: usize,
+    desktop_wheel: f64,
     pub(super) status: String,
-    link_history: Vec<readall_epub::EpubLocator>,
+    pub(super) link_history: Vec<readall_epub::EpubLocator>,
     external: external::ExternalLink,
     pub(super) selecting: bool,
     drag: Option<gestures::Gesture>,
@@ -104,7 +107,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         self.tools.store = Some(store);
         self.refresh_surface()
     }
-    fn tool_panel(&self) -> Rect {
+    pub(super) fn tool_panel(&self) -> Rect {
         let w = self.surface.width().saturating_sub(24).min(640);
         Rect::new(
             (self.surface.width() - w) as i32 / 2,
@@ -113,7 +116,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             self.surface.height().saturating_sub(54),
         )
     }
-    fn tool_dock(&self, index: usize) -> Rect {
+    pub(super) fn tool_dock(&self, index: usize) -> Rect {
         let prev = self.toolbar_button_rect(0);
         let next = self.toolbar_button_rect(4);
         let left = prev.x + prev.width as i32 + 20;
@@ -184,7 +187,12 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             self.session.book_title().to_owned(),
         )?;
         self.reload_annotations()?;
-        self.tools.status = "书签已保存；F3 查看".into();
+        self.tools.status = if self.mobile_chrome() {
+            "书签已保存，可在标注中查看"
+        } else {
+            "书签已保存；F3 查看"
+        }
+        .into();
         Ok(())
     }
     fn tool_highlight(&mut self) -> WindowResult<()> {
@@ -305,26 +313,47 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 self.tools.dirty = true;
                 self.tools.selected = 0;
                 self.tools.scroll = 0;
-                self.tools.status = "输入查询，Enter 搜索；↑↓ 选择，Enter 跳转；Ctrl+V 粘贴".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "输入关键词后点搜索，轻点结果跳转"
+                } else {
+                    "输入查询，Enter 搜索；↑↓ 选择，Enter 跳转；Ctrl+V 粘贴"
+                }
+                .into();
             }
             ReaderCommand::Bookmarks => {
                 self.reload_annotations()?;
                 self.tools.mode = Mode::Annotations;
                 self.tools.selected = 0;
                 self.tools.scroll = 0;
-                self.tools.status = "Enter/点击跳转；Delete 删除选中的标注".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "轻点书签或标注，返回对应位置"
+                } else {
+                    "Enter/点击跳转；Delete 删除选中的标注"
+                }
+                .into();
             }
             ReaderCommand::Bookmark => self.tool_bookmark()?,
             ReaderCommand::Highlight => self.tool_highlight()?,
             ReaderCommand::Note => {
                 self.tools.mode = Mode::Note;
                 self.tools.query.clear();
-                self.tools.status = "输入笔记，Enter 保存；Esc 取消；Ctrl+V 可粘贴中文".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "输入笔记后点保存，关闭可取消"
+                } else {
+                    "输入笔记，Enter 保存；Esc 取消；Ctrl+V 可粘贴中文"
+                }
+                .into();
             }
             ReaderCommand::Settings => {
                 self.tools.mode = Mode::Settings;
                 self.tools.selected = 0;
-                self.tools.status = "↑↓ 选择；+/− 修改；点击右侧加减按钮".into();
+                self.tools.scroll = 0;
+                self.tools.status = if self.mobile_chrome() {
+                    "轻点右侧加减按钮，设置自动保存"
+                } else {
+                    "↑↓ 选择；+/− 修改；点击右侧加减按钮"
+                }
+                .into();
             }
             ReaderCommand::Theme => {
                 let mut settings = self.session.settings();
@@ -335,7 +364,13 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 self.tools.mode = Mode::None;
                 self.tools.selecting = !self.tools.selecting;
                 self.tools.clear_selection();
-                self.tools.status = if self.tools.selecting {
+                self.tools.status = if self.mobile_chrome() {
+                    if self.tools.selecting {
+                        "长按拖动选择文字，松手后选择操作"
+                    } else {
+                        "长按选择文字，轻点链接跳转"
+                    }
+                } else if self.tools.selecting {
                     "文字选择优先：链接也可选字；Ctrl+C 复制；F8 高亮；F7 笔记；F9 返回普通阅读"
                 } else {
                     "普通阅读：直接拖选文字，单击链接跳转；Ctrl+C 复制，F8 高亮，F7 笔记"
@@ -410,12 +445,11 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 return Ok(Some(true));
             }
             if self.tools.mode == Mode::Zoom {
-                if y < panel.y + 40 {
-                    if x < panel.x + 120 {
-                        self.tools.factor = (self.tools.factor / 1.25).max(0.25);
-                    } else {
-                        self.tools.factor = (self.tools.factor * 1.25).min(8.0);
-                    }
+                let (minus, plus) = self.mobile_zoom_buttons();
+                if point_in(minus, x, y) {
+                    self.tools.factor = (self.tools.factor / 1.25).max(0.25);
+                } else if point_in(plus, x, y) {
+                    self.tools.factor = (self.tools.factor * 1.25).min(8.0);
                 }
                 return Ok(Some(true));
             }
@@ -432,16 +466,21 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             if let Some(index) = self.tool_row_at(x, y) {
                 self.tools.selected = index;
                 if self.tools.mode == Mode::Settings {
-                    self.change_setting(if x < panel.x + panel.width as i32 - 64 {
-                        -1
-                    } else {
-                        1
-                    })?;
+                    let row_y = panel.y + 88 + (index - self.tools.scroll) as i32 * 42;
+                    let (minus, plus) = self.mobile_setting_buttons(row_y);
+                    if point_in(minus, x, y) {
+                        self.change_setting(-1)?;
+                    } else if point_in(plus, x, y) {
+                        self.change_setting(1)?;
+                    }
                 } else {
                     self.tool_activate()?;
                 }
             }
             return Ok(Some(true));
+        }
+        if self.compact_toc() {
+            return Ok(None);
         }
         if let Some(changed) = self.selection_action_click(x, y)? {
             return Ok(Some(changed));
@@ -612,23 +651,27 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 Ok(Some(true))
             }
             Action::PointerMove { x, y } if self.tools.mode != Mode::None => {
+                let before = self.menu_hover_control();
                 self.pointer = Some((x, y));
+                let hover_changed = before != self.menu_hover_control();
                 if let Some(index) = self.tool_row_at(x, y)
                     && self.tools.selected != index
                 {
                     self.tools.selected = index;
                     return Ok(Some(true));
                 }
-                Ok(Some(false))
+                Ok(Some(hover_changed))
             }
             Action::PointerLeave if self.tools.mode != Mode::None => {
+                let hovered = self.menu_hover_control().is_some();
                 self.pointer = None;
-                Ok(Some(false))
+                Ok(Some(hovered))
             }
             _ => Ok(None),
         }
     }
     pub(super) fn draw_marks(&mut self) -> WindowResult<()> {
+        let palette = self.session.settings().theme.palette();
         let mut commands = Vec::new();
         let mut ranges: Vec<_> = self
             .tools
@@ -654,7 +697,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             if merged.get(at).is_some_and(|(start, _)| *start < hit.end) {
                 commands.push(DrawCommand::FillRect {
                     rect: hit.rect,
-                    color: Color::rgba(250, 196, 40, 70),
+                    color: palette.highlight,
                 });
             }
         }
@@ -663,7 +706,7 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 if hit.start < range.end && hit.end > range.start {
                     commands.push(DrawCommand::FillRect {
                         rect: hit.rect,
-                        color: Color::rgba(70, 135, 240, 65),
+                        color: palette.selection,
                     });
                 }
             }
@@ -674,304 +717,76 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     pub(super) fn draw_tools(&mut self) -> WindowResult<()> {
-        if self.tools.mode == Mode::External {
-            return self.draw_external_link();
-        }
-        if self.tools.mode == Mode::None {
-            if self.toolbar != ToolbarMode::Collapsed {
-                for (index, label) in ["查找", "标注", "设置"].into_iter().enumerate() {
-                    let rect = self.tool_dock(index);
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect,
-                        color: Color::rgba(255, 255, 255, 22),
-                    }])?;
-                    let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-                    text.draw_clipped(
-                        rect.x + 8,
-                        rect.y + 7,
-                        13,
-                        label,
-                        Color::rgba(240, 243, 248, 255),
-                        rect,
-                    )?;
-                }
-            }
-            if !self.tools.selecting
-                && self.tools.selection.is_none()
-                && self.tools.drag.is_none()
-                && (!self.tools.status.is_empty() || !self.tools.link_history.is_empty())
-            {
-                let w = self.surface.width();
-                let rect = Rect::new(8, 34, w.saturating_sub(16), 26);
-                self.surface.draw(&[DrawCommand::FillRect {
-                    rect,
-                    color: Color::rgba(35, 42, 52, 230),
-                }])?;
-                let back = self.link_back_rect();
-                let has_back = !self.tools.link_history.is_empty();
-                if has_back {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: back,
-                        color: Color::rgba(55, 104, 190, 255),
-                    }])?;
-                }
-                let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-                let status = text.fit(
-                    12,
-                    &self.tools.status,
-                    rect.width.saturating_sub(if has_back { 100 } else { 16 }),
-                )?;
-                text.draw_clipped(rect.x + 8, rect.y + 6, 12, &status, Color::WHITE, rect)?;
-                if has_back {
-                    text.draw_clipped(back.x + 18, back.y + 6, 12, "返回", Color::WHITE, back)?;
-                }
-            }
-            self.draw_selection_actions()?;
-            return Ok(());
-        }
-        let panel = self.tool_panel();
-        let (background, ink) = self.session.settings().theme.colors();
-        self.surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(
-                    0,
-                    32,
-                    self.surface.width(),
-                    self.surface.height().saturating_sub(32),
-                ),
-                color: Color::rgba(0, 0, 0, 90),
-            },
-            DrawCommand::FillRect {
-                rect: panel,
-                color: background,
-            },
-        ])?;
-        if self.tools.mode == Mode::Zoom
-            && let Some(image) = &self.tools.zoom
-        {
-            let clip = Rect::new(
-                panel.x + 8,
-                panel.y + 44,
-                panel.width.saturating_sub(16),
-                panel.height.saturating_sub(94),
-            );
-            let scale = (clip.width as f32 / image.width() as f32)
-                .min(clip.height as f32 / image.height() as f32)
-                * self.tools.factor;
-            let w = (image.width() as f32 * scale).round().clamp(1.0, 32768.0) as u32;
-            let h = (image.height() as f32 * scale).round().clamp(1.0, 32768.0) as u32;
-            let rect = Rect::new(
-                clip.x + (clip.width as i32 - w as i32) / 2 + self.tools.pan.0,
-                clip.y + (clip.height as i32 - h as i32) / 2 + self.tools.pan.1,
-                w,
-                h,
-            );
-            self.surface
-                .draw_rgba(image.pixels(), (image.width(), image.height()), rect, clip)?;
-        }
-        let title = match self.tools.mode {
-            Mode::Search => "全文搜索",
-            Mode::Annotations => "书签 / 高亮 / 笔记",
-            Mode::Note => "添加笔记",
-            Mode::Settings => "阅读设置",
-            Mode::Zoom => "图片查看   −       +",
-            Mode::External => "打开外部网页",
-            Mode::None => "",
-        };
-        let editing = self.tools.editing();
-        let rect = Rect::new(
-            panel.x + 12,
-            panel.y + 40,
-            panel.width.saturating_sub(24),
-            38,
-        );
-        if editing {
-            self.surface.draw(&[DrawCommand::FillRect {
-                rect,
-                color: Color::rgba(120, 140, 170, 35),
-            }])?;
-        }
-        let visible = self.tool_rows();
-        let mut rows = Vec::new();
-        match self.tools.mode {
-            Mode::Search => {
-                for (index, hit) in self
-                    .tools
-                    .hits
-                    .iter()
-                    .enumerate()
-                    .skip(self.tools.scroll)
-                    .take(visible)
-                {
-                    rows.push((
-                        index,
-                        format!("第 {} 章 · {}", hit.locator.spine_index() + 1, hit.excerpt),
-                    ));
-                }
-            }
-            Mode::Annotations => {
-                for (index, row) in self
-                    .tools
-                    .annotations
-                    .iter()
-                    .enumerate()
-                    .skip(self.tools.scroll)
-                    .take(visible)
-                {
-                    rows.push((
-                        index,
-                        format!(
-                            "#{} {} · 第 {} 章 · {}",
-                            row.id,
-                            row.kind.name(),
-                            row.locator.spine_index() + 1,
-                            row.text.replace('\n', " ")
-                        ),
-                    ));
-                }
-            }
-            Mode::Settings => {
-                let s = self.session.settings();
-                for (index, label) in [
-                    format!("主题：{}", s.theme.name()),
-                    format!("字号：{} px", s.size),
-                    format!("页边距：{} px", s.margin),
-                    format!("行距：{:.1} 倍", s.line_spacing),
-                    format!("翻页模式：{}", s.page_mode.label()),
-                ]
-                .into_iter()
-                .enumerate()
-                .skip(self.tools.scroll)
-                .take(visible)
-                {
-                    rows.push((index, label));
-                }
-            }
-            _ => {}
-        }
-        for (row, (index, _)) in rows.iter().enumerate() {
-            if *index == self.tools.selected {
-                self.surface.draw(&[DrawCommand::FillRect {
-                    rect: Rect::new(
-                        panel.x + 8,
-                        panel.y + 88 + row as i32 * 42,
-                        panel.width.saturating_sub(16),
-                        38,
-                    ),
-                    color: Color::rgba(75, 125, 200, 45),
-                }])?;
-            }
-        }
-        let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-        text.draw_clipped(panel.x + 16, panel.y + 12, 17, title, ink, panel)?;
-        text.draw_clipped(
-            panel.x + panel.width as i32 - 32,
-            panel.y + 10,
-            18,
-            "×",
-            ink,
-            panel,
-        )?;
-        if editing {
-            let width = rect.width.saturating_sub(90);
-            let content = text.fit(
-                14,
-                &format!("{}▏", self.tools.query.replace('\n', " ")),
-                width,
-            )?;
-            text.draw_clipped(rect.x + 8, rect.y + 10, 14, &content, ink, rect)?;
-            text.draw_clipped(
-                rect.x + rect.width as i32 - 60,
-                rect.y + 10,
-                14,
-                if self.tools.mode == Mode::Search {
-                    "搜索"
-                } else {
-                    "保存"
-                },
-                ink,
-                rect,
-            )?;
-        }
-        for (row, (_, label)) in rows.iter().enumerate() {
-            let y = panel.y + 98 + row as i32 * 42;
-            let width = panel
-                .width
-                .saturating_sub(if self.tools.mode == Mode::Settings {
-                    140
-                } else {
-                    40
-                });
-            let label = text.fit(13, label, width)?;
-            text.draw_clipped(panel.x + 18, y, 13, &label, ink, panel)?;
-            if self.tools.mode == Mode::Settings {
-                text.draw_clipped(
-                    panel.x + panel.width as i32 - 108,
-                    y,
-                    16,
-                    "−      +",
-                    ink,
-                    panel,
-                )?;
-            }
-        }
-        let status = text.fit(12, &self.tools.status, panel.width.saturating_sub(28))?;
-        text.draw_clipped(
-            panel.x + 14,
-            panel.y + panel.height as i32 - 30,
-            12,
-            &status,
-            ink,
-            panel,
-        )?;
-        Ok(())
+        self.draw_modern_tools()
     }
     fn start_clipboard(&mut self, text: Option<String>) -> WindowResult<()> {
-        if self.tools.clipboard.is_some() {
-            return Err("剪贴板操作尚未结束".into());
+        if let Some(effects) = &mut self.host_effects {
+            if text.as_ref().is_some_and(|s| s.len() > 128 * 1024) {
+                return Err("selection exceeds clipboard limit".into());
+            }
+            if effects.len() >= 8 {
+                return Err("系统操作队列已满".into());
+            }
+            effects.push_back(match text {
+                Some(text) => HostEffect::Copy(text),
+                None => HostEffect::Paste,
+            });
+            self.tools.status = "正在访问系统剪贴板…".into();
+            return Ok(());
         }
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = (|| -> std::result::Result<ClipboardResult, String> {
-                if let Some(text) = text {
-                    if text.len() > 128 * 1024 {
-                        return Err("selection exceeds clipboard limit".into());
-                    }
-                    let opts = wl_clipboard_rs::copy::Options::new();
-                    opts.copy(
-                        wl_clipboard_rs::copy::Source::Bytes(text.into_bytes().into()),
-                        wl_clipboard_rs::copy::MimeType::Specific(
-                            "text/plain;charset=utf-8".into(),
-                        ),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    Ok(ClipboardResult::Copied)
-                } else {
-                    use std::io::Read;
-                    let (pipe, _) = wl_clipboard_rs::paste::get_contents(
-                        wl_clipboard_rs::paste::ClipboardType::Regular,
-                        wl_clipboard_rs::paste::Seat::Unspecified,
-                        wl_clipboard_rs::paste::MimeType::Text,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    let mut data = Vec::new();
-                    pipe.take(128 * 1024 + 1)
-                        .read_to_end(&mut data)
+        #[cfg(not(all(target_os = "linux", feature = "wayland")))]
+        {
+            let _ = text;
+            Err("clipboard host is not attached".into())
+        }
+        #[cfg(all(target_os = "linux", feature = "wayland"))]
+        {
+            if self.tools.clipboard.is_some() {
+                return Err("剪贴板操作尚未结束".into());
+            }
+            let (sender, receiver) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = (|| -> std::result::Result<ClipboardResult, String> {
+                    if let Some(text) = text {
+                        if text.len() > 128 * 1024 {
+                            return Err("selection exceeds clipboard limit".into());
+                        }
+                        let opts = wl_clipboard_rs::copy::Options::new();
+                        opts.copy(
+                            wl_clipboard_rs::copy::Source::Bytes(text.into_bytes().into()),
+                            wl_clipboard_rs::copy::MimeType::Specific(
+                                "text/plain;charset=utf-8".into(),
+                            ),
+                        )
                         .map_err(|e| e.to_string())?;
-                    if data.len() > 128 * 1024 {
-                        return Err("clipboard exceeds text limit".into());
+                        Ok(ClipboardResult::Copied)
+                    } else {
+                        use std::io::Read;
+                        let (pipe, _) = wl_clipboard_rs::paste::get_contents(
+                            wl_clipboard_rs::paste::ClipboardType::Regular,
+                            wl_clipboard_rs::paste::Seat::Unspecified,
+                            wl_clipboard_rs::paste::MimeType::Text,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let mut data = Vec::new();
+                        pipe.take(128 * 1024 + 1)
+                            .read_to_end(&mut data)
+                            .map_err(|e| e.to_string())?;
+                        if data.len() > 128 * 1024 {
+                            return Err("clipboard exceeds text limit".into());
+                        }
+                        Ok(ClipboardResult::Pasted(
+                            String::from_utf8(data).map_err(|e| e.to_string())?,
+                        ))
                     }
-                    Ok(ClipboardResult::Pasted(
-                        String::from_utf8(data).map_err(|e| e.to_string())?,
-                    ))
-                }
-            })();
-            let _ = sender.send(result.unwrap_or_else(ClipboardResult::Failed));
-        });
-        self.tools.clipboard = Some(receiver);
-        self.tools.started = Some(Instant::now());
-        self.tools.status = "正在访问剪贴板…".into();
-        Ok(())
+                })();
+                let _ = sender.send(result.unwrap_or_else(ClipboardResult::Failed));
+            });
+            self.tools.clipboard = Some(receiver);
+            self.tools.started = Some(Instant::now());
+            self.tools.status = "正在访问剪贴板…".into();
+            Ok(())
+        }
     }
     pub(super) fn poll_clipboard(&mut self) -> bool {
         let Some(receiver) = &self.tools.clipboard else {

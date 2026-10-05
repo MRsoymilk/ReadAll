@@ -1,6 +1,8 @@
 //! Three-page strip cache. Neighbour preparation never advances reading progress;
 //! promotion is transactional and swaps the parsed chapter/renderer at boundaries.
 use super::*;
+#[cfg(test)]
+mod tests;
 use crate::text_page::TextHit;
 use readall_render::{DrawCommand, Rect, Surface};
 struct Neighbour<'b, 'a, 'f, 'd> {
@@ -66,7 +68,13 @@ impl<'b, 'a, 'f, 'd> EpubSession<'b, 'a, 'f, 'd> {
         )
     }
     pub(crate) fn scroll_stride(&self) -> f64 {
-        self.options.height.saturating_sub(36).max(1) as f64
+        let band = self.frame.surface.pixel_rect(Rect::new(
+            0,
+            32,
+            self.options.width,
+            self.options.height.saturating_sub(36),
+        ));
+        f64::from(band.height.max(1)) / f64::from(self.frame.surface.pixel_scale().1)
     }
     pub(crate) fn neighbour_ready(&self, direction: i32) -> bool {
         self.paging.neighbours[side(direction)].is_some()
@@ -225,11 +233,11 @@ impl<'b, 'a, 'f, 'd> EpubSession<'b, 'a, 'f, 'd> {
     pub(crate) fn compose_scroll(&mut self, offset: f64) -> Result<()> {
         let offset = if offset.is_finite() { offset } else { 0.0 };
         let (w, h) = (self.options.width, self.options.height);
-        let stride = self.scroll_stride() as i32;
-        let source_top = 32;
-        let top = 32;
         let clip = Rect::new(0, 32, w, h.saturating_sub(36));
-        let band = Rect::new(0, source_top, w, stride as u32);
+        let band = self.frame.surface.pixel_rect(clip);
+        let stride = band.height as i32;
+        let scale_y = f64::from(self.frame.surface.pixel_scale().1);
+        let offset_pixels = (offset * scale_y).round() as i32;
         let mut view = self
             .paging
             .view
@@ -254,15 +262,15 @@ impl<'b, 'a, 'f, 'd> EpubSession<'b, 'a, 'f, 'd> {
                     .map(|n| (&n.frame, n.spine))
             };
             let Some((frame, spine)) = tile else { continue };
-            let y = top + index * stride - offset.round() as i32;
+            let y = band.y + index * stride - offset_pixels;
             view.surface
-                .copy_region(&frame.surface, band, (0, y), clip)?;
+                .copy_region_pixels(&frame.surface, band, (0, y), band)?;
             // Hits use the active chapter's logical offsets. Other-chapter slices
             // are activated before a press, so offsets can never alias accidentally.
             if spine != self.spine {
                 continue;
             }
-            let shift = y - source_top;
+            let shift = (f64::from(y - band.y) / scale_y).round() as i32;
             for hit in &frame.hits {
                 let r = Rect::new(
                     hit.rect.x,

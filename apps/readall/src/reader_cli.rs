@@ -80,7 +80,8 @@ pub(crate) fn run(command: &str, args: &[OsString], output: &mut impl Write) -> 
         &mut LocalFileSource::open(PathBuf::from(&values[0]))?,
         limits.zip.max_archive_bytes,
     )?;
-    let book = EpubBook::parse(&bytes, limits)?;
+    let prepared = crate::publication::prepare(bytes, std::path::Path::new(&values[0]))?;
+    let book = EpubBook::parse(&prepared.bytes, limits)?;
     match command {
         "search" => {
             let case = values.len() == 3;

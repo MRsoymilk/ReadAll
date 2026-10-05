@@ -1,0 +1,20 @@
+[package]
+name = "readall-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "readall_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+readall = { path = "../../apps/readall", default-features = false, features = ["mobile"] }
+jni = { version = "=0.21.1", default-features = false }
+
+# JNI's exported symbols and direct-buffer access are isolated in one module.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+[lints.clippy]
+all = "warn"

@@ -15,6 +15,26 @@ impl Surface {
         at: (i32, i32),
         clip: Rect,
     ) -> Result<(), RenderError> {
+        if self.pixel_scale() != source.pixel_scale() {
+            return Err(RenderError::InvalidGeometry(
+                "page copy device scale mismatch",
+            ));
+        }
+        self.copy_region_pixels(
+            source,
+            source.pixel_rect(region),
+            self.pixel_point((f64::from(at.0), f64::from(at.1))),
+            self.pixel_rect(clip),
+        )
+    }
+    /// Device-pixel copy for strip compositors; avoids accumulating fractional-density rounding.
+    pub fn copy_region_pixels(
+        &mut self,
+        source: &Surface,
+        region: Rect,
+        at: (i32, i32),
+        clip: Rect,
+    ) -> Result<(), RenderError> {
         let region_in_source = region.intersection(Rect::new(0, 0, source.width, source.height));
         let dx = i64::from(at.0) - i64::from(region.x);
         let dy = i64::from(at.1) - i64::from(region.y);
@@ -37,10 +57,11 @@ impl Surface {
             return Err(RenderError::BudgetExceeded("page copy pixels"));
         }
         let count = (x1 - x0) as usize;
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for y in y0..y1 {
             let from = (y - dy) as usize * source.width as usize + (x0 - dx) as usize;
             let to = y as usize * self.width as usize + x0 as usize;
-            self.pixels[to..to + count].copy_from_slice(&source.pixels[from..from + count]);
+            pixels[to..to + count].copy_from_slice(&source.pixels[from..from + count]);
         }
         Ok(())
     }
@@ -59,30 +80,36 @@ impl Surface {
         if !progress.is_finite()
             || (self.width, self.height) != (from.width, from.height)
             || (self.width, self.height) != (to.width, to.height)
+            || self.logical != from.logical
+            || self.logical != to.logical
         {
             return Err(RenderError::InvalidGeometry("page transition geometry"));
         }
-        let clip = clip.intersection(Rect::new(0, 0, self.width, self.height));
+        let clip = self
+            .pixel_rect(clip)
+            .intersection(Rect::new(0, 0, self.width, self.height));
         if clip.area().saturating_mul(3) > self.limits.max_blended_pixels {
             return Err(RenderError::BudgetExceeded("page transition pixels"));
         }
         let p = progress.clamp(0.0, 1.0);
         if p <= 0.0 {
-            return self.copy_region(from, clip, (clip.x, clip.y), clip);
+            return self.copy_region_pixels(from, clip, (clip.x, clip.y), clip);
         }
         if p >= 1.0 {
-            return self.copy_region(to, clip, (clip.x, clip.y), clip);
+            return self.copy_region_pixels(to, clip, (clip.x, clip.y), clip);
         }
-        self.copy_region(to, clip, (clip.x, clip.y), clip)?;
+        self.copy_region_pixels(to, clip, (clip.x, clip.y), clip)?;
         let w = clip.width as i32;
         if effect == PageEffect::Slide {
             let shift = (p * w as f32).round() as i32;
             let direction = if backwards { 1 } else { -1 };
-            self.copy_region(to, clip, (clip.x - direction * (w - shift), clip.y), clip)?;
-            return self.copy_region(from, clip, (clip.x + direction * shift, clip.y), clip);
+            self.copy_region_pixels(to, clip, (clip.x - direction * (w - shift), clip.y), clip)?;
+            return self.copy_region_pixels(from, clip, (clip.x + direction * shift, clip.y), clip);
         }
         let curl = (p * std::f32::consts::PI).sin();
-        let roll = (clip.width as f32 * 0.17).min(140.0) * curl;
+        let density = self.pixel_scale().0;
+        let roll = (clip.width as f32 * 0.17).min(140.0 * density) * curl;
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in 0..clip.height as usize {
             let bend = ((row as f32 / clip.height.max(1) as f32) - 0.5) * roll * 0.35;
             let fold = ((1.0 - p) * w as f32 + bend).clamp(0.0, w as f32);
@@ -94,10 +121,10 @@ impl Surface {
                 } else {
                     (0, front as usize)
                 };
-                self.pixels[base + left..base + right]
+                pixels[base + left..base + right]
                     .copy_from_slice(&from.pixels[base + left..base + right]);
             }
-            let end = (fold + roll + 20.0 * curl).ceil().min(w as f32) as i32;
+            let end = (fold + roll + 20.0 * density * curl).ceil().min(w as f32) as i32;
             for local in front..end {
                 let x = if backwards { w - 1 - local } else { local };
                 let at = base + x as usize;
@@ -118,17 +145,16 @@ impl Surface {
                     let channel = |bg: u8, text: u8| {
                         ((0.93 * f32::from(bg) + 0.07 * f32::from(text)) * shade).round() as u8
                     };
-                    self.pixels[at] = Color::rgba(
+                    pixels[at] = Color::rgba(
                         channel(paper.r, ink.r),
                         channel(paper.g, ink.g),
                         channel(paper.b, ink.b),
                         255,
                     );
                 } else {
-                    let shadow =
-                        (1.0 - (distance - roll) / (20.0 * curl).max(0.01)).clamp(0.0, 1.0);
-                    self.pixels[at] =
-                        Color::rgba(0, 0, 0, (shadow * 45.0) as u8).over(self.pixels[at]);
+                    let shadow = (1.0 - (distance - roll) / (20.0 * density * curl).max(0.01))
+                        .clamp(0.0, 1.0);
+                    pixels[at] = Color::rgba(0, 0, 0, (shadow * 45.0) as u8).over(pixels[at]);
                 }
             }
         }

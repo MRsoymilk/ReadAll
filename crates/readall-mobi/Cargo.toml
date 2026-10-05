@@ -1,0 +1,16 @@
+[package]
+name = "readall-mobi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+readall-core.workspace = true
+readall-archive.workspace = true
+html-escape = "=0.2.13"
+
+[dev-dependencies]
+readall-epub.workspace = true
+
+[lints]
+workspace = true

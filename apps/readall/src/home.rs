@@ -10,8 +10,14 @@ pub(crate) fn run(_: &mut impl Write) -> Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
+    mod desktop;
+    mod preview;
+    mod recent_rows;
+    #[cfg(test)]
+    mod recent_tests;
     use super::*;
     use crate::{
+        reader_data::{Store, Theme},
         recent::RecentStore,
         ui::{UiFont, UiPainter},
     };
@@ -21,31 +27,19 @@ mod enabled {
         LocalFileSource,
         window::{self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult},
     };
-    use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
+    use readall_render::{DrawCommand, Rect, RenderLimits, Surface};
+    use recent_rows::RecentRowView;
     use std::{
         fs,
         path::{Path, PathBuf},
     };
 
-    const BG: Color = Color::rgba(244, 246, 249, 255);
-    const SIDEBAR: Color = Color::rgba(26, 31, 39, 255);
-    const PANEL: Color = Color::rgba(255, 255, 255, 255);
-    const INK: Color = Color::rgba(34, 40, 49, 255);
-    const MUTED: Color = Color::rgba(105, 115, 128, 255);
-    const ACCENT: Color = Color::rgba(52, 103, 190, 255);
-    const ACCENT_SOFT: Color = Color::rgba(231, 238, 251, 255);
-    const HOVER_SOFT: Color = Color::rgba(220, 232, 249, 255);
-    const HOVER_STRONG: Color = Color::rgba(210, 226, 248, 255);
-    const BORDER: Color = Color::rgba(224, 229, 236, 255);
-    const SIDEBAR_TEXT: Color = Color::rgba(239, 243, 248, 255);
-    const SIDEBAR_MUTED: Color = Color::rgba(152, 164, 181, 255);
     const ROW_HEIGHT: i32 = 48;
     const LIST_TOP: i32 = 150;
     const LIST_BOTTOM_MARGIN: i32 = 96;
     const PREVIEW_MAX_EPUB_BYTES: u64 = 16 * 1024 * 1024;
     const RECENT_TOP: i32 = 366;
     const RECENT_ROW_HEIGHT: i32 = 34;
-    const RECENT_VISIBLE: usize = 3;
 
     #[derive(Debug, Clone)]
     struct FileEntry {
@@ -83,12 +77,8 @@ mod enabled {
                     Err(_) => continue,
                 };
                 let directory = kind.is_dir();
-                let epub = kind.is_file()
-                    && item
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
+                let epub =
+                    kind.is_file() && crate::publication::path_format(&item.path()).is_some();
                 if directory || epub {
                     entries.push(FileEntry {
                         name,
@@ -164,7 +154,7 @@ mod enabled {
             self.preview = if entry.directory {
                 None
             } else {
-                Some(epub_preview(&entry.path))
+                Some("正在读取元数据预览…".into())
             };
         }
     }
@@ -176,7 +166,8 @@ mod enabled {
         };
         if size > PREVIEW_MAX_EPUB_BYTES {
             return format!(
-                "EPUB · {:.1} MiB · 元数据预览已跳过（预览上限 16 MiB）",
+                "{} · {:.1} MiB · 元数据预览已跳过（预览上限 16 MiB）",
+                crate::publication::path_format(path).map_or("图书", |f| f.label()),
                 size as f64 / (1024.0 * 1024.0)
             );
         }
@@ -185,6 +176,18 @@ mod enabled {
         let parsed = (|| -> Result<String> {
             let mut source = LocalFileSource::open(path)?;
             let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
+            if readall_mobi::is_mobi(&bytes) {
+                let book =
+                    readall_mobi::MobiBook::parse(&bytes, readall_mobi::MobiLimits::default())?;
+                let meta = book.metadata();
+                return Ok(format!(
+                    "《{}》 · {} · {} · {}",
+                    meta.title,
+                    meta.author.as_deref().unwrap_or("作者未知"),
+                    meta.language.as_deref().unwrap_or("语言未知"),
+                    if meta.version == 8 { "AZW3" } else { "MOBI" }
+                ));
+            }
             let book = EpubBook::parse(&bytes, limits)?;
             let title = book.title().unwrap_or("(未命名)");
             let creator = book.creator().unwrap_or("作者未知");
@@ -213,15 +216,28 @@ mod enabled {
         None,
         OpenCard,
         RecentRow(usize),
+        RecentDelete(usize),
         BrowserBack,
         BrowserRow(usize),
+        Sidebar(usize),
+        Theme,
     }
 
     struct Home<'font> {
+        theme: Theme,
+        theme_store: Option<Store>,
         surface: Surface,
         ui_font: &'font UiFont,
         mode: Mode,
         recent: Vec<PathBuf>,
+        recent_store: Option<RecentStore>,
+        recent_rows: Vec<RecentRowView>,
+        recent_scroll: usize,
+        recent_selected: Option<usize>,
+        wheel_remainder: f64,
+        preview_worker: preview::Preview,
+        status_notice: Option<(String, std::time::Instant)>,
+        pending_recent_delete: Option<PathBuf>,
         selected_book: Option<PathBuf>,
         close_requested: bool,
         pointer: Option<(i32, i32)>,
@@ -230,23 +246,52 @@ mod enabled {
 
     impl<'font> Home<'font> {
         fn new(width: u32, height: u32, ui_font: &'font UiFont) -> WindowResult<Self> {
-            let recent = RecentStore::from_environment()
-                .and_then(|store| store.load())
+            let recent_store = RecentStore::from_environment().ok();
+            let recent = recent_store
+                .as_ref()
+                .and_then(|store| store.load().ok())
                 .unwrap_or_default();
             let mut home = Self {
+                theme: Theme::Paper,
+                theme_store: None,
                 surface: Surface::new(width, height, RenderLimits::default())?,
                 ui_font,
                 mode: Mode::Library,
                 recent,
+                recent_store,
+                recent_rows: Vec::new(),
+                recent_scroll: 0,
+                recent_selected: None,
+                wheel_remainder: 0.0,
+                preview_worker: preview::Preview::new()?,
+                status_notice: None,
+                pending_recent_delete: None,
                 selected_book: None,
                 close_requested: false,
                 pointer: None,
-                status: "已支持 EPUB 文本阅读，点击“打开图书”开始".into(),
+                status: "支持 EPUB / MOBI / AZW3，点击“打开图书”开始".into(),
             };
             home.paint()?;
             Ok(home)
         }
 
+        fn theme_rect(&self) -> Rect {
+            Rect::new(24, self.surface.height().saturating_sub(82) as i32, 166, 42)
+        }
+        fn toggle_theme(&mut self) -> WindowResult<bool> {
+            let theme = self.theme.next();
+            if let Some(store) = &self.theme_store
+                && let Err(error) = store.save_theme(theme)
+            {
+                self.status = format!("主题保存失败：{error}");
+                self.paint()?;
+                return Ok(true);
+            }
+            self.theme = theme;
+            self.status = format!("已切换为{}主题", theme.label());
+            self.paint()?;
+            Ok(true)
+        }
         fn default_directory() -> PathBuf {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
@@ -256,8 +301,10 @@ mod enabled {
         }
 
         fn open_browser(&mut self) -> WindowResult<bool> {
+            self.pending_recent_delete = None;
+            self.recent_rows.clear();
             self.mode = Mode::Browser(Browser::load(Self::default_directory())?);
-            self.status = "选择一个 EPUB 文件".into();
+            self.status = "选择 EPUB / MOBI / AZW3 图书".into();
             self.paint()?;
             Ok(true)
         }
@@ -286,7 +333,11 @@ mod enabled {
         }
 
         fn activate_recent(&mut self, index: usize) -> WindowResult<bool> {
-            let Some(path) = self.recent.get(index).cloned() else {
+            let Some(path) = self
+                .recent
+                .get(self.recent_scroll.saturating_add(index))
+                .cloned()
+            else {
                 return Ok(false);
             };
             self.selected_book = Some(path);
@@ -300,13 +351,24 @@ mod enabled {
         }
 
         fn hover_target_at(&self, x: i32, y: i32) -> HoverTarget {
+            if point_in(self.theme_rect(), x, y) {
+                return HoverTarget::Theme;
+            }
+            for index in 0..3 {
+                if point_in(self.sidebar_rect(index), x, y) {
+                    return HoverTarget::Sidebar(index);
+                }
+            }
             match &self.mode {
                 Mode::Library => {
                     let card = self.open_card_rect();
                     if point_in(card, x, y) {
                         return HoverTarget::OpenCard;
                     }
-                    for index in 0..self.recent.len().min(RECENT_VISIBLE) {
+                    for index in 0..self.visible_recent_count() {
+                        if point_in(self.recent_delete_rect(index), x, y) {
+                            return HoverTarget::RecentDelete(index);
+                        }
                         if point_in(self.recent_row_rect(index), x, y) {
                             return HoverTarget::RecentRow(index);
                         }
@@ -340,6 +402,12 @@ mod enabled {
             let before = self.hover_target();
             self.pointer = pointer;
             let after = self.hover_target();
+            let delete_cancelled = self.pending_recent_delete.as_ref().is_some_and(|path| {
+                !matches!(after, HoverTarget::RecentDelete(index) if self.recent.get(self.recent_scroll.saturating_add(index)) == Some(path))
+            });
+            if delete_cancelled {
+                self.pending_recent_delete = None;
+            }
             // Pointer and keyboard/wheel navigation share one active row. Do this
             // even within the same hover target: navigation may have moved it.
             let selection_changed = if let (HoverTarget::BrowserRow(index), Mode::Browser(browser)) =
@@ -349,10 +417,15 @@ mod enabled {
                 browser.selected = index;
                 browser.refresh_preview();
                 true
+            } else if let HoverTarget::RecentRow(index) | HoverTarget::RecentDelete(index) = after {
+                let selected = Some(self.recent_scroll.saturating_add(index));
+                let changed = selected != self.recent_selected;
+                self.recent_selected = selected;
+                changed
             } else {
                 false
             };
-            if before == after && !selection_changed {
+            if before == after && !selection_changed && !delete_cancelled {
                 return Ok(false);
             }
             self.paint()?;
@@ -365,13 +438,13 @@ mod enabled {
                 Mode::Library => None,
             };
             let Some(selected) = selected else {
-                self.status = "当前目录没有可打开的 EPUB 文件".into();
+                self.status = "当前目录没有可打开的 EPUB / MOBI / AZW3 图书".into();
                 self.paint()?;
                 return Ok(true);
             };
             if selected.directory {
                 self.mode = Mode::Browser(Browser::load(selected.path)?);
-                self.status = "选择一个 EPUB 文件".into();
+                self.status = "选择 EPUB / MOBI / AZW3 图书".into();
                 self.paint()?;
                 return Ok(true);
             }
@@ -388,11 +461,11 @@ mod enabled {
             match parent {
                 Some(parent) => {
                     self.mode = Mode::Browser(Browser::load(parent)?);
-                    self.status = "选择一个 EPUB 文件".into();
+                    self.status = "选择 EPUB / MOBI / AZW3 图书".into();
                 }
                 None => {
                     self.mode = Mode::Library;
-                    self.status = "已支持 EPUB 文本阅读，点击“打开图书”开始".into();
+                    self.status = "支持 EPUB / MOBI / AZW3，点击“打开图书”开始".into();
                 }
             }
             self.paint()?;
@@ -400,9 +473,15 @@ mod enabled {
         }
 
         fn paint(&mut self) -> WindowResult<()> {
+            self.recent_scroll = self
+                .recent_scroll
+                .min(self.recent.len().saturating_sub(self.recent_capacity()));
+            self.observe_home_notice(std::time::Instant::now());
+            self.queue_preview(std::time::Instant::now());
+            let palette = self.theme.palette();
             self.surface.draw(&[DrawCommand::FillRect {
                 rect: Rect::new(0, 0, self.surface.width(), self.surface.height()),
-                color: BG,
+                color: palette.canvas,
             }])?;
             match &self.mode {
                 Mode::Library => self.paint_library(),
@@ -414,131 +493,127 @@ mod enabled {
         }
 
         fn paint_shell(&mut self, section: &str) -> WindowResult<()> {
+            let palette = self.theme.palette();
             let h = self.surface.height();
             let w = self.surface.width();
+            let theme_button = self.theme_rect();
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(0, 0, 218, h),
-                    color: SIDEBAR,
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(218, 0, w.saturating_sub(218), 86),
-                    color: PANEL,
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(218, 85, w.saturating_sub(218), 1),
-                    color: BORDER,
+                    color: palette.border,
                 },
             ])?;
 
+            let theme_hovered = self.hover_target() == HoverTarget::Theme;
+            crate::ui::rounded(
+                &mut self.surface,
+                theme_button,
+                12,
+                if theme_hovered {
+                    palette.hover
+                } else {
+                    palette.button
+                },
+            )?;
+            self.paint_sidebar()?;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(28, 24, 28, "ReadAll", SIDEBAR_TEXT)?;
-            text.draw(30, 62, 13, "原生 Rust 阅读器", SIDEBAR_MUTED)?;
-            text.draw(30, 126, 14, "书库", Color::rgba(126, 174, 244, 255))?;
-            text.draw(30, 166, 15, "打开图书", SIDEBAR_TEXT)?;
-            text.draw(30, 206, 15, "最近阅读", SIDEBAR_MUTED)?;
-            text.draw(250, 28, 24, section, INK)?;
+            text.draw(
+                theme_button.x + 12,
+                theme_button.y + 13,
+                13,
+                &format!("{}主题 · F6 切换", self.theme.label()),
+                palette.ink,
+            )?;
+            text.draw(28, 24, 28, "ReadAll", palette.ink)?;
+            text.draw(30, 62, 13, "本地图书 · 专注阅读", palette.muted)?;
+            text.draw(250, 28, 24, section, palette.ink)?;
             Ok(())
         }
 
         fn paint_library(&mut self) -> WindowResult<()> {
+            let palette = self.theme.palette();
             self.paint_shell("书库")?;
             let content_w = self.surface.width().saturating_sub(280);
             let card = self.open_card_rect();
             let hovered = self.hover_target() == HoverTarget::OpenCard;
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: card,
-                    color: ACCENT,
+            crate::ui::rounded(
+                &mut self.surface,
+                card,
+                18,
+                if hovered {
+                    palette.hover
+                } else {
+                    palette.panel
                 },
-                DrawCommand::FillRect {
-                    rect: Rect::new(card.x + 3, card.y + 3, card.width - 6, card.height - 6),
-                    color: if hovered { HOVER_SOFT } else { PANEL },
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(card.x + 3, card.y + 3, 8, card.height - 6),
-                    color: ACCENT,
-                },
-            ])?;
+            )?;
+            crate::ui::rounded(
+                &mut self.surface,
+                Rect::new(card.x + 18, card.y + 27, 3, 36),
+                2,
+                palette.accent,
+            )?;
 
             let info_y = 328;
-            self.surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(250, info_y, content_w.min(650), 158),
-                color: PANEL,
-            }])?;
-            let hover = self.hover_target();
-            for index in 0..self.recent.len().min(RECENT_VISIBLE) {
-                let row = self.recent_row_rect(index);
-                let hovered = hover == HoverTarget::RecentRow(index);
-                self.surface.draw(&[
-                    DrawCommand::FillRect {
-                        rect: row,
-                        color: if hovered { HOVER_SOFT } else { PANEL },
-                    },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(row.x, row.y, if hovered { 4 } else { 2 }, row.height),
-                        color: if hovered { ACCENT } else { BORDER },
-                    },
-                ])?;
-            }
-
+            let recent_panel = Rect::new(
+                250,
+                info_y,
+                content_w.min(650),
+                self.surface.height().saturating_sub(info_y as u32 + 54),
+            );
+            crate::ui::rounded(&mut self.surface, recent_panel, 16, palette.panel)?;
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(282, 148, 24, "打开 EPUB 图书", INK)?;
-            text.draw(
-                282,
-                190,
+            text.draw(282, 148, 24, "打开电子书", palette.ink)?;
+            let subtitle = text.fit(
                 15,
-                "浏览本地目录，选择 EPUB 后直接进入阅读",
-                MUTED,
+                "支持 EPUB / MOBI / AZW3，选择后阅读",
+                card.width.saturating_sub(58),
             )?;
-            text.draw(282, 230, 14, "点击卡片或按 Enter", ACCENT)?;
-            text.draw(282, info_y + 20, 17, "最近阅读", INK)?;
+            text.draw_clipped(282, 190, 15, &subtitle, palette.muted, card)?;
+            text.draw(282, 230, 14, "点击打开 · ↑↓ 选择最近阅读", palette.accent)?;
+            text.draw(282, info_y + 20, 17, "最近阅读", palette.ink)?;
             if self.recent.is_empty() {
-                text.draw(282, info_y + 62, 14, "暂无最近阅读", MUTED)?;
-                text.draw(
-                    282,
-                    info_y + 96,
-                    13,
-                    "成功关闭一本 EPUB 后会自动记录",
-                    MUTED,
-                )?;
-            } else {
-                for (index, path) in self.recent.iter().take(RECENT_VISIBLE).enumerate() {
-                    let name = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy())
-                        .unwrap_or_else(|| path.as_os_str().to_string_lossy());
-                    let name = text.fit(14, &name, content_w.saturating_sub(110).min(560))?;
+                text.draw(282, info_y + 62, 14, "暂无最近阅读", palette.muted)?;
+                if info_y + 112 < footer_y - 8 {
                     text.draw(
-                        286,
-                        RECENT_TOP + index as i32 * RECENT_ROW_HEIGHT + 7,
-                        14,
-                        &name,
-                        INK,
+                        282,
+                        info_y + 96,
+                        13,
+                        "成功关闭图书后会自动记录",
+                        palette.muted,
                     )?;
                 }
             }
             let status = text.fit(14, &self.status, content_w.saturating_sub(24))?;
-            text.draw(250, footer_y, 14, &status, MUTED)?;
+            text.draw(250, footer_y, 14, &status, palette.muted)?;
+            self.paint_recent_rows(std::time::Instant::now())?;
             Ok(())
         }
 
         fn paint_browser(&mut self, browser: &Browser) -> WindowResult<()> {
-            self.paint_shell("打开 EPUB")?;
+            let palette = self.theme.palette();
+            self.paint_shell("打开图书")?;
             let top_w = self.surface.width().saturating_sub(278);
             let hover = self.hover_target();
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(242, 102, top_w, 40),
-                    color: PANEL,
+                    color: palette.panel,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(250, 108, 76, 28),
                     color: if hover == HoverTarget::BrowserBack {
-                        HOVER_STRONG
+                        palette.pressed
                     } else {
-                        PANEL
+                        palette.panel
                     },
                 },
             ])?;
@@ -555,22 +630,30 @@ mod enabled {
                 let index = browser.scroll + row;
                 let y = LIST_TOP + row as i32 * ROW_HEIGHT;
                 let selected = index == browser.selected;
-                let row_color = if selected { ACCENT_SOFT } else { PANEL };
-                self.surface.draw(&[
-                    DrawCommand::FillRect {
-                        rect: Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
-                        color: row_color,
+                let row_color = if selected {
+                    palette.button
+                } else {
+                    palette.panel
+                };
+                crate::ui::rounded(
+                    &mut self.surface,
+                    Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
+                    8,
+                    row_color,
+                )?;
+                self.surface.draw(&[DrawCommand::FillRect {
+                    rect: Rect::new(
+                        250,
+                        y,
+                        if selected { 5 } else { 1 },
+                        (ROW_HEIGHT - 5) as u32,
+                    ),
+                    color: if selected {
+                        palette.accent
+                    } else {
+                        palette.border
                     },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(
-                            250,
-                            y,
-                            if selected { 5 } else { 1 },
-                            (ROW_HEIGHT - 5) as u32,
-                        ),
-                        color: if selected { ACCENT } else { BORDER },
-                    },
-                ])?;
+                }])?;
             }
 
             let footer_y = self.surface.height() as i32 - 42;
@@ -578,9 +661,9 @@ mod enabled {
             let path_width = self.surface.width().saturating_sub(360);
             let footer_width = self.surface.width().saturating_sub(280);
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
-            text.draw(260, 114, 14, "‹ 返回", ACCENT)?;
+            text.draw(260, 114, 14, "‹ 返回", palette.accent)?;
             let path = text.fit(13, &browser.directory.display().to_string(), path_width)?;
-            text.draw(350, 115, 13, &path, MUTED)?;
+            text.draw(350, 115, 13, &path, palette.muted)?;
 
             for (row, entry) in browser
                 .entries
@@ -594,26 +677,44 @@ mod enabled {
                     270,
                     y + 13,
                     13,
-                    if entry.directory { "文件夹" } else { "EPUB" },
-                    if entry.directory { MUTED } else { ACCENT },
+                    if entry.directory {
+                        "文件夹"
+                    } else {
+                        crate::publication::path_format(&entry.path).map_or("图书", |f| f.label())
+                    },
+                    if entry.directory {
+                        palette.muted
+                    } else {
+                        palette.accent
+                    },
                 )?;
                 let name = text.fit(15, &entry.name, row_width.saturating_sub(120))?;
-                text.draw(350, y + 11, 15, &name, INK)?;
+                text.draw(350, y + 11, 15, &name, palette.ink)?;
             }
 
             if browser.entries.is_empty() {
-                text.draw(272, LIST_TOP + 30, 15, "当前目录没有 EPUB 文件", MUTED)?;
+                text.draw(
+                    272,
+                    LIST_TOP + 30,
+                    15,
+                    "当前目录没有 EPUB / MOBI / AZW3 文件",
+                    palette.muted,
+                )?;
             }
             if let Some(preview) = &browser.preview {
                 let preview = text.fit(13, preview, footer_width)?;
-                text.draw(250, preview_y, 13, &preview, ACCENT)?;
+                text.draw(250, preview_y, 13, &preview, palette.accent)?;
             }
-            let footer = format!(
-                "{} 项 · Enter 打开 · Backspace 上一级 · Esc 退出",
-                browser.entries.len()
-            );
+            let footer = if self.status.starts_with("无法访问") {
+                self.status.clone()
+            } else {
+                format!(
+                    "{} 项 · Enter 打开 · Backspace 上一级 · Esc 返回书库",
+                    browser.entries.len()
+                )
+            };
             let footer = text.fit(13, &footer, footer_width)?;
-            text.draw(250, footer_y, 13, &footer, MUTED)?;
+            text.draw(250, footer_y, 13, &footer, palette.muted)?;
             Ok(())
         }
 
@@ -694,27 +795,57 @@ mod enabled {
                 return Err("ReadAll main window requires at least 680x460".into());
             }
             self.surface = Surface::new(width, height, RenderLimits::default())?;
+            self.pending_recent_delete = None;
             self.paint()?;
             Ok(true)
         }
 
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if let Some(changed) = self.desktop_home_action(action)? {
+                return Ok(changed);
+            }
+            if action == Action::Command(readall_platform::window::ReaderCommand::Theme)
+                || matches!(action, Action::Click { x, y } if point_in(self.theme_rect(), x, y))
+            {
+                self.pending_recent_delete = None;
+                return self.toggle_theme();
+            }
             if matches!(self.mode, Mode::Browser(_)) {
-                return self.browser_action(action);
+                return match self.browser_action(action) {
+                    Ok(changed) => Ok(changed),
+                    Err(error) => {
+                        self.status = format!("无法访问：{error}");
+                        self.paint()?;
+                        Ok(true)
+                    }
+                };
             }
             match action {
-                Action::Activate => self.open_browser(),
-                Action::Click { x, y } => {
-                    if point_in(self.open_card_rect(), x, y) {
-                        return self.open_browser();
+                Action::Activate => {
+                    if let Some(index) = self.recent_selected {
+                        self.activate_recent(index.saturating_sub(self.recent_scroll))
+                    } else {
+                        self.open_browser()
                     }
-                    for index in 0..self.recent.len().min(RECENT_VISIBLE) {
-                        if point_in(self.recent_row_rect(index), x, y) {
-                            return self.activate_recent(index);
-                        }
-                    }
-                    Ok(false)
                 }
+                Action::Click { x, y } => {
+                    self.pending_recent_delete = None;
+                    self.pointer = Some((x, y));
+                    match self.hover_target() {
+                        HoverTarget::OpenCard => self.open_browser(),
+                        HoverTarget::RecentDelete(index) => {
+                            self.pending_recent_delete = self
+                                .recent
+                                .get(self.recent_scroll.saturating_add(index))
+                                .cloned();
+                            self.paint_recent_rows(std::time::Instant::now())?;
+                            Ok(true)
+                        }
+                        HoverTarget::RecentRow(index) => self.activate_recent(index),
+                        _ => Ok(false),
+                    }
+                }
+                Action::PointerRelease { x, y } => self.release_recent_delete(x, y),
                 Action::Back => Ok(false),
                 Action::PointerMove { x, y } => self.pointer_changed(Some((x, y))),
                 Action::PointerLeave => self.pointer_changed(None),
@@ -727,7 +858,6 @@ mod enabled {
                 | Action::Close
                 | Action::Text(_)
                 | Action::Command(_)
-                | Action::PointerRelease { .. }
                 | Action::Scroll { .. }
                 | Action::PanStart { .. }
                 | Action::PanEnd { .. } => Ok(false),
@@ -742,8 +872,29 @@ mod enabled {
             match &self.mode {
                 Mode::Library => "ReadAll — 书库".into(),
                 Mode::Browser(browser) => {
-                    format!("ReadAll — 打开 EPUB — {}", browser.directory.display())
+                    format!("ReadAll — 打开图书 — {}", browser.directory.display())
                 }
+            }
+        }
+
+        fn precise_scroll(&self) -> bool {
+            true
+        }
+
+        fn animation_interval(&self) -> Option<std::time::Duration> {
+            self.recent_animation_interval().or_else(|| {
+                (self.preview_worker.pending() || self.status_notice.is_some())
+                    .then_some(std::time::Duration::from_millis(40))
+            })
+        }
+
+        fn animation_tick(&mut self) -> WindowResult<bool> {
+            let now = std::time::Instant::now();
+            if self.poll_preview(now) | self.expire_home_notice(now) {
+                self.paint()?;
+                Ok(true)
+            } else {
+                self.tick_recent_rows(now)
             }
         }
 
@@ -762,6 +913,14 @@ mod enabled {
         writeln!(output, "GUI 字体: {:?}", ui_font.path())?;
         loop {
             let mut home = Home::new(1040, 700, &ui_font)?;
+            if let Ok(store) = Store::from_environment() {
+                match store.settings() {
+                    Ok(settings) => home.theme = settings.theme,
+                    Err(error) => home.status = format!("读取主题失败：{error}"),
+                }
+                home.theme_store = Some(store);
+                home.paint()?;
+            }
             let report: WindowReport = window::run(&mut home, WindowOptions::default())?;
             let Some(book) = home.selected_book.take() else {
                 writeln!(
@@ -771,7 +930,7 @@ mod enabled {
                 )?;
                 return Ok(());
             };
-            writeln!(output, "正在打开 EPUB: {:?}", book)?;
+            writeln!(output, "正在打开图书: {:?}", book)?;
             output.flush()?;
             match crate::native_epub::open_path(&book, output) {
                 Ok(()) => {
@@ -782,7 +941,7 @@ mod enabled {
                     }
                 }
                 Err(error) => {
-                    writeln!(output, "无法打开 EPUB: {error}")?;
+                    writeln!(output, "无法打开图书: {error}")?;
                     match crate::diagnostics::log_epub_failure(&book, error.as_ref()) {
                         Ok(path) => writeln!(output, "错误日志: {}", path.display())?,
                         Err(log_error) => writeln!(
@@ -840,13 +999,26 @@ mod enabled {
             fs::write(temp.0.join("中文图书.epub"), b"x").unwrap();
             fs::write(temp.0.join("a.txt"), b"x").unwrap();
             fs::write(temp.0.join("A.EPUB"), b"x").unwrap();
+            fs::write(temp.0.join("B.MOBI"), b"x").unwrap();
+            fs::write(temp.0.join("c.azw"), b"x").unwrap();
+            fs::write(temp.0.join("d.azw3"), b"x").unwrap();
             let browser = Browser::load(temp.0.clone()).unwrap();
             let names: Vec<_> = browser
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, ["中文目录", "A.EPUB", "中文图书.epub"]);
+            assert_eq!(
+                names,
+                [
+                    "中文目录",
+                    "A.EPUB",
+                    "B.MOBI",
+                    "c.azw",
+                    "d.azw3",
+                    "中文图书.epub"
+                ]
+            );
         }
 
         #[test]
@@ -861,6 +1033,21 @@ mod enabled {
             let invalid = temp.0.join("invalid.epub");
             fs::write(&invalid, b"not an epub").unwrap();
             assert_eq!(epub_preview(&invalid), "元数据预览不可用，仍可尝试打开");
+        }
+
+        #[test]
+        fn mobi_preview_uses_metadata_without_decompressing_text() {
+            let temp = Temp::new();
+            let path = temp.0.join("book.MOBI");
+            let mut bytes = crate::test_mobi::make_mobi("<html><body>AAAA</body></html>");
+            // Break the text record only; metadata preview should still succeed.
+            let start = u32::from_be_bytes(bytes[86..90].try_into().unwrap()) as usize;
+            bytes[start] = 8;
+            bytes.truncate(start + 1);
+            fs::write(&path, &bytes).unwrap();
+            let preview = epub_preview(&path);
+            assert!(preview.contains("ReadAll MOBI 中文") && preview.contains("ReadAll Tests"));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
         }
 
         #[test]
@@ -924,20 +1111,29 @@ mod enabled {
                 .min(browser.entries.len().saturating_sub(browser.scroll));
             let mut active = 0;
             for row in 0..visible {
-                let y = (LIST_TOP + row as i32 * ROW_HEIGHT + 2) as u32;
+                // Sample the interior, not the antialiased corner of the rounded row.
+                let y = (LIST_TOP + row as i32 * ROW_HEIGHT + 20) as u32;
                 let pixel = home.surface.pixel(home.surface.width() - 44, y).unwrap();
                 let current = browser.scroll + row == selected;
                 assert_eq!(
                     pixel,
-                    if current { ACCENT_SOFT } else { PANEL },
+                    if current {
+                        Theme::Paper.palette().button
+                    } else {
+                        Theme::Paper.palette().panel
+                    },
                     "row {}",
                     browser.scroll + row
                 );
                 assert_eq!(
                     home.surface.pixel(252, y),
-                    Some(if current { ACCENT } else { PANEL })
+                    Some(if current {
+                        Theme::Paper.palette().accent
+                    } else {
+                        Theme::Paper.palette().panel
+                    })
                 );
-                active += usize::from(pixel == ACCENT_SOFT);
+                active += usize::from(pixel == Theme::Paper.palette().button);
             }
             assert_eq!(active, usize::from(!browser.entries.is_empty()));
         }
@@ -960,6 +1156,17 @@ mod enabled {
             };
             assert!(home.action(motion).unwrap());
             assert_browser_highlight(&home, 1);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                home.poll_preview(
+                    std::time::Instant::now() + std::time::Duration::from_millis(200),
+                );
+                if matches!(&home.mode,Mode::Browser(b) if b.preview.as_ref().is_some_and(|text|text.contains("ReadAll")))
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             let Mode::Browser(browser) = &home.mode else {
                 unreachable!()
             };

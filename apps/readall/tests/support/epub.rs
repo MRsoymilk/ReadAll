@@ -219,6 +219,29 @@ pub fn make_epub_with_resources(
     build_epub_all("ReadAll Styled Test", spines, None, None, resources)
 }
 
+/// Named spine paths exercise real ../Images references and standalone SVG origins.
+#[allow(dead_code)]
+pub fn make_publication_with_paths(
+    chapters: Vec<(&str, &str, Vec<u8>)>,
+    resources: Vec<(&str, &str, Vec<u8>)>,
+) -> Vec<u8> {
+    let ids: Vec<_> = (0..chapters.len()).map(|i| format!("chapter{i}")).collect();
+    let resource_ids: Vec<_> = (0..resources.len())
+        .map(|i| format!("resource{i}"))
+        .collect();
+    let chapters = chapters
+        .into_iter()
+        .enumerate()
+        .map(|(i, (path, mime, bytes))| (ids[i].as_str(), path, mime, bytes))
+        .collect();
+    let resources = resources
+        .into_iter()
+        .enumerate()
+        .map(|(i, (path, mime, bytes))| (resource_ids[i].as_str(), path, mime, bytes))
+        .collect();
+    build_epub_all("ReadAll image paths", chapters, None, None, resources)
+}
+
 #[allow(dead_code)]
 pub fn make_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
     fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], bytes: &[u8]) {

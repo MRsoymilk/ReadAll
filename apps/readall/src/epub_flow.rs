@@ -79,7 +79,11 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
             identity: (book.id(), spine),
         })
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+    #[cfg(any(
+        test,
+        feature = "mobile",
+        all(target_os = "linux", feature = "wayland")
+    ))]
     pub(crate) fn image(
         &self,
         index: usize,
@@ -87,7 +91,11 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
     ) -> Option<std::sync::Arc<readall_image::RgbaImage>> {
         self.images.borrow_mut().get_with_fonts(index, fonts)
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+    #[cfg(any(
+        test,
+        feature = "mobile",
+        all(target_os = "linux", feature = "wayland")
+    ))]
     pub(crate) fn text_link(&self, range: Range<usize>) -> Option<&readall_epub::ContentLink> {
         let index = self
             .content
@@ -98,7 +106,11 @@ impl<'book, 'archive> Chapter<'book, 'archive> {
             .get(index)
             .filter(|link| link.text.start < range.end && range.start < link.text.end)
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
+    #[cfg(any(
+        test,
+        feature = "mobile",
+        all(target_os = "linux", feature = "wayland")
+    ))]
     pub(crate) fn image_link(&self, image: usize) -> Option<&readall_epub::ContentLink> {
         let index = self
             .content
@@ -169,6 +181,7 @@ struct Key {
     width: u32,
     height: u32,
     margin: u32,
+    reader_chrome: bool,
 }
 struct Layout {
     key: Key,
@@ -354,6 +367,14 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
         {
             return Err("invalid EPUB page geometry or renderer options".into());
         }
+        let mut surface = Surface::new_scaled(
+            (options.width, options.height),
+            options
+                .raster_size
+                .unwrap_or((options.width, options.height)),
+            RenderLimits::default(),
+        )?;
+        self.fonts.set_raster_scale(surface.pixel_scale());
         self.fonts.use_chapter(chapter);
         for cache in self.fonts.caches.values_mut() {
             cache.begin_page();
@@ -364,6 +385,7 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
             width: options.width,
             height: options.height,
             margin: options.margin,
+            reader_chrome: options.reader_chrome,
         };
         if self.layout.as_ref().is_none_or(|layout| layout.key != key) {
             self.layout = Some(build(chapter, options, &mut self.fonts, key)?);
@@ -401,18 +423,13 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
             .pages
             .get(page)
             .ok_or("page is outside this EPUB chapter")?;
-        let mut surface = Surface::new(options.width, options.height, RenderLimits::default())?;
         surface.draw(&[DrawCommand::FillRect {
             rect: Rect::new(0, 0, options.width, options.height),
             color: self.theme.colors().0,
         }])?;
         let margin = options.margin as i32;
-        let clip = Rect::new(
-            margin,
-            margin,
-            options.width - options.margin * 2,
-            options.height - options.margin * 2,
-        );
+        let clip = options.content_rect();
+        let top = clip.y;
         let mut decorations = Vec::new();
         for painted in &current.decorations {
             painted.commands(margin, clip, &mut decorations);
@@ -435,7 +452,7 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
                         let x = line.x + glyph.x;
                         let rect = Rect::new(
                             margin + x.round() as i32,
-                            margin + (line.baseline - glyph.ascent).floor() as i32,
+                            top + (line.baseline - glyph.ascent).floor() as i32,
                             glyph.advance.ceil().max(1.0) as u32,
                             glyph.height.ceil().max(1.0) as u32,
                         )
@@ -456,7 +473,11 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
                             blend_work = blend_work.saturating_add(
                                 u64::from(mask.width())
                                     * u64::from(mask.height())
-                                    * u64::from(glyph.bold + 1),
+                                    * ((glyph.bold as f32 * surface.pixel_scale().0)
+                                        .round()
+                                        .clamp(0.0, 64.0)
+                                        as u64
+                                        + 1),
                             );
                             if blend_work > 64 * 1024 * 1024 {
                                 return Err("EPUB glyph blending budget exceeded".into());
@@ -465,7 +486,7 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
                                 mask,
                                 (
                                     margin + x.round() as i32,
-                                    margin + (line.baseline + glyph.y).round() as i32,
+                                    top + (line.baseline + glyph.y).round() as i32,
                                 ),
                                 colors.color(&glyph.source, glyph.style),
                                 clip,
@@ -473,14 +494,14 @@ impl<'f, 'd> EpubRenderer<'f, 'd> {
                                 glyph.italic,
                             )?;
                             raster_work += cache.raster_work - before;
-                            if raster_work > 128 * 1024 * 1024 {
+                            if raster_work > cache.raster_budget() {
                                 return Err("EPUB aggregate raster work budget exceeded".into());
                             }
                         }
                     }
                 }
                 Item::Image { index, rect } => {
-                    let rect = Rect::new(rect.x + margin, rect.y + margin, rect.width, rect.height);
+                    let rect = Rect::new(rect.x + margin, rect.y + top, rect.width, rect.height);
                     image_hits.push((rect, *index));
                     let svg_fonts: Vec<_> = std::iter::once(self.fonts.font.data())
                         .chain(self.fonts.fallbacks.iter().map(|font| font.data()))

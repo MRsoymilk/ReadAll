@@ -1,4 +1,4 @@
-//! Versioned, bounded recent-EPUB list for the native library.
+//! Versioned, bounded recent-books list for the native library.
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -97,12 +97,7 @@ impl RecentStore {
             if entries.iter().any(|existing| existing == &path) {
                 continue;
             }
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
-            {
+            if path.is_file() && crate::publication::path_format(&path).is_some() {
                 entries.push(path);
             }
         }
@@ -116,14 +111,10 @@ impl RecentStore {
                 "recent EPUB path must be an existing absolute file",
             ));
         }
-        if !path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
-        {
+        if crate::publication::path_format(path).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "recent EPUB path must have .epub extension",
+                "recent book path must have an EPUB or MOBI-compatible extension",
             ));
         }
         let raw = path.as_os_str().as_bytes();
@@ -139,6 +130,25 @@ impl RecentStore {
         entries.insert(0, path.to_path_buf());
         entries.truncate(MAX_RECENT);
         self.write(&entries)
+    }
+
+    /// Remove a history entry, never the book or its reading data. Reload the
+    /// current list instead of writing a potentially stale library-window snapshot.
+    /// Return the new list only after the atomic state-file replacement succeeds.
+    pub(crate) fn remove(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let raw = path.as_os_str().as_bytes();
+        if !path.is_absolute() || raw.is_empty() || raw.len() > MAX_PATH_BYTES || raw.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid recent-book removal path",
+            ));
+        }
+        // A file may already have been moved/deleted since the list was displayed;
+        // do not require it to still exist in order to remove its stale history.
+        let mut entries = self.load()?;
+        entries.retain(|existing| existing != path);
+        self.write(&entries)?;
+        Ok(entries)
     }
 
     fn write(&self, entries: &[PathBuf]) -> io::Result<()> {
@@ -284,7 +294,7 @@ mod tests {
         fs::create_dir(&books).unwrap();
         let first = books.join("first.epub");
         fs::write(&first, b"x").unwrap();
-        let second = books.join(OsString::from_vec(b"second-\xff.epub".to_vec()));
+        let second = books.join(OsString::from_vec(b"second-\xff.MOBI".to_vec()));
         fs::write(&second, b"y").unwrap();
 
         let store = RecentStore::new(root);
@@ -294,6 +304,77 @@ mod tests {
 
         store.record(&first).unwrap();
         assert_eq!(store.load().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn removal_persists_without_deleting_books_or_other_reading_data() {
+        let temp = Temp::new();
+        let root = temp.0.join("state");
+        let store = RecentStore::new(root.clone());
+        let paths = [
+            temp.0.join("a.epub"),
+            temp.0.join("b.mobi"),
+            temp.0.join(OsString::from_vec(b"c-\xff.AZW3".to_vec())),
+        ];
+        for path in &paths {
+            fs::write(path, b"original book bytes").unwrap();
+            store.record(path).unwrap();
+        }
+        let annotations = root.join("annotations.keep");
+        fs::write(&annotations, b"bookmark and progress remain").unwrap();
+        assert_eq!(
+            store.remove(&paths[1]).unwrap(),
+            vec![paths[2].clone(), paths[0].clone()]
+        );
+        assert_eq!(
+            RecentStore::new(root).load().unwrap(),
+            vec![paths[2].clone(), paths[0].clone()]
+        );
+        for path in &paths {
+            assert_eq!(fs::read(path).unwrap(), b"original book bytes");
+        }
+        assert_eq!(
+            fs::read(annotations).unwrap(),
+            b"bookmark and progress remain"
+        );
+        // Non-UTF-8 filenames are compared by path bytes, not display strings.
+        assert_eq!(store.remove(&paths[2]).unwrap(), vec![paths[0].clone()]);
+        assert!(store.remove(&paths[0]).unwrap().is_empty());
+        assert!(store.remove(&paths[0]).unwrap().is_empty());
+        store.record(&paths[0]).unwrap();
+        assert_eq!(store.load().unwrap(), vec![paths[0].clone()]);
+    }
+
+    #[test]
+    fn removal_reloads_new_entries_and_can_prune_missing_files() {
+        let temp = Temp::new();
+        let store = RecentStore::new(temp.0.join("state"));
+        let old = temp.0.join("old.epub");
+        let new = temp.0.join("new.azw3");
+        fs::write(&old, b"old").unwrap();
+        store.record(&old).unwrap();
+        let _stale_view = store.load().unwrap();
+        fs::write(&new, b"new").unwrap();
+        store.record(&new).unwrap();
+        fs::remove_file(&old).unwrap();
+        assert_eq!(store.remove(&old).unwrap(), vec![new.clone()]);
+        assert_eq!(store.load().unwrap(), vec![new]);
+    }
+
+    #[test]
+    fn removal_errors_do_not_overwrite_corrupt_state_or_books() {
+        let temp = Temp::new();
+        let store = RecentStore::new(temp.0.join("state"));
+        let book = temp.0.join("book.epub");
+        fs::write(&book, b"source").unwrap();
+        store.record(&book).unwrap();
+        let before = fs::read(store.path()).unwrap();
+        assert!(store.remove(Path::new("book.epub")).is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), before);
+        fs::write(store.path(), b"corrupt state\n").unwrap();
+        assert!(store.remove(&book).is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), b"corrupt state\n");
+        assert_eq!(fs::read(book).unwrap(), b"source");
     }
 
     #[test]

@@ -183,7 +183,7 @@ impl BoxPaint {
     pub(super) fn commands(&self, margin: i32, clip: Rect, output: &mut Vec<DrawCommand>) {
         let rect = Rect::new(
             margin + self.x.round() as i32,
-            margin + self.y.round() as i32,
+            clip.y + self.y.round() as i32,
             self.width.round().max(0.0) as u32,
             self.height.round().max(0.0) as u32,
         );

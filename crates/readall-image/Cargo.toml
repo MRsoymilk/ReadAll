@@ -9,6 +9,8 @@ readall-archive.workspace = true
 # Isolated pure-Rust WebP codec; PNG and publication layout remain native ReadAll code.
 image-webp = { version = "=0.2.4", default-features = false }
 jpeg-decoder = { version = "=0.3.2", default-features = false }
+# Already present through resvg; expose a bounded first-frame decoder for book images.
+gif = { version = "=0.14.2", default-features = false, features = ["std"] }
 resvg = { version = "=0.48.1", default-features = false, features = ["text", "raster-images"] }
 roxmltree = "=0.21.1"
 

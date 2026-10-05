@@ -24,16 +24,27 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
     if matches!(args[0].to_str(), Some("--help" | "-h")) {
         writeln!(
             output,
-            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n  readall diagnostics\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--data-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nEPUB supports CSS text/block properties, PNG/JPEG/WebP/SVG, shaping/bidi, font fallback, static TrueType @font-face selection and epub-v1/v2/v3 progress. Code blocks preserve line breaks, spaces and tabs; legacy positions are migrated. Automatic syntax highlighting supports C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; author multicolor styles remain unchanged. Full EPUB styling, WOFF/obfuscated fonts and PDF reading remain unimplemented; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
+            "ReadAll {} — native Rust reader foundations\n\nCommands:\n  readall inspect <book.txt>\n  readall epub-info <book.epub>\n  readall epub-text <book.epub> [--spine N]\n  readall render-epub <book.epub> <new-output.ppm> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options]\n  readall read <book.txt> [--columns N] [--rows N] [--page N | --at LOCATOR]\n  readall render-demo <new-output.ppm>\n  readall render-text <book.txt> <new-output.ppm> --font <font.ttf> [--face N] [--width N] [--height N] [--font-size N] [--margin N] [--page N | --at LOCATOR] [--missing error|replacement]\n  readall licenses\n  readall diagnostics\n\nPages are 1-based. Columns: 4..4096. Rows: 1..1024.\nNative Linux TXT window: readall open <book.txt> --font <font.ttf> [page options] [--progress on|off] [--state-dir DIR] [--display SOCKET] [--frames 1].\nNative Linux EPUB window: readall open-epub <book.epub> --font <font.ttf> [--spine N | --at EPUB_LOCATOR] [page options] [--progress on|off] [--state-dir DIR] [--data-dir DIR] [--display SOCKET] [--frames 1] (build with --features wayland).\nEPUB supports CSS text/block properties, PNG/JPEG/WebP/GIF/SVG, shaping/bidi, font fallback, static TrueType @font-face selection and epub-v1/v2/v3 progress. Code blocks preserve line breaks, spaces and tabs; legacy positions are migrated. Automatic syntax highlighting supports C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; author multicolor styles remain unchanged. Full EPUB styling, WOFF/obfuscated fonts and PDF reading remain unimplemented; Windows/Android windows remain unimplemented.\nrender-demo writes a graphics calibration image, not an ebook page, and never overwrites an existing file.",
             env!("CARGO_PKG_VERSION")
         )?;
         writeln!(
             output,
             "\nReader tools:\n  readall search <book.epub> <query> [--case-sensitive]\n  readall annotations <book.epub> [--data-dir DIR]\n  readall bookmark <book.epub> <EPUB_LOCATOR> [label]\n  readall note <book.epub> <EPUB_LOCATOR> [text]\n  readall highlight <book.epub> <EPUB_LOCATOR> <end-utf8-offset> [text]\n  readall annotation-remove <book.epub> <ID>\n  readall settings [theme|size|margin|line-spacing|page-mode VALUE] [--data-dir DIR]\nAll annotation commands accept --data-dir DIR. EPUB render/open accept repeated --fallback-font FILE.\nReader shortcuts: F2 search, F3 annotations, F4 bookmark, F5 settings, F6 theme, F7 note, F8 highlight, F9 text selection priority; Ctrl+C/Ctrl+V clipboard. EPUB body text is draggable by default, without F9; blank clicks do not turn pages. Releasing a selection shows Copy/Highlight/Note/Cancel actions. Links and images activate on release only when not dragging. F5 Page mode: slide (horizontal), book (2D paper curl), scroll (continuous vertical); settings page-mode slide|book|scroll persists it. Use wheel, touchpad, PageUp/PageDown, arrows or toolbar buttons; right-button drag navigates, left-button drag still selects. Esc stops motion, clears a selection or dismisses the active tool first. Native text input uses the compositor XKB keymap; IME composition is not integrated yet."
         )?;
+        writeln!(
+            output,
+            "\nMOBI reading (unencrypted MOBI6/7):\n  readall <book.mobi>\n  readall open-mobi <book.mobi> [reader options]\n  readall mobi-info <book.mobi>\n  readall mobi-text <book.mobi> [--spine N]\n  readall render-mobi <book.mobi> <new-output.ppm> --font <font.ttf> [page options]\nSearch, annotations and all three page modes also accept MOBI. UTF-8/Windows-1252 and uncompressed/PalmDOC/HUFF-CDIC are supported. Dual files use their legacy MOBI section; standalone reflowable AZW3/KF8 is supported; KFX, fixed-layout KF8 and DRM remain unsupported.\nAZW3 commands: readall <book.azw3>, open-azw3, azw3-info, azw3-text and render-azw3 (same options as MOBI)."
+        )?;
         return Ok(());
     }
+    if args.len() == 1 && crate::publication::path_format(std::path::Path::new(&args[0])).is_some()
+    {
+        return crate::publication::open(&args, output);
+    }
     let command = args[0].to_str().ok_or("command must be UTF-8")?;
+    if matches!(command, "mobi-info" | "azw3-info") {
+        return mobi_info(&args[1..], output);
+    }
     if matches!(
         command,
         "search"
@@ -56,6 +67,11 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
             option_env!("READALL_BUILTIN_FONT_COMMIT").unwrap_or("not bundled in this build"),
             include_str!("../../../licenses/LXGW_WenKai_Lite_OFL.txt")
         )?;
+        writeln!(
+            output,
+            "\n{}",
+            include_str!("../../../licenses/foliate-js-MIT.txt")
+        )?;
         return Ok(());
     }
     if command == "diagnostics" {
@@ -74,21 +90,26 @@ pub fn run(args: Vec<OsString>, output: &mut impl Write) -> Result<()> {
         return Ok(());
     }
     if command == "open" {
+        if args.get(1).is_some_and(|path| {
+            crate::publication::path_format(std::path::Path::new(path)).is_some()
+        }) {
+            return crate::publication::open(&args[1..], output);
+        }
         return crate::native::run(&args[1..], output);
     }
-    if command == "open-epub" {
-        return crate::native_epub::run(&args[1..], output);
+    if matches!(command, "open-epub" | "open-mobi" | "open-azw3") {
+        return crate::publication::open(&args[1..], output);
     }
     if command == "render-text" {
         return crate::text_page::run(&args[1..], output);
     }
-    if command == "render-epub" {
+    if matches!(command, "render-epub" | "render-mobi" | "render-azw3") {
         return crate::epub_page::run(&args[1..], output);
     }
     if command == "epub-info" {
         return epub_info(&args[1..], output);
     }
-    if command == "epub-text" {
+    if matches!(command, "epub-text" | "mobi-text" | "azw3-text") {
         return epub_text(&args[1..], output);
     }
     if !matches!(command, "inspect" | "read" | "render-demo") {
@@ -219,6 +240,37 @@ fn read_page(document: &TextDocument, options: ReadOptions, output: &mut impl Wr
     Ok(())
 }
 
+fn mobi_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
+    if args.len() != 1 {
+        return Err("mobi-info expects exactly one MOBI path".into());
+    }
+    let limits = readall_mobi::MobiLimits::default();
+    let bytes = read_bounded(
+        &mut LocalFileSource::open(PathBuf::from(&args[0]))?,
+        limits.max_file_bytes,
+    )?;
+    let book = readall_mobi::MobiBook::parse(&bytes, limits)?;
+    let meta = book.metadata();
+    writeln!(
+        output,
+        "Format: {}\nTitle: {}\nCreator: {}\nLanguage: {}\nEncoding: {}\nCompression: {}\nText records: {}\nText bytes: {}\nDual MOBI/KF8: {}",
+        if meta.version == 8 {
+            "AZW3/KF8".to_owned()
+        } else {
+            format!("MOBI{}", meta.version)
+        },
+        meta.title,
+        meta.author.as_deref().unwrap_or("(unknown)"),
+        meta.language.as_deref().unwrap_or("(unknown)"),
+        meta.encoding,
+        meta.compression,
+        meta.text_records,
+        meta.text_bytes,
+        meta.dual_format
+    )?;
+    Ok(())
+}
+
 fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
     if args.len() != 1 {
         return Err("epub-info expects exactly one EPUB path".into());
@@ -226,14 +278,20 @@ fn epub_info(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let limits = EpubLimits::default();
     let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
     let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
-    let book = EpubBook::parse(&bytes, limits)?;
-    write_epub_info(&book, output)
+    let prepared = crate::publication::prepare(bytes, std::path::Path::new(&args[0]))?;
+    let book = EpubBook::parse(&prepared.bytes, limits)?;
+    write_epub_info(&book, prepared.format, output)
 }
 
-fn write_epub_info(book: &EpubBook<'_>, output: &mut impl Write) -> Result<()> {
+fn write_epub_info(
+    book: &EpubBook<'_>,
+    format: crate::publication::Format,
+    output: &mut impl Write,
+) -> Result<()> {
     writeln!(
         output,
-        "Format: EPUB\nTitle: {}\nCreator: {}\nLanguage: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
+        "Format: {}\nTitle: {}\nCreator: {}\nLanguage: {}\nPackage: {}\nManifest items: {}\nSpine items: {}",
+        format.label(),
         book.title().unwrap_or("(untitled)"),
         book.creator().unwrap_or("(unknown)"),
         book.language().unwrap_or("(unknown)"),
@@ -313,14 +371,16 @@ fn epub_text(args: &[OsString], output: &mut impl Write) -> Result<()> {
     let limits = EpubLimits::default();
     let mut source = LocalFileSource::open(PathBuf::from(&args[0]))?;
     let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
-    let book = EpubBook::parse(&bytes, limits)?;
+    let prepared = crate::publication::prepare(bytes, std::path::Path::new(&args[0]))?;
+    let book = EpubBook::parse(&prepared.bytes, limits)?;
     let item = book
         .spine_item(spine)
         .ok_or("spine number is outside this EPUB")?;
     let text = book.read_spine_text(spine)?;
     writeln!(
         output,
-        "EPUB spine text (XHTML subset; CSS/images not rendered)\nTitle: {}\nSpine: {}/{}\nResource: {}\n\n{}",
+        "{} spine text (XHTML subset; CSS/images not rendered)\nTitle: {}\nSpine: {}/{}\nResource: {}\n\n{}",
+        prepared.format.label(),
         book.title().unwrap_or("(untitled)"),
         spine + 1,
         book.spine().len(),
@@ -403,7 +463,7 @@ mod tests {
         let bytes = test_epub::make_epub_with_navigation();
         let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
         let mut output = Vec::new();
-        write_epub_info(&book, &mut output).unwrap();
+        write_epub_info(&book, crate::publication::Format::Epub, &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("Navigation entries: 3"));
         assert!(text.contains("正式目录第一章 -> spine 1#intro"));

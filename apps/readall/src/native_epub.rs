@@ -8,26 +8,45 @@ pub(crate) fn run(_: &[OsString], _: &mut impl Write) -> Result<()> {
     Err("native EPUB window unavailable: on Linux build with --features wayland; Windows/Android windows are not implemented".into())
 }
 
-#[cfg(all(target_os = "linux", feature = "wayland"))]
+#[cfg(feature = "mobile")]
+pub(crate) use enabled::mobile_ui::Presentation;
+
+#[cfg(any(feature = "mobile", all(target_os = "linux", feature = "wayland")))]
 mod enabled {
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     mod async_reader;
     #[cfg(test)]
+    mod azw3_tests;
+    mod desktop;
+    #[cfg(test)]
     mod loading_tests;
+    mod menu_style;
+    #[cfg(test)]
+    mod mobi_tests;
+    #[cfg(feature = "mobile")]
+    pub(crate) mod mobile_ui;
     mod motion;
+    mod scroll_physics;
     #[cfg(test)]
     mod selection_tests;
+    #[cfg(test)]
+    mod theme_tests;
+    mod toc_view;
     mod tools;
     use super::*;
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     use crate::{
         diagnostics::{ResultContext, boxed_stage},
+        ui::builtin_font_bytes,
+    };
+    use crate::{
         epub_session::{Action as ReaderAction, EpubSession, Start, TocEntry},
         progress::EpubProgressStore,
-        svg_icon::{
-            self, CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, LIST, MINUS, PLUS,
-        },
+        svg_icon::{self, CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP},
         text_page::Options,
-        ui::{UiFont, UiPainter, builtin_font_bytes},
+        ui::{UiFont, UiPainter},
     };
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     use readall_core::read_bounded;
     use readall_epub::{EpubBook, EpubLimits, EpubLocator};
     use readall_font::{Font, FontLimits};
@@ -35,7 +54,9 @@ mod enabled {
         LocalFileSource,
         window::{Action, WindowHandler, WindowOptions, WindowResult},
     };
-    use readall_render::{Color, DrawCommand, Rect, Surface};
+    #[cfg(test)]
+    use readall_render::Color;
+    use readall_render::{DrawCommand, Rect, Surface};
     use std::{
         path::{Path, PathBuf},
         time::Duration,
@@ -54,6 +75,14 @@ mod enabled {
         Collapsed,
         Toolbar(usize),
         TocRow(usize),
+        ToolDock(usize),
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) enum HostEffect {
+        Copy(String),
+        Paste,
+        OpenUrl(String),
     }
 
     struct ReaderWindow<'book, 'archive, 'font, 'font_bytes> {
@@ -65,13 +94,19 @@ mod enabled {
         toc_loaded: bool,
         toc_selected: usize,
         toc_scroll: usize,
+        toc_view: toc_view::TocView,
+        defer_paint: bool,
+        paint_pending: bool,
         toolbar: ToolbarMode,
         pointer: Option<(i32, i32)>,
         title_scroll: u32,
         title_marquee_span: u32,
+        desktop_notice: Option<(String, std::time::Instant)>,
         close_requested: bool,
         tools: tools::Tools,
         motion: motion::Motion,
+        // Some routes platform side effects through the mobile host; None keeps Linux adapters.
+        host_effects: Option<std::collections::VecDeque<HostEffect>>,
     }
 
     fn point_in(rect: Rect, x: i32, y: i32) -> bool {
@@ -119,13 +154,18 @@ mod enabled {
                 toc_loaded: false,
                 toc_selected: 0,
                 toc_scroll: 0,
+                toc_view: toc_view::TocView::default(),
+                defer_paint: false,
+                paint_pending: false,
                 toolbar: ToolbarMode::Expanded,
                 pointer: None,
                 title_scroll: 0,
                 title_marquee_span: 0,
+                desktop_notice: None,
                 close_requested: false,
                 tools: tools::Tools::default(),
                 motion: motion::Motion::default(),
+                host_effects: None,
             };
             reader.sync_toc_selection();
             reader.reset_motion()?;
@@ -190,7 +230,20 @@ mod enabled {
             }
         }
 
+        fn compact_toc(&self) -> bool {
+            self.toolbar == ToolbarMode::Toc && self.surface.height() < 420
+        }
+
         fn toc_panel_rect(&self) -> Rect {
+            if self.compact_toc() {
+                let width = 520_u32.min(self.surface.width().saturating_sub(32));
+                return Rect::new(
+                    ((self.surface.width() - width) / 2) as i32,
+                    44,
+                    width,
+                    self.surface.height().saturating_sub(98),
+                );
+            }
             let toolbar = self.toolbar_rect();
             let width = 520_u32.min(self.surface.width().saturating_sub(32));
             let max_height = self.surface.height().saturating_sub(290).min(390);
@@ -208,6 +261,8 @@ mod enabled {
         }
 
         fn keep_toc_selected_visible(&mut self) {
+            // Keyboard selection remains row-based; touch scrolling retains fractions elsewhere.
+            self.toc_view.fraction = 0.0;
             let visible = self.visible_toc_rows();
             if self.toc_selected < self.toc_scroll {
                 self.toc_scroll = self.toc_selected;
@@ -243,21 +298,24 @@ mod enabled {
         }
 
         fn refresh_surface(&mut self) -> WindowResult<()> {
+            if self.defer_paint {
+                self.paint_pending = true;
+                return Ok(());
+            }
+            self.paint_pending = false;
+            self.observe_desktop_notice(std::time::Instant::now());
             self.surface = self.session.frame().surface.clone();
             self.draw_link_marks()?;
             self.draw_marks()?;
             self.draw_page_motion()?;
             let width = self.surface.width();
             let height = self.surface.height();
-            let (background, theme_ink) = self.session.settings().theme.colors();
-            let header = Color {
-                a: 245,
-                ..background
-            };
-            let border = Color::rgba(224, 228, 234, 255);
-            let ink = theme_ink;
-            let muted = Color::rgba(112, 121, 133, 255);
-            let accent = Color::rgba(55, 104, 190, 255);
+            let palette = self.session.settings().theme.palette();
+            let header = self.session.settings().theme.colors().0;
+            let border = palette.border;
+            let ink = palette.ink;
+            let muted = palette.muted;
+            let accent = palette.accent;
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(0, 0, width, 32),
@@ -308,7 +366,7 @@ mod enabled {
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: Rect::new(16, height.saturating_sub(3) as i32, track_w, 2),
-                    color: Color::rgba(200, 206, 214, 150),
+                    color: palette.border,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(16, height.saturating_sub(3) as i32, filled.min(track_w), 2),
@@ -320,6 +378,7 @@ mod enabled {
                 self.draw_toc()?;
             }
             match self.toolbar {
+                ToolbarMode::Toc if self.compact_toc() => self.draw_collapsed_control()?,
                 ToolbarMode::Collapsed => self.draw_collapsed_control()?,
                 ToolbarMode::Expanded | ToolbarMode::Toc => self.draw_toolbar()?,
             }
@@ -328,217 +387,13 @@ mod enabled {
         }
 
         fn draw_collapsed_control(&mut self) -> WindowResult<()> {
-            let rect = self.collapsed_rect();
-            let hovered = self.hover_target() == ReaderHover::Collapsed;
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 2, rect.y + 2, rect.width, rect.height),
-                    color: Color::rgba(0, 0, 0, 28),
-                },
-                DrawCommand::FillRect {
-                    rect,
-                    color: if hovered {
-                        Color::rgba(31, 37, 47, 232)
-                    } else {
-                        Color::rgba(31, 37, 47, 185)
-                    },
-                },
-            ])?;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_UP,
-                Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 4, 22, 22),
-                Color::rgba(245, 248, 252, if hovered { 255 } else { 220 }),
-            )?;
-            Ok(())
+            self.draw_modern_collapsed()
         }
-
         fn draw_toolbar(&mut self) -> WindowResult<()> {
-            let rect = self.toolbar_rect();
-            let hover = self.hover_target();
-            let handle = self.toolbar_button_rect(5);
-            let prev = self.toolbar_button_rect(0);
-            let toc = self.toolbar_button_rect(1);
-            let smaller = self.toolbar_button_rect(2);
-            let larger = self.toolbar_button_rect(3);
-            let next = self.toolbar_button_rect(4);
-            let line = Color::rgba(255, 255, 255, 28);
-            let panel = Color::rgba(31, 37, 47, 225);
-            let hover_fill = Color::rgba(255, 255, 255, 34);
-            let active_fill = Color::rgba(70, 117, 195, 225);
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 3, rect.y + 4, rect.width, rect.height),
-                    color: Color::rgba(0, 0, 0, 34),
-                },
-                DrawCommand::FillRect { rect, color: panel },
-                DrawCommand::FillRect {
-                    rect: Rect::new(rect.x + 10, rect.y + 28, rect.width.saturating_sub(20), 1),
-                    color: line,
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(
-                        prev.x + prev.width as i32 + 10,
-                        prev.y + 43,
-                        next.x.saturating_sub(prev.x + prev.width as i32 + 20) as u32,
-                        1,
-                    ),
-                    color: line,
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(
-                        prev.x + prev.width as i32 + 10,
-                        prev.y + 87,
-                        next.x.saturating_sub(prev.x + prev.width as i32 + 20) as u32,
-                        1,
-                    ),
-                    color: line,
-                },
-            ])?;
-
-            for (index, button) in [
-                (0, prev),
-                (1, toc),
-                (2, smaller),
-                (3, larger),
-                (4, next),
-                (5, handle),
-            ] {
-                let hovered = hover == ReaderHover::Toolbar(index);
-                let active = index == 1 && self.toolbar == ToolbarMode::Toc;
-                if hovered || active {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: if index == 5 {
-                            Rect::new(
-                                button.x + 8,
-                                button.y + 3,
-                                button.width.saturating_sub(16),
-                                22,
-                            )
-                        } else {
-                            Rect::new(
-                                button.x + 3,
-                                button.y + 3,
-                                button.width.saturating_sub(6),
-                                button.height.saturating_sub(6),
-                            )
-                        },
-                        color: if active { active_fill } else { hover_fill },
-                    }])?;
-                }
-            }
-
-            let icon = Color::rgba(244, 247, 252, 235);
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_DOWN,
-                Rect::new(rect.x + rect.width as i32 / 2 - 11, rect.y + 3, 22, 22),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_LEFT,
-                Rect::new(prev.x + prev.width as i32 / 2 - 14, prev.y + 30, 28, 28),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                CHEVRON_RIGHT,
-                Rect::new(next.x + next.width as i32 / 2 - 14, next.y + 30, 28, 28),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                LIST,
-                Rect::new(toc.x + 13, toc.y + 7, 24, 24),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                MINUS,
-                Rect::new(smaller.x + 10, smaller.y + 7, 24, 24),
-                icon,
-            )?;
-            svg_icon::draw(
-                &mut self.surface,
-                PLUS,
-                Rect::new(larger.x + 10, larger.y + 7, 24, 24),
-                icon,
-            )?;
-
-            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            let label = Color::rgba(239, 243, 249, 235);
-            text.draw(prev.x + 25, prev.y + 74, 13, "上一页", label)?;
-            text.draw(next.x + 25, next.y + 74, 13, "下一页", label)?;
-            text.draw(toc.x + 45, toc.y + 9, 14, "目录", label)?;
-            text.draw(smaller.x + 36, smaller.y + 9, 13, "字体", label)?;
-            text.draw(larger.x + 36, larger.y + 9, 13, "字体", label)?;
-            Ok(())
+            self.draw_modern_toolbar()
         }
-
         fn draw_toc(&mut self) -> WindowResult<()> {
-            let panel = self.toc_panel_rect();
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: Rect::new(panel.x + 3, panel.y + 4, panel.width, panel.height),
-                    color: Color::rgba(0, 0, 0, 35),
-                },
-                DrawCommand::FillRect {
-                    rect: panel,
-                    color: Color::rgba(250, 251, 253, 246),
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(panel.x, panel.y + 46, panel.width, 1),
-                    color: Color::rgba(221, 226, 233, 255),
-                },
-            ])?;
-            let visible = self.visible_toc_rows();
-            for (row, _entry) in self
-                .toc
-                .iter()
-                .skip(self.toc_scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let index = self.toc_scroll + row;
-                let y = panel.y + 48 + row as i32 * 38;
-                if index == self.toc_selected {
-                    self.surface.draw(&[DrawCommand::FillRect {
-                        rect: Rect::new(panel.x + 8, y, panel.width.saturating_sub(16), 34),
-                        color: Color::rgba(220, 232, 249, 245),
-                    }])?;
-                }
-            }
-            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
-            text.draw(
-                panel.x + 18,
-                panel.y + 13,
-                17,
-                "目录",
-                Color::rgba(42, 48, 57, 255),
-            )?;
-            for (row, entry) in self
-                .toc
-                .iter()
-                .skip(self.toc_scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let y = panel.y + 57 + row as i32 * 38;
-                let indent = entry.depth.min(6) as i32 * 16;
-                let text_width = panel
-                    .width
-                    .saturating_sub(56_u32.saturating_add(indent as u32));
-                let title = text.fit(14, &entry.title, text_width)?;
-                text.draw(
-                    panel.x + 20 + indent,
-                    y,
-                    14,
-                    &title,
-                    Color::rgba(60, 67, 78, 255),
-                )?;
-            }
-            Ok(())
+            self.draw_modern_toc()
         }
 
         fn current_toc_index(&self) -> Option<usize> {
@@ -679,6 +534,14 @@ mod enabled {
             {
                 return self.jump_to_toc(index);
             }
+            if self.compact_toc() {
+                if point_in(self.toc_panel_rect(), x, y) {
+                    return Ok(false);
+                }
+                self.toolbar = ToolbarMode::Expanded;
+                self.refresh_surface()?;
+                return Ok(true);
+            }
             for index in 0..6 {
                 if point_in(self.toolbar_button_rect(index), x, y) {
                     return self.handle_toolbar_button(index);
@@ -703,27 +566,22 @@ mod enabled {
                     }
                 }
                 ToolbarMode::Expanded | ToolbarMode::Toc => {
-                    if self.toolbar == ToolbarMode::Toc {
-                        let panel = self.toc_panel_rect();
-                        let row_area_y = panel.y + 48;
-                        if x >= panel.x
-                            && x < panel.x + panel.width as i32
-                            && y >= row_area_y
-                            && y < panel.y + panel.height as i32
-                        {
-                            let row = ((y - row_area_y) / 38) as usize;
-                            let index = self.toc_scroll.saturating_add(row);
-                            let rect = Rect::new(
-                                panel.x + 8,
-                                row_area_y + row as i32 * 38,
-                                panel.width.saturating_sub(16),
-                                34,
-                            );
-                            if row < self.visible_toc_rows()
-                                && index < self.toc.len()
-                                && point_in(rect, x, y)
-                            {
-                                return ReaderHover::TocRow(index);
+                    if self.toolbar == ToolbarMode::Toc
+                        && let Some(target) = self.toc_hover_at(x, y)
+                    {
+                        return target;
+                    }
+                    if self.compact_toc() {
+                        return if point_in(self.collapsed_rect(), x, y) {
+                            ReaderHover::Collapsed
+                        } else {
+                            ReaderHover::None
+                        };
+                    }
+                    if !self.mobile_chrome() {
+                        for index in 0..3 {
+                            if point_in(self.tool_dock(index), x, y) {
+                                return ReaderHover::ToolDock(index);
                             }
                         }
                     }
@@ -771,6 +629,9 @@ mod enabled {
             self.prefetch_page()
         }
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if let Some(changed) = self.desktop_action(action)? {
+                return Ok(changed);
+            }
             if let Some(changed) = self.motion_action(action)? {
                 if changed {
                     self.refresh_surface()?;
@@ -858,19 +719,24 @@ mod enabled {
         fn title(&self) -> String {
             self.session.title()
         }
+        fn dark_theme(&self) -> bool {
+            self.session.settings().theme == crate::reader_data::Theme::Dark
+        }
 
         fn animation_interval(&self) -> Option<Duration> {
             if self.motion.active() {
                 return Some(Duration::from_millis(16));
             }
-            (self.title_marquee_span != 0 || self.tools.pending())
+            (self.title_marquee_span != 0 || self.tools.pending() || self.desktop_notice.is_some())
                 .then_some(Duration::from_millis(40))
         }
 
         fn animation_tick(&mut self) -> WindowResult<bool> {
             let motion_changed = self.tick_page_motion(std::time::Instant::now())?;
-            let clipboard_changed =
-                self.poll_clipboard() | self.poll_external_link() | motion_changed;
+            let clipboard_changed = self.poll_clipboard()
+                | self.poll_external_link()
+                | motion_changed
+                | self.expire_desktop_notice(std::time::Instant::now());
             if self.title_marquee_span == 0 {
                 if clipboard_changed {
                     self.refresh_surface()?;
@@ -887,6 +753,7 @@ mod enabled {
         }
     }
 
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     pub(super) fn open_path(path: &Path, output: &mut impl Write) -> Result<()> {
         writeln!(output, "使用内置字体: {}", UiFont::builtin_file_name())?;
         let args = vec![
@@ -899,6 +766,7 @@ mod enabled {
         start(&args, output)
     }
 
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     pub(super) fn start(args: &[OsString], output: &mut impl Write) -> Result<()> {
         if args.is_empty() {
             return Err("open-epub expects <book.epub> --font <font.ttf>".into());
@@ -1016,8 +884,11 @@ mod enabled {
                     "读取文档字节",
                 )
                 .map_err(|error| boxed_stage("read EPUB bytes", error))?;
+                let prepared = crate::publication::prepare(epub_bytes, &epub_path)
+                    .map_err(|error| boxed_stage("prepare EPUB/MOBI publication", error))?;
+                writeln!(output, "Input format: {}", prepared.format.label())?;
                 crate::loading::stage("校验文档与解析目录结构")?;
-                let book = EpubBook::parse(&epub_bytes, epub_limits)
+                let book = EpubBook::parse(&prepared.bytes, epub_limits)
                     .epub_stage("parse EPUB ZIP/container/OPF")?;
                 crate::loading::stage("恢复阅读位置")?;
                 let explicit_position =
@@ -1149,7 +1020,7 @@ mod enabled {
 
                 writeln!(
                     output,
-                    "Native Wayland EPUB reader (CSS text/block subset + PNG/JPEG/WebP/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nF5 settings select slide, book (2D paper curl) or continuous vertical scroll; the mode is saved. Wheel/touchpad and right-button drag navigate; left-button drag selects text. Esc stops ongoing motion first. Page navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP shows its first frame. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
+                    "Native Wayland publication reader (EPUB / unencrypted MOBI6/7 / reflowable AZW3-KF8; CSS text/block subset + PNG/JPEG/WebP/GIF/SVG)\nKeys: PageUp/PageDown, arrows, Space, Home/End, +/-; Esc dismisses an open panel before closing the reader.\nF5 settings select slide, book (2D paper curl) or continuous vertical scroll; the mode is saved. Wheel/touchpad and right-button drag navigate; left-button drag selects text. Esc stops ongoing motion first. Page navigation crosses linear spine boundaries. Progress supports epub-v1/v2 and whitespace-aware epub-v3 locators; legacy code positions are migrated when storage is available.\nCode blocks preserve source line breaks, indentation, tabs and blank lines; long lines soft-wrap for the viewport. Automatic bounded syntax colors support C/C++, Rust, Python, Shell, JavaScript/TypeScript and JSON; existing multicolor author code is preserved. PNG includes Adam7. Images decode on demand with a bounded LRU cache; animated WebP/GIF shows its first frame. GIF87a/89a includes transparency, interlacing and canvas offsets; SVG raster children also accept GIF. EPUB text uses shaping, bidi, grapheme-safe wrapping and bounded font fallback. Static TrueType @font-face resources are selected by chapter-local font-family lists.\nF2 search; F3 annotations; F4 bookmark; F5 settings; F6 theme; F7 note; F8 highlight; F9 text selection priority; Ctrl+C/Ctrl+V clipboard. Drag body text to select without F9; blank clicks do not turn pages. Link/image clicks activate on release, not while dragging. Click unlinked images to inspect them. Book-local body links and footnotes are clickable (id and legacy name anchors); Backspace or the return button restores the previous reading position. HTTP/HTTPS links show their target for confirmation, then open in the default browser; Esc cancels without leaving the reader.\nFull CSS, WOFF/WOFF2, CFF/variable/obfuscated fonts, MathML, PDF and Windows/Android windows remain unimplemented."
                 )?;
                 output.flush()?;
 
@@ -1208,25 +1079,22 @@ mod enabled {
             let width = reader.surface.width();
             let mut expected = reader.session.frame().surface.clone();
             let background = reader.session.settings().theme.colors().0;
+            let palette = reader.session.settings().theme.palette();
             expected
                 .draw(&[
                     DrawCommand::FillRect {
                         rect: Rect::new(0, 0, width, 32),
-                        color: Color {
-                            a: 245,
-                            ..background
-                        },
+                        color: background,
                     },
                     DrawCommand::FillRect {
                         rect: Rect::new(0, 31, width, 1),
-                        color: Color::rgba(224, 228, 234, 255),
+                        color: palette.border,
                     },
                 ])
                 .unwrap();
             let mut text = UiPainter::new(&reader.ui_font, &mut expected).unwrap();
             let x = width.saturating_sub(text.measure(12, status).unwrap() + 16);
-            text.draw(x as i32, 9, 12, status, Color::rgba(112, 121, 133, 255))
-                .unwrap();
+            text.draw(x as i32, 9, 12, status, palette.muted).unwrap();
             for y in 0..32 {
                 for x in x..width {
                     assert_eq!(

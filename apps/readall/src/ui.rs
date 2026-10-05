@@ -4,7 +4,7 @@ use readall_font::{Font, FontLimits};
 use readall_platform::LocalFileSource;
 use readall_render::{
     Color, Rect, Surface,
-    glyph::{GlyphMask, RasterLimits, rasterize},
+    glyph::{GlyphMask, RasterLimits, rasterize_scaled},
 };
 use std::{
     cell::RefCell,
@@ -14,6 +14,8 @@ use std::{
 };
 
 pub(crate) type UiResult<T> = Result<T, Box<dyn Error>>;
+mod shapes;
+pub(crate) use shapes::rounded;
 
 const BUILTIN_FONT_FILE: &str = "LXGWWenKaiLite-Regular.ttf";
 const BUILTIN_FONT_LABEL: &str = "<built-in>/LXGWWenKaiLite-Regular.ttf";
@@ -31,7 +33,7 @@ struct CachedGlyph {
 pub(crate) struct UiFont {
     font: Font<'static>,
     path: PathBuf,
-    cache: RefCell<HashMap<(u32, char), CachedGlyph>>,
+    cache: RefCell<HashMap<(u32, char, u32, u32), CachedGlyph>>,
 }
 
 impl UiFont {
@@ -140,12 +142,20 @@ impl<'font, 'surface> UiPainter<'font, 'surface> {
             if ch == '\n' {
                 continue;
             }
-            let key = (size, ch);
+            let density = self.surface.pixel_scale();
+            let key = (size, ch, density.0.to_bits(), density.1.to_bits());
             if !self.source.cache.borrow().contains_key(&key) {
                 let glyph_index = self.font.glyph_index(ch)?;
                 let glyph = self.font.glyph(glyph_index)?;
                 let advance = f32::from(glyph.metrics.advance_width) * scale;
-                let mask = rasterize(&glyph.outline, scale, RasterLimits::default())?;
+                let mask = rasterize_scaled(
+                    &glyph.outline,
+                    (scale * density.0, scale * density.1),
+                    RasterLimits::default(),
+                )?;
+                if self.source.cache.borrow().len() >= 4096 {
+                    self.source.cache.borrow_mut().clear();
+                }
                 self.source
                     .cache
                     .borrow_mut()

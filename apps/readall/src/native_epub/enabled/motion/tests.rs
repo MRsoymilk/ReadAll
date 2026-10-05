@@ -94,6 +94,59 @@ fn cached_neighbours_do_not_advance_progress_and_slide_book_have_distinct_effect
     }
 }
 #[test]
+fn direct_scroll_tracks_finger_and_release_then_inertia_can_be_interrupted() {
+    with_reader(PageMode::Scroll, &[&long_chapter()], |r| {
+        let initial = r.motion.offset;
+        r.action(Action::PanStart { x: 300, y: 250 }).unwrap();
+        r.action(Action::PointerMove { x: 300, y: 243 }).unwrap();
+        r.tick_page_motion(Instant::now() + Duration::from_millis(16))
+            .unwrap();
+        assert!(
+            (r.motion.offset - initial - 7.0).abs() < 0.001,
+            "finger must not chase an eased target"
+        );
+        r.action(Action::PointerMove { x: 300, y: 249 }).unwrap();
+        r.tick_page_motion(Instant::now() + Duration::from_millis(32))
+            .unwrap();
+        assert!((r.motion.offset - initial - 1.0).abs() < 0.001);
+        r.action(Action::PanEnd { x: 300, y: 238 }).unwrap();
+        r.tick_page_motion(Instant::now() + Duration::from_millis(48))
+            .unwrap();
+        assert!(
+            (r.motion.offset - initial - 12.0).abs() < 0.001,
+            "release endpoint lost"
+        );
+        #[cfg(feature = "mobile")]
+        {
+            assert!(r.start_touch_fling(150));
+            r.tick_page_motion(Instant::now() + Duration::from_millis(20))
+                .unwrap();
+            assert!(r.motion.offset > initial + 12.0);
+            r.freeze_motion().unwrap();
+            let stopped = r.motion.offset;
+            r.tick_page_motion(Instant::now() + Duration::from_millis(60))
+                .unwrap();
+            assert_eq!(r.motion.offset, stopped);
+            assert!(!r.motion.active());
+        }
+    });
+}
+#[cfg(feature = "mobile")]
+#[test]
+fn book_boundary_fling_reports_idle_even_without_pixel_motion() {
+    with_reader(PageMode::Scroll, &[&long_chapter()], |r| {
+        r.motion.offset = 0.0;
+        r.motion.target = 0.0;
+        assert!(r.start_touch_fling(-150));
+        assert!(
+            r.tick_page_motion(Instant::now() + Duration::from_millis(20))
+                .unwrap()
+        );
+        assert!(!r.motion.active());
+        assert_eq!(r.motion.offset, 0.0);
+    });
+}
+#[test]
 fn scroll_moves_fractional_pixels_then_settles_without_forcing_a_page_turn() {
     with_reader(PageMode::Scroll, &[&long_chapter()], |r| {
         let initial = r.motion.offset;

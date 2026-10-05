@@ -1,4 +1,77 @@
 //! Run explicitly in release mode; measures CPU frame preparation, not desktop FPS.
+#[cfg(feature = "mobile")]
+#[test]
+#[ignore = "manual high-density cached compositor benchmark, not device FPS"]
+fn cached_phone_scroll_benchmark() {
+    let source = format!("<html><body>{}</body></html>", "<p>这是 ReadAll 连续滚动性能测试，正文和目录应跟随手指移动。Linux Android cached page composition.</p>".repeat(80));
+    let bytes = crate::test_epub::make_epub_with_resources(&[&source], vec![]);
+    let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+    let data = builtin_font_bytes();
+    let font = Font::parse(data, 0, FontLimits::default()).unwrap();
+    let mut options = Options::parse(
+        &[
+            "--font",
+            "fixture.ttf",
+            "--width",
+            "393",
+            "--height",
+            "848",
+            "--margin",
+            "16",
+            "--font-size",
+            "20",
+        ]
+        .map(Into::into),
+    )
+    .unwrap();
+    options.raster_size = Some((1080, 2330));
+    let settings = crate::reader_data::Settings {
+        page_mode: PageMode::Scroll,
+        ..Default::default()
+    };
+    let session =
+        EpubSession::new_with_preferences(&book, &font, options, Start::Beginning, &[], settings)
+            .unwrap();
+    let ui = UiFont::from_bytes(data.to_vec(), "<built-in>".into()).unwrap();
+    let mut reader = ReaderWindow::new_lazy(session, None, ui).unwrap();
+    reader.toolbar = ToolbarMode::Collapsed;
+    reader.session.prepare_neighbour(1).unwrap();
+    reader.session.prepare_neighbour(-1).unwrap();
+    let stride = reader.session.scroll_stride();
+    let mut output = vec![0; 1080 * 2330 * 4];
+    let mut samples = Vec::new();
+    let mut snapshots = Vec::new();
+    for n in 0..140 {
+        let started = Instant::now();
+        reader
+            .session
+            .compose_scroll(f64::from(n % 100) * stride / 100.0)
+            .unwrap();
+        reader.refresh_surface().unwrap();
+        let snapshot_at = Instant::now();
+        let frame = crate::mobile::Frame {
+            serial: n as u64 + 1,
+            surface: reader.surface.clone(),
+        };
+        let snapshot_ms = snapshot_at.elapsed().as_secs_f64() * 1000.0;
+        frame.write_rgba(&mut output).unwrap();
+        std::hint::black_box(&output);
+        if n >= 20 {
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            snapshots.push(snapshot_ms);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "PHONE_SCROLL_BENCH pixels=1080x2330 frames={} avg_ms={:.3} p95_ms={:.3} max_ms={:.3} snapshot_avg_ms={:.6}",
+        samples.len(),
+        samples.iter().sum::<f64>() / samples.len() as f64,
+        samples[samples.len() * 95 / 100],
+        samples.last().unwrap(),
+        snapshots.iter().sum::<f64>() / snapshots.len() as f64
+    );
+}
+
 use super::*;
 use crate::{reader_data::Settings, test_epub};
 #[test]

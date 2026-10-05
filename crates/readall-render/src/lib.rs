@@ -1,6 +1,7 @@
 //! Dependency-free CPU drawing and unhinted TrueType glyph rasterization; no GPU or window backend.
 //! Channels use straight-alpha, byte-space source-over compositing (not linear-light color management).
 
+mod density;
 pub mod glyph;
 mod image;
 mod page_motion;
@@ -153,8 +154,11 @@ impl From<io::Error> for RenderError {
 pub struct Surface {
     width: u32,
     height: u32,
-    pixels: Vec<Color>,
+    // Published frames and page-cache snapshots share immutable pixels. A painter
+    // obtains unique storage once per operation, never once per destination pixel.
+    pixels: std::sync::Arc<Vec<Color>>,
     limits: RenderLimits,
+    logical: (u32, u32),
 }
 
 impl Surface {
@@ -174,16 +178,18 @@ impl Surface {
         Ok(Self {
             width,
             height,
-            pixels,
+            pixels: std::sync::Arc::new(pixels),
             limits,
+            logical: (width, height),
         })
     }
 
+    /// Layout dimensions; `pixel_width/height` describe the raster backing store.
     pub fn width(&self) -> u32 {
-        self.width
+        self.logical.0
     }
     pub fn height(&self) -> u32 {
-        self.height
+        self.logical.1
     }
     pub fn pixels(&self) -> &[Color] {
         &self.pixels
@@ -199,6 +205,28 @@ impl Surface {
 
     /// Validates budgets and clipping before modifying any pixel.
     pub fn draw(&mut self, commands: &[DrawCommand]) -> Result<(), RenderError> {
+        if self.logical == (self.width, self.height) {
+            return self.draw_pixels(commands);
+        }
+        if commands.len() > self.limits.max_commands {
+            return Err(RenderError::BudgetExceeded("commands"));
+        }
+        let mapped: Vec<_> = commands
+            .iter()
+            .map(|cmd| match *cmd {
+                DrawCommand::FillRect { rect, color } => DrawCommand::FillRect {
+                    rect: self.pixel_rect(rect),
+                    color,
+                },
+                DrawCommand::PushClip(rect) => DrawCommand::PushClip(self.pixel_rect(rect)),
+                DrawCommand::PopClip => DrawCommand::PopClip,
+            })
+            .collect();
+        self.draw_pixels(&mapped)
+    }
+
+    /// Device-coordinate drawing for already rasterized vector primitives.
+    pub fn draw_pixels(&mut self, commands: &[DrawCommand]) -> Result<(), RenderError> {
         if commands.len() > self.limits.max_commands {
             return Err(RenderError::BudgetExceeded("commands"));
         }
@@ -256,10 +284,16 @@ impl Surface {
         // Preflight guarantees nonempty rectangles are inside this surface.
         let x = rect.x as usize;
         let y = rect.y as usize;
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in y..y + rect.height as usize {
             let start = row * self.width as usize + x;
-            for destination in &mut self.pixels[start..start + rect.width as usize] {
-                *destination = color.over(*destination);
+            let row = &mut pixels[start..start + rect.width as usize];
+            if color.a == 255 {
+                row.fill(color);
+            } else {
+                for destination in row {
+                    *destination = color.over(*destination);
+                }
             }
         }
     }
@@ -267,7 +301,7 @@ impl Surface {
     /// Debug image export, flattening transparency onto white. Not a document renderer.
     pub fn write_ppm(&self, output: &mut impl Write) -> Result<(), RenderError> {
         write!(output, "P6\n{} {}\n255\n", self.width, self.height)?;
-        for pixel in &self.pixels {
+        for pixel in self.pixels.iter() {
             let pixel = pixel.over(Color::WHITE);
             output.write_all(&[pixel.r, pixel.g, pixel.b])?;
         }
@@ -288,6 +322,28 @@ mod tests {
         Surface::new(4, 4, RenderLimits::default()).unwrap()
     }
 
+    #[test]
+    fn frame_snapshots_share_pixels_until_a_painter_writes() {
+        let mut original = surface();
+        original.draw(&[fill(Rect::new(0, 0, 4, 4), RED)]).unwrap();
+        let snapshot = original.clone();
+        assert!(std::sync::Arc::ptr_eq(&original.pixels, &snapshot.pixels));
+        original.draw(&[fill(Rect::new(0, 0, 1, 1), BLUE)]).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&original.pixels, &snapshot.pixels));
+        assert_eq!(snapshot.pixel(0, 0), Some(RED));
+        assert_eq!(original.pixel(0, 0), Some(BLUE));
+        let copy = original.clone();
+        original
+            .copy_region_pixels(
+                &snapshot,
+                Rect::new(0, 0, 4, 4),
+                (0, 0),
+                Rect::new(0, 0, 4, 4),
+            )
+            .unwrap();
+        assert_eq!(copy.pixel(0, 0), Some(BLUE));
+        assert_eq!(original.pixel(0, 0), Some(RED));
+    }
     #[test]
     fn straight_alpha_handles_transparent_and_opaque_destinations() {
         let half_red = Color::rgba(255, 0, 0, 128);

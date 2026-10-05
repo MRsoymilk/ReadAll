@@ -6,7 +6,8 @@ rust-version.workspace = true
 
 [features]
 default = []
-wayland = ["dep:xkbcommon", "dep:url"]
+web-links = ["dep:url"]
+wayland = ["dep:xkbcommon", "web-links"]
 
 [dependencies]
 readall-core.workspace = true

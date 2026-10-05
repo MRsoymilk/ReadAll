@@ -56,7 +56,9 @@ fn old_settings_default_to_slide_and_explicit_changes_round_trip() {
         let output = temp.run(&[]);
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains(&format!("page-mode={mode}")));
-        assert!(text.contains("theme=sepia"));
+        // Legacy sepia is readable without rewriting on load; explicit edits
+        // use the canonical light/dark names and preserve non-theme fields.
+        assert!(text.contains("theme=light"));
         assert!(text.contains("size=28"));
         assert!(text.contains("margin=48"));
         assert!(text.contains("line-spacing=1.2"));

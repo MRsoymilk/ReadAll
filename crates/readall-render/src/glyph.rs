@@ -121,12 +121,30 @@ fn quadratic(
 pub fn rasterize(outline: &Outline, scale: f32, limits: RasterLimits) -> Result<GlyphMask> {
     rasterize_contours(outline.contours(), scale, limits)
 }
+/// Rasterize outlines at the device scale without changing logical advances.
+pub fn rasterize_scaled(
+    outline: &Outline,
+    scale: (f32, f32),
+    limits: RasterLimits,
+) -> Result<GlyphMask> {
+    rasterize_contours_scaled(outline.contours(), scale, limits)
+}
 fn rasterize_contours<'a>(
     contours: impl Iterator<Item = &'a [Point]>,
     scale: f32,
     limits: RasterLimits,
 ) -> Result<GlyphMask> {
-    if !scale.is_finite() || scale <= 0.0 || scale > 16.0 {
+    rasterize_contours_scaled(contours, (scale, scale), limits)
+}
+fn rasterize_contours_scaled<'a>(
+    contours: impl Iterator<Item = &'a [Point]>,
+    scale: (f32, f32),
+    limits: RasterLimits,
+) -> Result<GlyphMask> {
+    if [scale.0, scale.1]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0 || *v > 16.0)
+    {
         return Err(RenderError::InvalidGeometry(
             "glyph scale must be finite and in (0,16]",
         ));
@@ -154,8 +172,8 @@ fn rasterize_contours<'a>(
             continue;
         }
         let convert = |p: Point| Vec2 {
-            x: p.x * scale,
-            y: -p.y * scale,
+            x: p.x * scale.0,
+            y: -p.y * scale.1,
         };
         for &p in points {
             let p = convert(p);
@@ -300,11 +318,17 @@ impl Surface {
         if bold > 8 {
             return Err(RenderError::InvalidGeometry("synthetic bold width"));
         }
+        let baseline = self.pixel_point((f64::from(baseline.0), f64::from(baseline.1)));
+        let clip = self.pixel_rect(clip);
+        let bold = (bold as f32 * self.pixel_scale().0)
+            .round()
+            .clamp(0.0, 64.0) as u32;
         let work = u64::from(mask.width) * u64::from(mask.height) * u64::from(bold + 1);
         if work > self.limits.max_blended_pixels {
             return Err(RenderError::BudgetExceeded("synthetic glyph work"));
         }
         let clip = clip.intersection(Rect::new(0, 0, self.width, self.height));
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in 0..mask.height {
             let y = i64::from(baseline.1) + i64::from(mask.top) + i64::from(row);
             if y < i64::from(clip.y) || y >= i64::from(clip.y) + i64::from(clip.height) {
@@ -332,8 +356,7 @@ impl Surface {
                     if x < i64::from(clip.x) || x >= i64::from(clip.x) + i64::from(clip.width) {
                         continue;
                     }
-                    let destination =
-                        &mut self.pixels[y as usize * self.width as usize + x as usize];
+                    let destination = &mut pixels[y as usize * self.width as usize + x as usize];
                     *destination = Color { a: alpha, ..color }.over(*destination);
                 }
             }
@@ -353,6 +376,8 @@ impl Surface {
         if mask.width == 0 || mask.height == 0 {
             return Ok(());
         }
+        let baseline = self.pixel_point((f64::from(baseline.0), f64::from(baseline.1)));
+        let clip = self.pixel_rect(clip);
         let x = baseline
             .0
             .checked_add(mask.left)
@@ -370,6 +395,7 @@ impl Surface {
         if rect.area() > self.limits.max_blended_pixels {
             return Err(RenderError::BudgetExceeded("glyph blending work"));
         }
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in 0..rect.height as usize {
             let target = (rect.y as usize + row) * self.width as usize + rect.x as usize;
             let source = (i64::from(rect.y) - i64::from(y) + row as i64) as usize
@@ -378,8 +404,7 @@ impl Surface {
             for column in 0..rect.width as usize {
                 let alpha = ((u16::from(color.a) * u16::from(mask.coverage[source + column]) + 127)
                     / 255) as u8;
-                self.pixels[target + column] =
-                    Color { a: alpha, ..color }.over(self.pixels[target + column]);
+                pixels[target + column] = Color { a: alpha, ..color }.over(pixels[target + column]);
             }
         }
         Ok(())

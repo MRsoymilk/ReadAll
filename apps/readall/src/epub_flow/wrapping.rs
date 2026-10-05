@@ -117,10 +117,8 @@ pub(super) fn build(
     if chapter.text().chars().count() > 2_000_000 {
         return Err("EPUB layout scalar budget exceeded".into());
     }
-    let mut builder = Builder::new(
-        options.width - options.margin * 2,
-        options.height - options.margin * 2,
-    );
+    let content = options.content_rect();
+    let mut builder = Builder::new(content.width, content.height);
     let (mut start, mut image, mut block, mut work) = (0, 0, 0, 0);
     let (mut paragraph, mut previous_newline) = (true, false);
     for (offset, ch) in chapter

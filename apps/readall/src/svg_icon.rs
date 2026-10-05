@@ -20,14 +20,17 @@ pub(crate) const CHEVRON_DOWN: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/chevron-down.svg"
 ));
+#[cfg(test)]
 pub(crate) const LIST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/list.svg"
 ));
+#[cfg(test)]
 pub(crate) const MINUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/minus.svg"
 ));
+#[cfg(test)]
 pub(crate) const PLUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../res/icons/reader/plus.svg"
@@ -57,6 +60,7 @@ pub(crate) fn draw(surface: &mut Surface, svg: &str, rect: Rect, color: Color) -
         return Err("SVG icon segment budget exceeded".into());
     }
 
+    let rect = surface.pixel_rect(rect);
     let scale_x = rect.width as f32 / 24.0;
     let scale_y = rect.height as f32 / 24.0;
     let stroke = 2.0 * scale_x.min(scale_y);
@@ -102,7 +106,7 @@ pub(crate) fn draw(surface: &mut Surface, svg: &str, rect: Rect, color: Color) -
             }
         }
     }
-    surface.draw(&commands)?;
+    surface.draw_pixels(&commands)?;
     Ok(())
 }
 

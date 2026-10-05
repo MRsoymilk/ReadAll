@@ -2,12 +2,13 @@
 //! work and reader actions live together on one worker (no self-referential moves).
 use crate::{
     loading::{self, Tracker},
+    reader_data::{Store, Theme},
     ui::{UiFont, UiPainter},
 };
 use readall_platform::window::{
     self, Action, WindowHandler, WindowOptions, WindowReport, WindowResult,
 };
-use readall_render::{Color, DrawCommand, Rect, RenderLimits, Surface};
+use readall_render::{DrawCommand, Rect, RenderLimits, Surface};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -20,6 +21,7 @@ use std::{
 };
 
 struct Frame {
+    dark_theme: bool,
     surface: Surface,
     title: String,
     editing: bool,
@@ -221,6 +223,7 @@ impl Bridge {
     }
     fn publish(&self, handler: &impl WindowHandler) {
         let frame = Frame {
+            dark_theme: handler.dark_theme(),
             surface: handler.surface().clone(),
             title: handler.title(),
             editing: handler.text_input_active(),
@@ -244,6 +247,7 @@ impl Bridge {
 }
 type Factory = Arc<dyn Fn(Bridge) -> WindowResult<Vec<u8>> + Send + Sync>;
 struct AsyncWindow {
+    theme: Theme,
     path: PathBuf,
     surface: Surface,
     page: Option<Surface>,
@@ -265,6 +269,7 @@ struct AsyncWindow {
 impl AsyncWindow {
     fn new(path: PathBuf, size: (u32, u32), ui: UiFont, factory: Factory) -> WindowResult<Self> {
         let mut result = Self {
+            theme: Theme::default(),
             title: "ReadAll — 正在加载".into(),
             path,
             surface: Surface::new(size.0, size.1, RenderLimits::default())?,
@@ -336,13 +341,14 @@ impl AsyncWindow {
         Rect::new(x as i32, (height / 2 + 84) as i32, button_width, 34)
     }
     fn paint_status(&mut self) -> WindowResult<()> {
+        let palette = self.theme.palette();
         let (w, h) = (self.surface.width(), self.surface.height());
         if let Some(page) = &self.page {
             self.surface = page.clone();
         } else {
             self.surface.draw(&[DrawCommand::FillRect {
                 rect: Rect::new(0, 0, w, h),
-                color: Color::rgba(22, 27, 35, 255),
+                color: palette.canvas,
             }])?;
         }
         let progress = self.shared.tracker.snapshot();
@@ -371,7 +377,7 @@ impl AsyncWindow {
         );
         self.surface.draw(&[DrawCommand::FillRect {
             rect: panel,
-            color: Color::rgba(30, 38, 49, 248),
+            color: palette.panel,
         }])?;
         let title = if failed {
             "无法打开文档"
@@ -393,27 +399,13 @@ impl AsyncWindow {
         };
         {
             let mut text = UiPainter::new(&self.ui, &mut self.surface)?;
-            text.draw_clipped(panel.x + 16, panel.y + 10, 16, title, Color::WHITE, panel)?;
+            text.draw_clipped(panel.x + 16, panel.y + 10, 16, title, palette.ink, panel)?;
             let label = text.fit(13, &label, width.saturating_sub(32))?;
-            text.draw_clipped(
-                panel.x + 16,
-                panel.y + 35,
-                13,
-                &label,
-                Color::rgba(191, 202, 217, 255),
-                panel,
-            )?;
+            text.draw_clipped(panel.x + 16, panel.y + 35, 13, &label, palette.muted, panel)?;
             if !busy_overlay {
                 let name = self.path.file_name().unwrap_or_default().to_string_lossy();
                 let name = text.fit(14, &name, width.saturating_sub(32))?;
-                text.draw_clipped(
-                    panel.x + 16,
-                    panel.y + 66,
-                    14,
-                    &name,
-                    Color::rgba(206, 216, 230, 255),
-                    panel,
-                )?;
+                text.draw_clipped(panel.x + 16, panel.y + 66, 14, &name, palette.ink, panel)?;
             }
         }
         if !failed {
@@ -438,11 +430,11 @@ impl AsyncWindow {
             self.surface.draw(&[
                 DrawCommand::FillRect {
                     rect: track,
-                    color: Color::rgba(64, 75, 91, 255),
+                    color: palette.border,
                 },
                 DrawCommand::FillRect {
                     rect: Rect::new(x, track.y, fill, 6),
-                    color: Color::rgba(94, 174, 246, 255),
+                    color: palette.accent,
                 },
             ])?;
             if !busy_overlay {
@@ -458,14 +450,7 @@ impl AsyncWindow {
                 };
                 let mut text = UiPainter::new(&self.ui, &mut self.surface)?;
                 let note = text.fit(12, &note, width.saturating_sub(32))?;
-                text.draw_clipped(
-                    panel.x + 16,
-                    panel.y + 120,
-                    12,
-                    &note,
-                    Color::rgba(191, 202, 217, 255),
-                    panel,
-                )?;
+                text.draw_clipped(panel.x + 16, panel.y + 120, 12, &note, palette.muted, panel)?;
             }
         }
         if !busy_overlay {
@@ -477,7 +462,7 @@ impl AsyncWindow {
                 let rect = self.button(retry);
                 self.surface.draw(&[DrawCommand::FillRect {
                     rect,
-                    color: Color::rgba(53, 76, 105, 255),
+                    color: palette.button,
                 }])?;
                 let mut text = UiPainter::new(&self.ui, &mut self.surface)?;
                 text.draw_clipped(
@@ -491,7 +476,7 @@ impl AsyncWindow {
                     } else {
                         "取消加载"
                     },
-                    Color::WHITE,
+                    palette.ink,
                     rect,
                 )?;
             }
@@ -619,6 +604,11 @@ impl WindowHandler for AsyncWindow {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(frame) = frame {
+            self.theme = if frame.dark_theme {
+                Theme::Dark
+            } else {
+                Theme::Paper
+            };
             self.title = frame.title;
             self.editing = frame.editing;
             self.close |= frame.close;
@@ -695,6 +685,11 @@ pub(super) fn run(
 ) -> WindowResult<(WindowReport, Vec<u8>)> {
     let ui = UiFont::system()?;
     let mut window = AsyncWindow::new(path, size, ui, Arc::new(factory))?;
+    window.theme = Store::from_environment()
+        .and_then(|store| store.settings())
+        .map(|s| s.theme)
+        .unwrap_or_default();
+    window.paint_status()?;
     let report = window::run(&mut window, options)?;
     window.shared.cancel();
     if let Some(worker) = window.worker.take() {

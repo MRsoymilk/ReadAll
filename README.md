@@ -2,16 +2,54 @@
 
 ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量自己完成文档容器解析、文本布局、字体解析、CPU 光栅化和原生窗口交互，不依赖 WebView，也不直接接入现成 EPUB/PDF 阅读引擎。
 
-> **v0.1.0 是首个开发预览版。当前重点是 Linux Wayland + EPUB/TXT；Windows、Android 和 PDF 仍在后续路线中。**
+> **v0.1.0 是首个开发预览版。当前已验证的界面为 Linux Wayland；Android 基础 APK 已获用户确认可在真机打开 EPUB；本轮统一阅读 UI 的 ARM64 调试 APK 已构建，本轮真机交互验收仍待完成。Windows 和 PDF 仍在后续路线中。**
+
+## Linux 桌面操作与简约界面
+
+Linux 书库和阅读菜单使用与 Android 协调的亮暗配色、圆角及轻量背景；阅读数据和正文排版不变，桌面保留鼠标悬浮反馈、折叠箭头和键盘操作提示。目录、设置、搜索、标注、图片查看、选字与外链确认复用现代菜单绘制，不再维护一整套旧方框皮肤。
+
+书库侧栏的「书库 / 打开图书 / 最近阅读」均可点击。最近阅读按窗口高度显示，超过当前可见范围可滚轮浏览；↑↓ 选择、Home 回到打开入口、End 选择最后一项，Enter 打开当前项。长文件名仍在限定区域往返滚动，右侧删除只移除历史，滚动或移出时取消尚未释放的删除，避免误删移动后的另一行。原书、进度和标注不受影响。
+
+文件列表滚轮滚动视口，方向键继续选择条目；Backspace 返回上一级，Esc 从文件浏览器返回书库。目录不可访问时显示错误而不是结束窗口。文件预览延后约 140 ms，由一个独立线程读取；最多一个任务在处理、缓存最近 16 份元数据，旧请求结果不覆盖当前文件。原有 16 MiB 预览上限保留，绘制与鼠标移动不再同步读取书籍。文件系统目录枚举仍为同步操作，不承诺慢速挂载完全无等待。
+
+阅读目录的鼠标滚轮/触控板按位移连续滚动，可显示部分行；仅移动视口、不自动跳章，点击或 Enter 才跳转。设置标签只选择该项，只有右侧加减或对应键盘操作才修改值。搜索/标注的滚轮移动结果视口，设置和图片菜单不把滚轮传给正文。正文保留左键选字与链接、右键拖动、三种翻页模式和 F2–F9 / Ctrl+C / Ctrl+V 快捷键。Esc 优先停止拖动/动画或关闭输入与选区，再关闭目录、收起工具栏，之后才能退出阅读。
+
+桌面的普通保存/错误结果约 6 秒自动收起；阅读提示也可点击 × 关闭。输入面板说明和进行中的系统操作不自动清除，提示收起不删除书内链接返回历史。以上回归使用隔离数据，手动图像导出测试只生成自建样本文字，不读取或修改用户图书；真实 Hyprland 会话视觉与帧率仍需验收。本轮不提供 Linux 封面网格或 Android 式导入副本管理，Linux 继续使用原生文件浏览与最近阅读。
+
+## Android 开发入口
+
+Android 应用层已全量迁移到 **Kotlin/JVM + Android 原生 View + Rust/JNI**：20 个应用源码和原有 13 个测试/截图工具全部改为 `.kt`，另有 Kotlin 迁移兼容性测试。源目录禁止遗留手写 Java；只有 SDK 在临时目录生成的 `R.java` 资源索引仍经 javac 编译。Rust 引擎、Linux 代码和存储格式未改写，也未引入 Compose/Gradle。JNI 的 12 个静态入口、包名和签名保持一致，旧 Java 书库索引可逐字节往返读写；无需卸载、清空数据或重新导入。当前 Kotlin ARM64 APK 已构建，覆盖安装后的真机交互仍需验收。
+
+Android 与 Linux 共用 `ReaderWindow` 阅读界面及同一个 `readall` 引擎：顶部书名/进度、底部可展开/收起工具栏、目录与设置面板、左右滑动/仿书/上下平滑滚动三种模式均走相同 Rust 绘制和交互逻辑。目录不再使用独立系统弹窗；较矮屏幕使用无重叠的紧凑面板。手机通过单指滑动翻页、长按拖选文字、共享操作条复制/高亮/笔记，并接入书内链接、图片查看、搜索及标注列表；系统键盘、剪贴板、浏览器确认后的启动、SAF 和生命周期由 Android 外壳处理。
+
+手机首页已升级为多书书库，提供列表和封面网格两种视图，支持多选导入、搜索排序、置顶、显示书名修改、封面刷新、移除与继续阅读；亮暗主题、视图和排序可保存。旧版最后一本阅读记录可迁移，图书副本不再自动只保留四本，移除不删除系统原书或阅读标注。书库使用 Android 原生布局，阅读页面仍与 Linux 共用。选区拖动柄、双指缩放和完整可访问性语义树尚未实现。绘制与触摸共用密度换算，最新帧有界传递，背景暂停及输入取消不会积压无限任务。像素一致性和 JVM/JNI 回归不代替实际手机帧率测试；没有引入 WebView、AndroidX 或 Gradle。
+
+Android 已分离逻辑排版与设备像素：保留字号和 UI 比例，正文轮廓、文字与图标按实际像素重新绘制，不再把低分辨率整页放大；输出有 4M 像素上限。原生阅读会话在排版前预留标题栏空间，修正小边距下连续滚动页缝截掉首行上半部的问题。密度变化不改变逻辑分页；界面预留区域修正可能重新分页，但以内容锚点恢复进度。本轮手机清晰度和帧率仍待验收。
+
+Android 目录支持连续、可停在半行的上下拖动、惯性减速和按住停止，不再一行一行跳动；目录文字缓存与命中测试共用像素偏移。正文拖动直接跟手，松手后按速度衰减。移动端输入按约 16 ms 合并绘制，共享不可变页面快照，并缩短 Kotlin 像素复制的同步锁范围；保留原生清晰度。调度目标不等于真机帧率，首次加载未缓存大章节仍可能等待，详见 Android 说明。
+
+首页「列表 / 封面」可直接切换，两种视图均支持上下惯性滚动；点图书打开，长按或点击 ⋯ 管理。立体模式已移除，旧版保存的该模式自动改为封面模式，保留原浏览图书、排序和阅读记录。封面按需使用有界异步缓存，无封面时显示书名封面；首屏不等待全书正文排版。首页已加入宿主回归和 SDK 构建验证，SAF 多选、视觉效果与真机帧率仍待安装后验收。
+
+构建工具全部通过绝对路径参数调用，不修改 shell 环境变量。首次使用 `prepare-kotlin` 下载并校验固定版本工具链到项目 `target`；本轮已准备 Kotlin 2.1.21，普通构建不自动下载编译器。见 [Android 构建、SDK 可见性及验收说明](apps/android/README.md)。
+
+```bash
+/usr/bin/python3 apps/android/tools/build.py prepare-kotlin
+/usr/bin/python3 apps/android/tools/build.py doctor --sdk /opt/android-sdk
+/usr/bin/python3 apps/android/tools/build.py build --sdk /opt/android-sdk
+```
+
+ARM64 产物为 `target/android/readall-android-debug-arm64-v8a.apk`。系统 Rust 缺少 Android 标准库时，可显式运行 `prepare-rust` 将完全匹配的官方目标库下载到项目缓存，不安装 rustup、不替换系统 Rust；构建通过目标专用 `--sysroot` 使用它。Kotlin 通过绝对 JDK 路径编译，D8 打包 Kotlin 标准库和 annotations，检查编译器/D8 兼容性及原生库的 16 KiB 对齐。宿主机 `host-test` 和 APK 构建校验不代替手机安装与交互测试。
 
 ## v0.1.0 已实现
 
 ### 原生 Linux 阅读界面
 
 - 零参数启动原生书库：`./readall`
-- 内置文件浏览器，可直接选择 `.epub`
-- 选中 EPUB 时按需预览 OPF 书名 / 作者 / 语言，解析失败不阻止打开
-- 持久化最近阅读列表，成功关闭 EPUB 后自动记录，可从首页直接继续打开
+- 内置文件浏览器，可直接选择 `.epub` / `.mobi` / `.azw3`（及使用 BOOKMOBI 容器的旧式 `.azw` / `.prc`）
+- 选中 EPUB / MOBI / AZW3 时由有界后台线程预览书名 / 作者 / 语言；MOBI 预览不解压正文，解析失败不阻止尝试打开
+- 持久化最近阅读列表，成功关闭 EPUB / MOBI / AZW3 后自动记录，可从首页直接继续打开
+- 最近阅读每行右侧固定“删除”按钮：只移除历史记录，保留原书、进度、书签和标注；鼠标松开时确认，移出按钮可取消，保存失败保留原列表并提示
+- 最近阅读长文件名在独立裁剪区域内自动左右往返滚动，两端短暂停顿；短文件名静止，按钮不会被遮挡，点击文件名仍打开原书。窗口宽度变化后重新判断是否滚动，动画只重绘改变的行，不逐帧读取文件或元数据
 - 中文文件名、中文界面和中文正文
 - 内置 **LXGW WenKai Lite Regular / 霞鹜文楷轻便版**
 - 鼠标 hover 高亮，不需要先点击
@@ -29,11 +67,19 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 - 图片点击查看、缩放与移动；链接图片优先打开书内目标
 - 正文链接 / 脚注跳转，Backspace 或“返回”按钮回到原阅读位置
 - HTTP/HTTPS 外链确认后交给默认浏览器；取消或启动失败不改变阅读位置
-- 纸色 / 护眼 / 深色主题，字号、边距和行距设置持久化
+- 亮色 / 暗色两种主题，阅读界面、书库、目录、工具栏和加载提示使用统一配色；主题、字号、边距和行距持久化
 
-### EPUB 加载状态与响应性
+### 亮色与暗色
 
-打开 EPUB 时先创建窗口并提交加载页，再开始读取文档；文件读取、章节解析、字体加载、排版与图片解码由单独的阅读工作线程执行。Wayland 事件处理留在窗口线程，加载期间仍能显示状态、接收窗口调整和取消操作。完成后在同一窗口切换正文，不再等全书目录和初始排版全部结束才出现阅读窗口。
+阅读时打开底部“设置”，第一行“主题”通过加减按钮在“亮色 / 暗色”间切换；Linux 也可按 F6。Linux 书库左下角与 Android 首页均有主题切换按钮。默认亮色，手动选择会保存，关闭图书和重启应用后沿用，不随系统主题自动切换。
+
+`apps/readall/src/reader_data/theme.rs` 是唯一配色来源，正文界面、目录活动行、工具栏、选区操作条、搜索/笔记/外链弹层和加载提示共用该配色。Android 通过 JNI 获取相同的颜色，首页、错误框、进度条、状态栏及导航栏的背景和图标明暗一起更新；系统文件选择器和输入法仍由各自应用管理。图片和书籍显式作者底色不做整页反相。
+
+主题切换保留字号、边距、行距、翻页模式和内容锚点，不修改原书。旧 `paper` / `sepia` 配置可读取为亮色，读取不改写文件，显式保存时使用 `light` / `dark`。高密度渲染及三种翻页模式继续可用；主题回归包含像素配色、对比度、持久化和真实 JVM/JNI，手机视觉验收仍需覆盖安装后的实测。
+
+### EPUB / MOBI / AZW3 加载状态与响应性
+
+打开 EPUB / MOBI / AZW3 时先创建窗口并提交加载页，再开始读取文档；文件读取、章节解析、字体加载、排版与图片解码由单独的阅读工作线程执行。Wayland 事件处理留在窗口线程，加载期间仍能显示状态、接收窗口调整和取消操作。完成后在同一窗口切换正文，不再等全书目录和初始排版全部结束才出现阅读窗口。
 
 加载页显示文件名、当前阶段、阶段耗时和进度条。读取按实际字节数推进，章节排版按正文位置推进，页面绘制按项目数推进；无法准确计数的阶段显示活动条，不用定时器制造百分比。百分比是**当前阶段**的进度，不是整本书加载完成百分比。点击“取消加载”或按 Esc 可协作式取消；取消检查在文件块读取、章节排版和绘制等边界执行，不强杀正在处理的数据。
 
@@ -42,6 +88,54 @@ ReadAll 是一个用 Rust 自研的原生电子书阅读器。项目希望尽量
 耗时的翻页、目录、搜索与窗口重排也在工作线程中处理；同尺寸更新保留上一帧并显示状态。窗口调整合并到最新尺寸，连续鼠标移动合并，输入队列和最新图像交换槽均有界，避免旧帧和重复排版积压。失败保留错误界面，支持“重试”和“返回 / 关闭”，不再仅在终端报错后消失。终端还会记录页面准备耗时。
 
 当前仍按章节完成排版，不承诺任意大章节立即可读；单次底层解码或阻塞文件 I/O 的取消要等到下一个检查点。`--frames 1` 是首个**加载帧**的窗口协议测试，不代表已完成 EPUB 解码。TXT 的原生打开路径尚未迁移到这套 EPUB 工作线程流程。
+
+### MOBI
+
+新增原生 Rust `readall-mobi`，支持未加密的 **MOBI6/7**。PalmDB 必须有 `BOOKMOBI` 文件签名，扩展名本身不能证明格式兼容；普通 Palm PRC 数据库、KFX 和受 DRM 保护的图书会给出明确错误。独立 AZW3/KF8 走下述专用重建路径。双格式 MOBI/KF8 使用其中的 MOBI6/7 兼容部分，并提示未导入 KF8 专有布局。
+
+支持未压缩、PalmDOC LZ77 和 HUFF/CDIC 正文，UTF-8 / Windows-1252 编码。UTF-8 在记录拼接后解码，避免中文字符恰好跨压缩记录时乱码。读取书名、作者、语言、EXTH 封面；`recindex` 图片转换为包内资源引用，`filepos` 链接以原始编码的字节偏移转换，避免中文和 HTML 实体改变跳转位置。识别 guide 指定的正文目录，否则从标题或章节生成目录。保留代码块换行/缩进，并兼容常见未加引号属性、大小写标签、未闭合段落和旧式 font/align 样式。
+
+MOBI HTML 在内存中整理为有界 XHTML/EPUB 适配数据，复用已有的文字排版、图片解码、三种翻页模式、选字复制、链接返回、搜索、书签/高亮/笔记以及加载状态；**不修改原书，不在磁盘写中间 EPUB，不调用 Calibre、Kindle 工具或 WebView**。原文件名与路径仍用于文件浏览和最近阅读。适配数据包含源文件 SHA-256，生成顺序和时间字段固定，相同源文件的重复打开可恢复同一组阅读记录。进度内部复用 `epub-v1/v2/v3`，不是原始 MOBI 字节位置或 Kindle 同步位置；将来改变适配算法时需要显式迁移这套内部定位。
+
+读取 MOBI 时会显示“解压 MOBI 正文 / 整理 MOBI 章节与链接 / 准备 MOBI 图片资源”等阶段。首次显示前仍需完成有界正文解压和适配，像素解码由原图片缓存按需执行；不声称直接随机分页解码 MOBI。默认限制：输入 128 MiB、正文 32 MiB、单图片 16 MiB、内存适配包 192 MiB、1024 个章节。压缩字典、递归、符号工作量、标签数量/深度也有上限，异常文件报错而不是无限递归或分配。脚本、iframe/object/embed 不执行，图片只来自原书记录，不下载远程内容。
+
+MOBI6/7 HTML 是兼容子集，不保证还原所有出版工具生成的旧标签、复杂表格、字典/索引和嵌入字体；MOBI6/7 路径的独立二进制 INDX/NCX 目录及音视频尚未接入；KF8 专用重建独立实现，不改变旧 MOBI 的适配结果。部分书会得到基于正文目录/标题的扁平目录，而非原始层级。图片格式的支持范围与原 EPUB 引擎相同，无法解码的图片显示占位。不能把“支持 MOBI”理解成支持所有 Kindle 文件。
+
+```bash
+./target/release/readall /path/to/book.mobi
+./target/release/readall open-mobi /path/to/book.mobi
+./target/release/readall mobi-info /path/to/book.mobi
+./target/release/readall mobi-text /path/to/book.mobi --spine 2
+./target/release/readall render-mobi /path/to/book.mobi new-page.ppm --font /path/to/font.ttf
+./target/release/readall search /path/to/book.mobi '查询内容'
+```
+
+`mobi-info` 仅读取元数据；`mobi-text --spine N` 导出第 N 个适配章节，N 从 1 开始，独立封面可能占首个章节。`open` 也会按识别出的文档扩展名转到共同阅读入口；无 GUI 构建仍可运行元数据、文本、渲染和搜索命令。仅指定文件打开 GUI 时默认使用捆绑的中文字体。
+
+### AZW3 / KF8
+
+支持未加密、可重排的 **独立 AZW3（MOBI version 8 / KF8）**，包括 `.AZW3` 大写扩展名。以 PalmDB/MOBI 内容识别实际格式，不只是将扩展名加入文件选择器；KF8 签名出现在 `.mobi` 中也会进入 KF8 路径。双格式 MOBI/KF8 仍按原约定读取旧 MOBI 部分，避免已有 MOBI 进度和标注失效，不在本轮自动切换为 KF8。
+
+`readall-mobi/src/kf8/` 解析 INDX / TAGX / IDXT / CNCX、FDST 流表、章节 skeleton 与 fragment 表，按字节位置重建原 XHTML，再接入共同阅读器。NCX 索引的标题、父子关系和 `fid/offset` 转成可跳转目录；缺少有效目录时使用 guide 或章节标题。索引记录末尾的合法四字节对齐填充受限处理，截断、越界、循环引用和异常规模有明确错误。
+
+`kindle:flow:` 和 `kindle:embed:` 转为只指向包内的 CSS、SVG、图片和字体资源；嵌套资源按引用收集，不递归展开循环。SVG 属性大小写与原 XHTML 保留，正文/代码中的相同字样不会作为 URI 被替换。`kindle:pos:fid:…:off:…` 转为确定性的本地位置锚点，支持正文点击、脚注跳转及返回，原有 id 不被覆盖。
+
+支持 FONT 记录的普通存储、zlib 压缩及记录内置 key 的格式混淆解包；这不是 DRM 解密，受保护的书籍仍在读取正文前拒绝。静态 TrueType 字体复用现有 `@font-face`；解包出 CFF、WOFF/WOFF2、可变字体不代表这些字体能渲染，仍按现有字体引擎能力回退。CSS 同样仍是 ReadAll 的既有子集，不声称完整还原所有 Kindle 版式。
+
+左右滑动、仿书翻页、上下平滑滚动、文字选择/复制、搜索、书签、高亮、笔记及图片查看均复用现有实现。读取与重建位于阅读工作线程，显示“解压 AZW3 正文 / 解析 KF8 章节与目录索引 / 重建 AZW3 章节与链接 / 准备 AZW3 样式、图片与字体”，可在检查点取消。首屏仍需完成有界的文档适配，不是随机访问或整本书零等待加载。
+
+不修改原书、不生成磁盘中间 EPUB、不启动 Calibre/WebView。适配标识为 `readall-kf8-v1`，包含源文件身份；生成顺序固定，阅读位置内部复用 `epub-v1/v2/v3`，可重复打开恢复，不是 Kindle 云端位置。沿用 MOBI 输入/解压/包总量限制，KF8 额外限制索引条目、CNCX 文本、重建工作量和单章节大小。坏图片/字体会提示并降级；关键 skeleton/fragment 损坏不会被当作正常正文显示。
+
+```bash
+./target/release/readall /path/to/book.azw3
+./target/release/readall open-azw3 /path/to/book.azw3
+./target/release/readall azw3-info /path/to/book.azw3
+./target/release/readall azw3-text /path/to/book.azw3 --spine 2
+./target/release/readall render-azw3 /path/to/book.azw3 new-page.ppm --font /path/to/font.ttf
+./target/release/readall search /path/to/book.azw3 '查询内容'
+```
+
+当前不支持固定版式 KF8、KFX、DRM、Kindle 字典索引/音视频、RESC 高级分页和 Kindle 位置同步。损坏或非 XML 兼容的重建 XHTML 仍可能不能阅读。本轮未新增第三方依赖；KF8 格式参考沿用 foliate-js 的 MIT 许可说明。
 
 ### EPUB
 
@@ -62,7 +156,7 @@ ReadAll 当前自己处理：
 - XHTML 可见正文提取，并保留样式范围、图片位置和目录锚点
 - CSS 子集：级联、标题字号、粗斜体、颜色、对齐、缩进、行高及嵌套块盒模型
 - 书籍静态 TrueType 内嵌字体：`@font-face`、字体族列表、样式匹配和缺字回退
-- PNG（含 Adam7）、JPEG、WebP、SVG 的透明度合成、等比例缩放和图文分页
+- PNG（含 Adam7）、JPEG、WebP、GIF、SVG 的透明度合成、等比例缩放和图文分页
 - 常见 HTML / XHTML DOCTYPE
 - 常见 legacy XHTML 命名实体（如 `&nbsp;`、`&mdash;`、`&hellip;`、`&copy;`），固定映射且不加载外部 DTD
 - 跨 spine 连续阅读
@@ -114,7 +208,11 @@ CSS 从 XHTML 的 `<style>`、行内 `style` 和包内 `<link rel="stylesheet">`
 
 PNG 仍由 `readall-image` 自研解码，复用 ReadAll 的 DEFLATE。支持非交错和 Adam7 交错图像、灰度/RGB/索引色/alpha 的合法位深组合，校验 CRC、Adler-32 与资源预算。JPEG 通过独立的 `jpeg-decoder` 接入，涵盖基线、渐进、灰度、CMYK 及有界 EXIF 方向处理。图片按独立块排入正文、保留宽高比；缩放仍采用最近邻，没有完整色彩管理。
 
-WebP 使用 `image-webp = 0.2.4`，支持有损/无损/透明通道，动画只显示首帧。SVG 通过隔离的 `resvg` / `roxmltree` 路径渲染向量、变换、裁剪和文本；内联 SVG 与独立 SVG 章节也进入图片定位。SVG 的图片只允许受预算约束的 EPUB 包内栅格资源，不读取外部文件、网络、DTD 或递归 SVG。JPEG/WebP/SVG 使用独立 Rust 依赖，不启动外部转换进程，也不接入完整 EPUB 阅读引擎。
+WebP 使用 `image-webp = 0.2.4`，支持有损/无损/透明通道，动画只显示首帧。SVG 通过隔离的 `resvg` / `roxmltree` 路径渲染向量、变换、裁剪和文本；内联 SVG 与独立 SVG 章节也进入图片定位。SVG 的图片只允许受预算约束的 EPUB 包内栅格资源，不读取外部文件、网络、DTD 或递归 SVG。JPEG/WebP/GIF/SVG 使用独立 Rust 依赖，不启动外部转换进程，也不接入完整 EPUB 阅读引擎。
+
+GIF87a/89a 使用已由 `resvg` 引入的 `gif 0.14.2`，现由 `readall-image` 直接接入；不新增第三方包版本或外部程序。支持全局/局部调色板、透明索引、交错扫描和帧偏移，按逻辑画布显示首帧，未覆盖区域保持透明；动画 GIF 与 WebP 一样暂不播放。头部探测不解码像素，完整读取后检查容器边界、帧尺寸、块数、LZW 和输出预算，再进入原 LRU 缓存。
+
+SVG 中的 GIF（包括内联 SVG、独立 SVG 文件和 data URI）也使用同一有界解码器。内联 SVG 的图片路径相对所在章节解析，独立 SVG 的子资源相对 SVG 本身解析；支持包内相对路径和百分号编码文件名，不放开文件系统或网络。资源失败会报告具体 href 和底层原因（manifest/ZIP 缺失、路径限制、校验错误、解码错误或预算），不再统一显示 `SVG image resource missing, disallowed or over budget`。data URI 不会完整写入日志，子资源数量在加载前限制。
 
 图片和 CSS 只读取 EPUB manifest 中声明的包内资源，不下载远程 URI，不访问包外文件。单张栅格图片默认不超过 16 MiB / 8M 像素。分页进行有界头部探测（JPEG 可能需要扩展前缀，SVG 需要有界解析），绘制当前页才完整读取、校验并生成像素。ZIP 前缀只是未验证的尺寸提示，不能替代完整读取时的 CRC 校验。
 
@@ -127,7 +225,7 @@ RGBA 缓存使用 LRU，最多驻留 64 个资源且总量不超过 64 MiB。**6
 当前 EPUB **尚未完整渲染**：
 
 - 完整 CSS
-- GIF / AVIF 等其他图片格式、动画播放与完整色彩管理
+- AVIF 等其他图片格式、动画播放与完整色彩管理
 - MathML
 - WOFF/WOFF2、CFF/CFF2、可变字体及字体混淆的内嵌字体路径
 - DRM / 加密 EPUB
@@ -348,7 +446,8 @@ ReadAll/
 │   ├── readall-core/       # 文档、文本、locator、布局
 │   ├── readall-epub/       # EPUB container / OPF / XHTML
 │   ├── readall-font/       # TrueType / TTC / glyph outline
-│   ├── readall-image/      # PNG/JPEG/WebP/SVG dispatch / RGBA pixels
+│   ├── readall-image/      # PNG/JPEG/WebP/GIF/SVG dispatch / RGBA pixels
+│   ├── readall-mobi/       # PalmDB / PalmDOC / HUFF-CDIC / legacy HTML adapter
 │   ├── readall-render/     # CPU surface / glyph rasterizer
 │   └── readall-platform/   # 文件与原生窗口平台层
 ├── res/
@@ -376,9 +475,10 @@ cargo check -p readall --no-default-features --offline
 v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 - Linux 原生 GUI 当前只实现 Wayland
-- Windows / Android 窗口后端尚未实现
+- Windows 窗口后端尚未实现；Android 是单独开发入口，ARM64 调试 APK 已构建验证，真机验收尚未完成
 - PDF 尚未实现
-- EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
+- MOBI 支持未加密 MOBI6/7，AZW3 支持独立可重排 KF8；固定版式 KF8、KFX、DRM、字典专用索引和完整 Kindle 版式尚未实现
+- EPUB 已支持 CSS 文本/块子集、PNG/JPEG/WebP/GIF/SVG；完整 CSS、MathML、固定版式与更多内嵌字体格式尚待实现
 - 已有 shaping / bidi / 字素断行 / 有界字体回退，但竖排、完整排版规范和更多语言仍需验收
 - 已有搜索、书签、高亮、笔记、设置和正文链接/脚注跳转；封面墙、弹出脚注、跨页选择尚未实现
 - Wayland 输入法组合协议、动画播放、完整色彩管理尚未实现
@@ -397,12 +497,14 @@ v0.1.0 不是“完整 EPUB 阅读器”声明。当前主要限制：
 
 ReadAll 项目源码目前**尚未声明统一的开源许可证**。在明确项目代码许可证之前，请不要假定项目源码可以按 MIT/Apache/GPL 等许可证再分发。
 
-JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。`readall licenses` 当前显示内置字体许可，不是所有 Cargo 依赖的完整许可清单。
+JPEG/WebP/GIF/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，版本固定在 `Cargo.lock`。主要包括 `jpeg-decoder`、`image-webp`、`gif`、`resvg`、`roxmltree`、`rustybuzz`、`unicode-bidi`、`unicode-script`、`unicode-linebreak`、`unicode-segmentation`、`xkbcommon` 与 `wl-clipboard-rs`。项目不再是零第三方运行时依赖；发布时需按各 crate 的许可证保留相应许可文本。MOBI / KF8 实现参考 foliate-js 的 PalmDOC / HUFF-CDIC、INDX 与 KF8 重建格式，保留其 MIT 许可；HTML 实体处理使用固定版本 `html-escape = 0.2.13`（及间接依赖 `utf8-width`），不引入整个第三方电子书引擎。`readall licenses` 显示内置字体与 foliate-js 参考许可，不是所有 Cargo 依赖的完整许可清单。
 
 已捆绑的第三方资源分别遵循其自己的许可证：
 
 - **LXGW WenKai Lite Regular**：SIL Open Font License 1.1  
   许可证：`licenses/LXGW_WenKai_Lite_OFL.txt`
+- **foliate-js MOBI 解压算法参考**：MIT  
+  许可证：`licenses/foliate-js-MIT.txt`
 - **Feather Icons v4.29.2**：MIT  
   许可证：`res/icons/reader/LICENSE`
 
@@ -412,7 +514,7 @@ JPEG/WebP/SVG、shaping、Unicode、XKB 和剪贴板功能使用独立依赖，�
 ./target/release/readall licenses
 ```
 
-可查看内置字体许可证。
+可查看内置字体与 MOBI 算法参考许可证。
 
 ---
 

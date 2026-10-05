@@ -91,9 +91,6 @@ fn native_search_selection_highlight_note_bookmark_and_settings_work_together() 
     reader
         .action(Action::Command(ReaderCommand::Theme))
         .unwrap();
-    reader
-        .action(Action::Command(ReaderCommand::Theme))
-        .unwrap();
     assert_eq!(reader.session.settings().theme, Theme::Dark);
     assert_eq!(
         Store::new(dir.0.clone()).settings().unwrap().theme,
