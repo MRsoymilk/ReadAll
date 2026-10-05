@@ -47,7 +47,7 @@ final class ShelfController implements ShelfHome.Callbacks {
     private void invalidate(){if(!closed)view.canvas.invalidate();}
     void load(){io.execute(()->{try{if(store==null)store=new ShelfStore(directory);try{migrate();}catch(Exception migration){error(migration);}List<ShelfStore.Book> data=store.load();main.post(()->{if(!closed){books=data;view.books(data,prefs.getString("focus",""));}});}catch(Exception e){error(e);}});}
     private void reload(){try{List<ShelfStore.Book> data=store.load();main.post(()->{if(!closed){books=data;view.books(data,null);}});}catch(Exception e){error(e);}}
-    private void error(Throwable e){String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();main.post(()->{if(!closed)view.message("书库："+message);});}
+    private void error(Throwable e){final int token=generation;String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();main.post(()->{if(!closed&&token==generation)view.message("书库："+message);});}
     private void migrate()throws Exception {
         if(prefs.getBoolean("migrated-last-v1",false))return;
         SharedPreferences legacy=activity.getSharedPreferences("library",Activity.MODE_PRIVATE);String path=legacy.getString("book","");
@@ -103,12 +103,12 @@ final class ShelfController implements ShelfHome.Callbacks {
                 }
                 int done=succeeded,errors=failed;String why=lastError;
                 main.post(()->{if(!closed&&token==generation){busy=false;view.busy(false,"已加入 "+done+" 本"+(errors>0?"，失败 "+errors+" 本："+why:" · 重复图书自动合并"));}});
-            }catch(Exception e){main.post(()->{if(!closed&&token==generation){busy=false;view.busy(false,"导入未完成，已有图书保留");}});error(e);}
+            }catch(Exception e){String why=safe(e.getMessage(),160);main.post(()->{if(!closed&&token==generation){busy=false;view.busy(false,"导入未完成，已有图书保留："+why);}});}
         });
     }
     boolean busy(){return busy;}
     @Override public void cancelImport(){if(!busy)return;++generation;busy=false;view.busy(false,"导入已取消，已完成的图书保留");}
-    @Override public void add(){if(!busy)host.pickBooks();}
+    @Override public void add(){if(!busy){view.clearNotice();host.pickBooks();}}
     @Override public void theme(){if(!busy)host.toggleTheme();}
     @Override public void mode(int value){mode=ShelfGeometry.mode(value);prefs.edit().putInt("mode",mode).apply();}
     @Override public void sort(String value){sort=value;prefs.edit().putString("sort",sort).apply();}
@@ -137,6 +137,6 @@ final class ShelfController implements ShelfHome.Callbacks {
     void progress(String id,String percent){if(id==null||id.isEmpty())return;double value;try{value=Double.parseDouble(percent);}catch(RuntimeException ignored){return;}if(!Double.isFinite(value))return;final double p=value;io.execute(()->{try{if(store==null)store=new ShelfStore(directory);store.progress(id,p,System.currentTimeMillis());}catch(Exception e){error(e);}});}
     void theme(NativeReader.Appearance value){appearance=value;view.theme(value);}
     void resume(){load();}
-    void pause(){view.canvas.stop();}
-    void close(){closed=true;++generation;if(dialog!=null){dialog.dismiss();dialog=null;}cache.close();view.canvas.stop();}
+    void pause(){view.clearNotice();view.canvas.stop();}
+    void close(){closed=true;++generation;if(dialog!=null){dialog.dismiss();dialog=null;}view.clearNotice();cache.close();view.canvas.stop();}
 }

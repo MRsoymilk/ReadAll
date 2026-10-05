@@ -2,6 +2,9 @@ package xin.soymilk.readall;
 
 import android.app.Activity;
 import android.content.res.ColorStateList;
+import android.os.Build;
+import android.os.SystemClock;
+import android.view.accessibility.AccessibilityManager;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -18,7 +21,9 @@ final class ShelfHome extends LinearLayout {
     private final TextView title,count,message,resumeLabel,resumeTitle,resumePercent;
     private final EditText search;
     private final ImageView searchIcon,resumeIcon,resumeArrow;
-    private final Button add,sortButton,cancel,clear;
+    private final Button add,sortButton,cancel,clear,dismissNotice;
+    private final ShelfNotice notice=new ShelfNotice();
+    private final Runnable expireNotice=()->{notice.expire(SystemClock.uptimeMillis());renderNotice();};
     private final LinearLayout searchBox,segments,continueCard,footer;
     private final ProgressBar importProgress;
     private final Button[] modes=new Button[2];
@@ -53,7 +58,8 @@ final class ShelfHome extends LinearLayout {
 
         footer=row();footer.setPadding(dp(12),0,dp(4),0);footer.setMinimumHeight(dp(48));importProgress=new ProgressBar(activity,null,android.R.attr.progressBarStyleSmall);footer.addView(importProgress,new LayoutParams(dp(18),dp(18)));importProgress.setVisibility(GONE);
         message=text("",12,false);message.setMaxLines(3);message.setAccessibilityLiveRegion(ACCESSIBILITY_LIVE_REGION_POLITE);LayoutParams mp=new LayoutParams(0,-2,1);mp.leftMargin=dp(8);mp.topMargin=dp(8);mp.bottomMargin=dp(8);footer.addView(message,mp);
-        cancel=ShelfStyle.button(activity,"取消",callbacks::cancelImport);footer.addView(cancel,new LayoutParams(dp(64),dp(48)));cancel.setVisibility(GONE);addView(footer,outer(-2,4,8));footer.setVisibility(GONE);
+        cancel=ShelfStyle.button(activity,"取消",callbacks::cancelImport);footer.addView(cancel,new LayoutParams(dp(64),dp(48)));cancel.setVisibility(GONE);
+        dismissNotice=ShelfStyle.button(activity,"",this::clearNotice);dismissNotice.setContentDescription("关闭提示");footer.addView(dismissNotice,new LayoutParams(dp(48),dp(48)));dismissNotice.setVisibility(GONE);addView(footer,outer(-2,4,8));footer.setVisibility(GONE);
         search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){clear.setVisibility(s.length()>0?VISIBLE:INVISIBLE);update("");}public void afterTextChanged(Editable e){}});
         theme(colors);
     }
@@ -72,13 +78,26 @@ final class ShelfHome extends LinearLayout {
     @Override protected void onSizeChanged(int w,int h,int oldw,int oldh){super.onSizeChanged(w,h,oldw,oldh);boolean small=h<dp(440);if(small!=compact){compact=small;count.setVisibility(small?GONE:VISIBLE);updateContinue();}styleTabs();}
     void busy(boolean value,String status){busy=value;add.setEnabled(!value);continueCard.setEnabled(!value);continueCard.setAlpha(value?.55f:1f);cancel.setVisibility(value?VISIBLE:GONE);importProgress.setVisibility(value?VISIBLE:GONE);message(status);}
     boolean busy(){return busy;}
-    void message(String value){message.setText(value);footer.setVisibility(value.isEmpty()&&!busy?GONE:VISIBLE);}
+    void message(String value){
+        int timeout=ShelfNotice.TIMEOUT_MS;AccessibilityManager access=(AccessibilityManager)getContext().getSystemService(Activity.ACCESSIBILITY_SERVICE);
+        if(Build.VERSION.SDK_INT>=29&&access!=null)timeout=access.getRecommendedTimeoutMillis(timeout,AccessibilityManager.FLAG_CONTENT_TEXT|AccessibilityManager.FLAG_CONTENT_CONTROLS);
+        notice.update(value,busy,SystemClock.uptimeMillis(),timeout);if(!isShown())notice.dismiss();renderNotice();
+    }
+    private void renderNotice(){
+        removeCallbacks(expireNotice);notice.expire(SystemClock.uptimeMillis());message.setText(notice.text());footer.setVisibility(notice.visible()?VISIBLE:GONE);dismissNotice.setVisibility(notice.visible()&&!notice.working()?VISIBLE:GONE);
+        long delay=notice.remaining(SystemClock.uptimeMillis());if(isShown()&&delay>0)postDelayed(expireNotice,delay);
+    }
+    void clearNotice(){notice.dismiss();renderNotice();}
+    @Override protected void onVisibilityChanged(View changed,int visibility){super.onVisibilityChanged(changed,visibility);if(footer!=null&&dismissNotice!=null){if(!isShown())notice.dismiss();renderNotice();}}
+    @Override protected void onWindowVisibilityChanged(int visibility){super.onWindowVisibilityChanged(visibility);if(footer!=null&&dismissNotice!=null){if(visibility!=VISIBLE)notice.dismiss();renderNotice();}}
+    @Override protected void onAttachedToWindow(){super.onAttachedToWindow();renderNotice();}
+    @Override protected void onDetachedFromWindow(){removeCallbacks(expireNotice);notice.dismiss();super.onDetachedFromWindow();}
     void clearSearch(){search.clearFocus();((InputMethodManager)getContext().getSystemService(Activity.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(search.getWindowToken(),0);}
     void theme(NativeReader.Appearance p){
         colors=p;setBackgroundColor(p.canvas);title.setTextColor(p.ink);count.setTextColor(p.muted);message.setTextColor(p.muted);resumeLabel.setTextColor(p.muted);resumeTitle.setTextColor(p.ink);resumePercent.setTextColor(p.accent);
         search.setTextColor(p.ink);search.setHintTextColor(p.muted);searchBackground();searchIcon.setImageDrawable(new ShelfIcon(ShelfIcon.SEARCH,p.muted,dp(20)));canvas.theme(p);
-        for(Button b:new Button[]{themeButton,sortButton,cancel,clear})ShelfStyle.buttonTheme(b,p,false);ShelfStyle.buttonTheme(add,p,true);
-        themeButton.setContentDescription(p.dark()?"切换到亮色主题":"切换到暗色主题");themeButton.setTooltipText(themeButton.getContentDescription());ShelfStyle.icon(themeButton,p.dark()?ShelfIcon.SUN:ShelfIcon.MOON,p.ink,true);ShelfStyle.icon(add,ShelfIcon.ADD,p.onAccent,false);ShelfStyle.icon(sortButton,ShelfIcon.SORT,p.muted,false);ShelfStyle.icon(clear,ShelfIcon.CLOSE,p.muted,true);
+        for(Button b:new Button[]{themeButton,sortButton,cancel,clear,dismissNotice})ShelfStyle.buttonTheme(b,p,false);ShelfStyle.buttonTheme(add,p,true);
+        themeButton.setContentDescription(p.dark()?"切换到亮色主题":"切换到暗色主题");themeButton.setTooltipText(themeButton.getContentDescription());ShelfStyle.icon(themeButton,p.dark()?ShelfIcon.SUN:ShelfIcon.MOON,p.ink,true);ShelfStyle.icon(add,ShelfIcon.ADD,p.onAccent,false);ShelfStyle.icon(sortButton,ShelfIcon.SORT,p.muted,false);ShelfStyle.icon(clear,ShelfIcon.CLOSE,p.muted,true);ShelfStyle.icon(dismissNotice,ShelfIcon.CLOSE,p.muted,true);
         continueCard.setBackground(ShelfStyle.touch(getContext(),p.panel,p.accent,18));resumeIcon.setImageDrawable(new ShelfIcon(ShelfIcon.BOOK,p.accent,dp(24)));resumeArrow.setImageDrawable(new ShelfIcon(ShelfIcon.ARROW,p.muted,dp(18)));footer.setBackground(ShelfStyle.shape(getContext(),p.panel,12));importProgress.setIndeterminateTintList(ColorStateList.valueOf(p.accent));styleTabs();
     }
     private void searchBackground(){android.graphics.drawable.GradientDrawable background=ShelfStyle.shape(getContext(),colors.panel,16);if(search.hasFocus())background.setStroke(dp(1),colors.accent);searchBox.setBackground(background);}
