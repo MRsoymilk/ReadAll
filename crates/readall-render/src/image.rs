@@ -9,6 +9,8 @@ impl Surface {
         destination: Rect,
         clip: Rect,
     ) -> Result<(), RenderError> {
+        let destination = self.pixel_rect(destination);
+        let clip = self.pixel_rect(clip);
         let (width, height) = source;
         let count = u64::from(width) * u64::from(height);
         if width == 0

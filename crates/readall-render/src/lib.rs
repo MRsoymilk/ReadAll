@@ -1,6 +1,7 @@
 //! Dependency-free CPU drawing and unhinted TrueType glyph rasterization; no GPU or window backend.
 //! Channels use straight-alpha, byte-space source-over compositing (not linear-light color management).
 
+mod density;
 pub mod glyph;
 mod image;
 mod page_motion;
@@ -155,6 +156,7 @@ pub struct Surface {
     height: u32,
     pixels: Vec<Color>,
     limits: RenderLimits,
+    logical: (u32, u32),
 }
 
 impl Surface {
@@ -176,14 +178,16 @@ impl Surface {
             height,
             pixels,
             limits,
+            logical: (width, height),
         })
     }
 
+    /// Layout dimensions; `pixel_width/height` describe the raster backing store.
     pub fn width(&self) -> u32 {
-        self.width
+        self.logical.0
     }
     pub fn height(&self) -> u32 {
-        self.height
+        self.logical.1
     }
     pub fn pixels(&self) -> &[Color] {
         &self.pixels
@@ -199,6 +203,28 @@ impl Surface {
 
     /// Validates budgets and clipping before modifying any pixel.
     pub fn draw(&mut self, commands: &[DrawCommand]) -> Result<(), RenderError> {
+        if self.logical == (self.width, self.height) {
+            return self.draw_pixels(commands);
+        }
+        if commands.len() > self.limits.max_commands {
+            return Err(RenderError::BudgetExceeded("commands"));
+        }
+        let mapped: Vec<_> = commands
+            .iter()
+            .map(|cmd| match *cmd {
+                DrawCommand::FillRect { rect, color } => DrawCommand::FillRect {
+                    rect: self.pixel_rect(rect),
+                    color,
+                },
+                DrawCommand::PushClip(rect) => DrawCommand::PushClip(self.pixel_rect(rect)),
+                DrawCommand::PopClip => DrawCommand::PopClip,
+            })
+            .collect();
+        self.draw_pixels(&mapped)
+    }
+
+    /// Device-coordinate drawing for already rasterized vector primitives.
+    pub fn draw_pixels(&mut self, commands: &[DrawCommand]) -> Result<(), RenderError> {
         if commands.len() > self.limits.max_commands {
             return Err(RenderError::BudgetExceeded("commands"));
         }
@@ -258,8 +284,13 @@ impl Surface {
         let y = rect.y as usize;
         for row in y..y + rect.height as usize {
             let start = row * self.width as usize + x;
-            for destination in &mut self.pixels[start..start + rect.width as usize] {
-                *destination = color.over(*destination);
+            let row = &mut self.pixels[start..start + rect.width as usize];
+            if color.a == 255 {
+                row.fill(color);
+            } else {
+                for destination in row {
+                    *destination = color.over(*destination);
+                }
             }
         }
     }
