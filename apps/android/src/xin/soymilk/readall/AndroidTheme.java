@@ -16,7 +16,7 @@ import android.widget.TextView;
 final class AndroidTheme {
     private AndroidTheme(){}
     static void apply(Activity activity,ViewGroup root,View home,View loading,ReaderView page,ProgressBar progress,PageLoadingIndicator pageLoading,NativeReader.Appearance p){
-        root.setBackgroundColor(p.canvas);home.setBackgroundColor(p.canvas);loading.setBackgroundColor(p.panel);page.background(p.page);
+        root.setBackgroundColor(p.canvas);home.setBackgroundColor(p.canvas);loading.setBackground(ShelfStyle.shape(activity,p.panel,20));page.background(p.page);
         if(Build.VERSION.SDK_INT>=29)root.setForceDarkAllowed(false);
         tint(root,p);
         progress.setProgressTintList(ColorStateList.valueOf(p.accent));
@@ -38,9 +38,10 @@ final class AndroidTheme {
         }
     }
     private static void tint(View view,NativeReader.Appearance p){
+        // ShelfHome owns its full hierarchy, including selected tabs and icon colors.
+        if(view instanceof ShelfHome)return; // The activity applies shelf.theme after system-bar tinting.
         if(view instanceof Button){
-            Button b=(Button)view;b.setTextColor(p.ink);
-            b.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{android.R.attr.state_pressed},new int[]{}},new int[]{p.hover,p.button}));
+            Button b=(Button)view;b.setTypeface(ShelfStyle.MEDIUM);b.setStateListAnimator(null);b.setElevation(0);ShelfStyle.buttonTheme(b,p,false);
         }else if(view instanceof TextView)((TextView)view).setTextColor(p.ink);
         if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++)tint(group.getChildAt(i),p);}
     }

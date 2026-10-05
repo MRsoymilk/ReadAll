@@ -30,6 +30,15 @@ public final class ShelfStoreSmoke {
                 int first=ShelfGeometry.first(width,1000,to,restoredOffset);check(Float.isFinite(restoredOffset)&&restoredOffset>=0,"resize offset invalid");
                 check(first<=anchorIndex&&anchorIndex<first+(to==ShelfGeometry.LIST?1:ShelfGeometry.columns(width)),"focused book lost when columns change");
             }
+            for(float width:new float[]{256,320,393,600,848,1200})for(int mode=0;mode<=1;mode++)for(int i=0;i<30;i++){
+                ShelfGeometry.Tile tile=new ShelfGeometry.Tile(width,mode,i,17.5f);float columns=mode==ShelfGeometry.LIST?1:ShelfGeometry.columns(width);
+                check(tile.left>=ShelfGeometry.EDGE-.01f&&tile.right<=width-ShelfGeometry.EDGE+.01f,"modern shelf horizontal padding violated");
+                check(tile.menuRight-tile.menuLeft>=48&&tile.menuBottom-tile.menuTop>=48,"management touch target below 48 units");
+                check(tile.menuLeft>=tile.left&&tile.menuTop>=tile.top&&tile.menuRight<=tile.right&&tile.menuBottom<=tile.bottom,"management target outside its card");
+                ShelfGeometry.Tile following=new ShelfGeometry.Tile(width,mode,i+(int)columns,17.5f);check(following.top>tile.bottom,"rows overlap");
+                ShelfGeometry.Tile moved=new ShelfGeometry.Tile(width,mode,i,18.5f);check(Math.abs(tile.top-moved.top-1)<.001f&&Math.abs(tile.menuTop-moved.menuTop-1)<.001f,"drawing and hit targets diverge when scrolling");
+            }
+            check(ShelfGeometry.columns(320)==2&&ShelfGeometry.columns(393)==2,"phone grid should retain two covers");
             check(ShelfGeometry.restoreOffset(393,ShelfGeometry.COVERS,-1,1,ShelfGeometry.COVERS,999)==0,"removed focus should recover to start");
             check(ShelfGeometry.LIST==0&&ShelfGeometry.COVERS==1,"existing view IDs must remain stable");
             check(ShelfGeometry.mode(0)==ShelfGeometry.LIST&&ShelfGeometry.mode(1)==ShelfGeometry.COVERS,"valid views changed");
@@ -41,7 +50,7 @@ public final class ShelfStoreSmoke {
                 }
             }
             check(Arrays.equals(Files.readAllBytes(index),valid),"view changes must not rewrite books or reading state");
-            System.out.println("PASS bookshelf: atomic persistence, deduplication, alias/pin/search/sort, progress, safe removal, corruption refusal, concurrent writers, bounded list/grid geometry and removed-view fallback");
+            System.out.println("PASS bookshelf: atomic persistence, deduplication, alias/pin/search/sort, progress, safe removal, corruption refusal, concurrent writers, bounded list/grid geometry, modern spacing/48-unit targets and removed-view fallback");
         }finally{try(java.util.stream.Stream<Path> paths=Files.walk(tmp)){paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.deleteIfExists(p);}catch(IOException e){throw new UncheckedIOException(e);}});}}
     }
 }
