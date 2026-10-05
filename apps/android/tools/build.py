@@ -7,7 +7,7 @@ Examples:
   /usr/bin/python3 apps/android/tools/build.py host-test --vendor /absolute/vendor
 
 No automatic SDK downloads, license acceptance, system Rust changes, or device changes.
-Only `prepare-rust` downloads the exact matching target into the project target directory.
+Only explicit `prepare-rust` / `prepare-kotlin` commands download project-local toolchains.
 Only the explicit `install` command installs the resulting debug APK on a device.
 """
 from __future__ import annotations
@@ -27,6 +27,7 @@ import tomllib
 import zipfile
 import xml.etree.ElementTree as ET
 import rust_target
+import kotlin_toolchain
 
 ROOT = Path(__file__).resolve().parents[3]
 APP = ROOT / "apps/android"
@@ -90,6 +91,33 @@ def prepare_rust(args: argparse.Namespace) -> int:
         raise BuildError("prepare-rust needs an explicit online download; build remains offline-capable")
     rust_target.prepare(ROOT, executable(args.rustc), TARGETS[args.abi][0])
     return 0
+
+def prepare_kotlin(args: argparse.Namespace) -> int:
+    print("Kotlin:", kotlin_toolchain.prepare(ROOT, args.offline))
+    return 0
+
+def kotlin_home(args: argparse.Namespace) -> Path:
+    return getattr(args, "kotlin", None) or kotlin_toolchain.default_home(ROOT)
+
+def preferred_sources(directory: Path) -> list[Path]:
+    # During a staged migration the reviewed Kotlin replacement wins. The final
+    # tree contains no handwritten Java; AAPT2-generated R.java is still compiled.
+    return sorted(directory.rglob("*.kt")) + sorted(p for p in directory.rglob("*.java") if not p.with_suffix(".kt").exists())
+
+def compile_classes(args: argparse.Namespace, sources: list[Path], classes: Path, found: dict[str, Path] | None = None) -> list[Path]:
+    classes.mkdir(parents=True, exist_ok=True)
+    kotlin_sources = [p for p in sources if p.suffix == ".kt"]
+    java_sources = [p for p in sources if p.suffix == ".java"]
+    libraries = kotlin_toolchain.runtime(kotlin_home(args)) if kotlin_sources else []
+    if kotlin_sources:
+        if found:
+            kotlin_toolchain.check_d8(found["java"], found["d8"])
+        cp = [classes, *([found["lambda_stubs"], found["platform"]] if found else [])]
+        run(kotlin_toolchain.compile_command(args.java, kotlin_home(args), sources, classes, cp, android=found is not None))
+    if java_sources:
+        target = ["-source", "8", "-target", "8", "-bootclasspath", java_bootclasspath(found)] if found else ["--release", "8"]
+        run([executable(args.java / "bin/javac"), "-encoding", "UTF-8", *target, "-classpath", os.pathsep.join(map(str, [classes, *libraries])), "-d", classes, *java_sources])
+    return libraries
 
 def tools(args: argparse.Namespace) -> dict[str, Path]:
     if not args.sdk.is_dir():
@@ -160,7 +188,10 @@ def doctor(args: argparse.Namespace) -> int:
         found = tools(args)
         for key, path in found.items():
             print(key + ":", path)
-    except (BuildError, rust_target.TargetError) as error:
+        kotlin_toolchain.validate(kotlin_home(args))
+        print("Kotlin:", kotlin_home(args), "version", kotlin_toolchain.VERSION)
+        print("D8 compatibility:", kotlin_toolchain.check_d8(found["java"], found["d8"]))
+    except (BuildError, rust_target.TargetError, kotlin_toolchain.KotlinError) as error:
         errors.append(str(error))
     try:
         devices = adb_devices().strip()
@@ -245,16 +276,13 @@ def build(args: argparse.Namespace) -> int:
         base = stage / "resources.apk"
         manifest = configured_manifest(stage / "AndroidManifest.xml", args.min_api, args.api)
         run([found["aapt2"], "link", "-o", base, "--manifest", manifest, "-I", found["platform"], compiled, "-A", assets, "--java", generated, "--min-sdk-version", str(args.min_api), "--target-sdk-version", str(args.api), "--version-name", version_name, "--replace-version"])
-        sources = sorted((APP / "src").rglob("*.java")) + sorted(generated.rglob("*.java"))
-        # android.jar's LambdaMetafactory is intentionally not javac's bootstrap
-        # implementation. Supply SDK stubs first; D8 desugars lambdas afterwards.
-        bootclasspath = java_bootclasspath(found)
-        run([found["javac"], "-encoding", "UTF-8", "-source", "8", "-target", "8", "-bootclasspath", bootclasspath, "-d", classes, *sources])
+        sources = preferred_sources(APP / "src") + sorted(generated.rglob("*.java"))
+        libraries = compile_classes(args, sources, classes, found)
         jar = stage / "classes.jar"
         with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(classes.rglob("*.class")):
                 archive.write(path, str(path.relative_to(classes)))
-        run([found["java"], "-cp", found["d8"], "com.android.tools.r8.D8", "--min-api", str(args.min_api), "--lib", found["platform"], "--output", dex, jar])
+        run([found["java"], "-cp", found["d8"], "com.android.tools.r8.D8", "--min-api", str(args.min_api), "--lib", found["platform"], "--output", dex, jar, *libraries])
         unsigned = stage / "unsigned.apk"
         shutil.copy2(base, unsigned)
         with zipfile.ZipFile(unsigned, "a") as archive:
@@ -273,7 +301,7 @@ def build(args: argparse.Namespace) -> int:
         run([found["zipalign"], "-c", "-P", "16", "4", signed])
         apk = output / f"readall-android-debug-{args.abi}.apk"
         os.replace(signed, apk)
-        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True}, indent=2)+"\n")
+        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True, "kotlin_version": kotlin_toolchain.VERSION, "kotlin_home": str(kotlin_home(args)), "kotlin_sources": sum(p.suffix == ".kt" for p in sources)}, indent=2)+"\n")
         print("APK:", apk)
     return 0
 
@@ -287,22 +315,19 @@ def host_test(args: argparse.Namespace) -> int:
     # change the expected initial page or touch the user's real library.
     fixture = Path(tempfile.mkdtemp(prefix="fixture-", dir=output))
     run([output / "debug/examples/mobile_fixture", fixture])
-    classes = output / "java"
-    classes.mkdir(exist_ok=True)
-    run([executable(args.java / "bin/javac"), "-encoding", "UTF-8", "-d", classes, APP / "src/xin/soymilk/readall/NativeReader.java", APP / "src/xin/soymilk/readall/TouchRouter.java", APP / "tests/JniSmoke.java", APP / "tests/TouchSmoke.java", APP / "tests/UiCapture.java", APP / "src/xin/soymilk/readall/ReaderViewport.java", APP / "tests/ViewportSmoke.java", APP / "tests/DensitySmoke.java", APP / "tests/ThemeSmoke.java", APP / "tests/TocDragSmoke.java", APP / "tests/SmoothScrollSmoke.java", APP / "src/xin/soymilk/readall/LoadingFeedback.java", APP / "tests/LoadingFeedbackSmoke.java", APP / "src/xin/soymilk/readall/ShelfStore.java", APP / "src/xin/soymilk/readall/ShelfGeometry.java", APP / "tests/ShelfStoreSmoke.java", APP / "tests/ShelfPreviewSmoke.java", APP / "src/xin/soymilk/readall/ShelfNotice.java", APP / "tests/ShelfNoticeSmoke.java", APP / "tests/ReaderMenuSmoke.java"])
-    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.JniSmoke", fixture], timeout=120)
-    run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.TouchSmoke"], timeout=30)
-    run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.ViewportSmoke"], timeout=30)
-    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.DensitySmoke", fixture], timeout=120)
-    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.ThemeSmoke", fixture], timeout=120)
-    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.TocDragSmoke", fixture], timeout=120)
-    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.SmoothScrollSmoke", fixture], timeout=120)
-    run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.LoadingFeedbackSmoke"], timeout=30)
-    run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.ShelfStoreSmoke"], timeout=30)
-    run([executable(args.java / "bin/java"), "-Djava.awt.headless=true", "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.ShelfPreviewSmoke", fixture], timeout=120)
-    run([executable(args.java / "bin/java"), "-cp", classes, "xin.soymilk.readall.ShelfNoticeSmoke"], timeout=30)
-    run([executable(args.java / "bin/java"), "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", classes, "xin.soymilk.readall.ReaderMenuSmoke", fixture], timeout=120)
-    print("PASS host JVM/JNI/shared reader, modern Android menus, themes, scrolling/loading, transient shelf notices and bookshelf persistence, bounded layout and real cover previews; NOT Android device validation.")
+    classes = output / "kotlin-classes"
+    if classes.exists():
+        shutil.rmtree(classes)  # Generated output only: never mix old Java bytecode into Kotlin tests.
+    names = ["NativeReader", "TouchRouter", "ReaderViewport", "LoadingFeedback", "ShelfStore", "ShelfGeometry", "ShelfNotice"]
+    source_root = APP / "src/xin/soymilk/readall"
+    sources = [next(p for p in [source_root / (name + ".kt"), source_root / (name + ".java")] if p.is_file()) for name in names]
+    sources += preferred_sources(APP / "tests")
+    libraries = compile_classes(args, sources, classes)
+    cp = os.pathsep.join(map(str, [classes, *libraries]))
+    plain = {"TouchSmoke", "ViewportSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfNoticeSmoke"}
+    for name in ["JniSmoke", "TouchSmoke", "ViewportSmoke", "DensitySmoke", "ThemeSmoke", "TocDragSmoke", "SmoothScrollSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfPreviewSmoke", "ShelfNoticeSmoke", "ReaderMenuSmoke"]:
+        run([executable(args.java / "bin/java"), "-Djava.awt.headless=true", "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", cp, "xin.soymilk.readall." + name, *([] if name in plain else [fixture])], timeout=120)
+    print("PASS Kotlin/JVM JNI, reading/gestures/themes/loading, bookshelf persistence and menus; NOT Android device validation.")
     return 0
 
 def install(args: argparse.Namespace) -> int:
@@ -330,9 +355,10 @@ def install(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["doctor", "prepare-rust", "build", "host-test", "install"])
+    parser.add_argument("command", choices=["doctor", "prepare-rust", "prepare-kotlin", "build", "host-test", "install"])
     parser.add_argument("--sdk", type=absolute, default=Path("/opt/android-sdk"))
     parser.add_argument("--ndk", type=absolute)
+    parser.add_argument("--kotlin", type=absolute, help="Kotlin 2.1.21 compiler home; defaults to the prepared project-local toolchain")
     parser.add_argument("--java", type=absolute, default=Path("/usr/lib/jvm/openjdk-17"))
     parser.add_argument("--cargo", type=absolute, default=Path("/usr/bin/cargo"))
     parser.add_argument("--rustc", type=absolute, default=Path("/usr/bin/rustc"))
@@ -352,8 +378,8 @@ def main() -> int:
     if args.build_tools and not re.fullmatch(r"\d+(\.\d+)*", args.build_tools):
         parser.error("--build-tools must be a numeric SDK package version")
     try:
-        return {"doctor": doctor, "prepare-rust": prepare_rust, "build": build, "host-test": host_test, "install": install}[args.command](args)
-    except (OSError, BuildError, rust_target.TargetError, subprocess.SubprocessError) as error:
+        return {"doctor": doctor, "prepare-rust": prepare_rust, "prepare-kotlin": prepare_kotlin, "build": build, "host-test": host_test, "install": install}[args.command](args)
+    except (OSError, BuildError, rust_target.TargetError, kotlin_toolchain.KotlinError, subprocess.SubprocessError) as error:
         print("ReadAll Android:", error, file=sys.stderr)
         return 1
 
