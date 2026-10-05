@@ -7,21 +7,43 @@ pub(super) struct Inbox {
     queue: Mutex<VecDeque<Command>>,
     wake: Condvar,
 }
-fn replaceable(old: &Command, new: &Command) -> bool {
+fn same_direction(before: i32, current: i32, next: i32) -> bool {
+    let first = i64::from(current) - i64::from(before);
+    let second = i64::from(next) - i64::from(current);
+    first == 0 || second == 0 || first.signum() == second.signum()
+}
+fn replaceable(queue: &VecDeque<Command>, new: &Command) -> bool {
+    let Some(old) = queue.back() else {
+        return false;
+    };
     match (old, new) {
         (Command::Resize { .. }, Command::Resize { .. })
         | (Command::Viewport { .. }, Command::Viewport { .. }) => true,
         (Command::Input { mode: a, .. }, Command::Input { mode: b, .. }) => a == b,
-        (Command::Touch { kind: a, .. }, Command::Touch { kind: b, .. }) => {
-            a == b && matches!(a, 3 | 6)
+        (
+            Command::Touch { kind: 3, x, y },
+            Command::Touch {
+                kind: 3,
+                x: nx,
+                y: ny,
+            },
+        ) => {
+            // Keep turning points: clamped list dragging is path-dependent at its
+            // ends. Dropping an outward excursion also drops the subsequent reversal.
+            // If the worker consumed our predecessor, keep this sample conservatively.
+            queue.iter().rev().nth(1).is_some_and(|previous| {
+                matches!(previous, Command::Touch { kind: 2 | 3, x: px, y: py }
+                    if same_direction(*px, *x, *nx) && same_direction(*py, *y, *ny))
+            })
         }
+        (Command::Touch { kind: 6, .. }, Command::Touch { kind: 6, .. }) => true,
         _ => false,
     }
 }
 impl Inbox {
     pub(super) fn push(&self, command: Command) -> io::Result<()> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-        if queue.back().is_some_and(|old| replaceable(old, &command)) {
+        if replaceable(&queue, &command) {
             *queue.back_mut().unwrap() = command;
         } else {
             let terminal = matches!(
@@ -116,6 +138,52 @@ mod tests {
             }
         ));
         assert!(matches!(q[2], Command::Touch { kind: 4, .. }));
+    }
+    #[test]
+    fn coalesced_pan_retains_reversals_with_and_without_a_queued_start() {
+        for consume_start in [false, true] {
+            let inbox = Inbox::default();
+            inbox
+                .push(Command::Touch {
+                    kind: 2,
+                    x: 200,
+                    y: 260,
+                })
+                .unwrap();
+            if consume_start {
+                assert!(matches!(
+                    inbox.receive(Duration::ZERO),
+                    Some(Command::Touch { kind: 2, .. })
+                ));
+            }
+            for y in [360, 460, 440, 422, 422] {
+                inbox.push(Command::Touch { kind: 3, x: 200, y }).unwrap();
+            }
+            inbox
+                .push(Command::Touch {
+                    kind: 4,
+                    x: 200,
+                    y: 422,
+                })
+                .unwrap();
+            let q = inbox.queue.lock().unwrap();
+            let positions: Vec<_> = q
+                .iter()
+                .filter_map(|c| match c {
+                    Command::Touch { kind: 3, y, .. } => Some(*y),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                positions.windows(2).any(|p| p == [460, 422]),
+                "turning point lost: {positions:?}"
+            );
+            assert!(
+                positions.len() <= 3,
+                "same-direction moves must still coalesce"
+            );
+            assert!(matches!(q.back(), Some(Command::Touch { kind: 4, .. })));
+        }
     }
     #[test]
     fn saturated_input_always_accepts_gesture_cleanup_without_unbounded_growth() {
