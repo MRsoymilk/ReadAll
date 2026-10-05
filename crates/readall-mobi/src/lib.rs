@@ -343,6 +343,10 @@ impl<'a> MobiBook<'a> {
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
+    /// Encoded cover resource without decompressing MOBI/KF8 text or rebuilding EPUB.
+    pub fn cover_image(&self) -> Result<Option<&'a [u8]>> {
+        self.cover.map(|index| self.image(index)).transpose()
+    }
     pub(crate) fn record(&self, index: usize) -> Result<&'a [u8]> {
         let range = self
             .records

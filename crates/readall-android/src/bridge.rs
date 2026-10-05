@@ -72,6 +72,47 @@ fn strings(env: &mut JNIEnv<'_>, values: &[String]) -> Result<jobjectArray> {
     }
     Ok(array.into_raw())
 }
+/// Shelf IO runs on the host IO executor, never on the reader/UI thread.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativePreview(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    path: JString<'_>,
+    buffer: JByteBuffer<'_>,
+) -> jobjectArray {
+    guard(&mut env, |env| {
+        if env.call_method(&buffer, "isReadOnly", "()Z", &[])?.z()? {
+            return Err(bad("preview buffer is read-only"));
+        }
+        let capacity = env.get_direct_buffer_capacity(&buffer)?;
+        if capacity < readall::mobile::PREVIEW_BYTES {
+            return Err(bad("preview buffer too small"));
+        }
+        let pointer = env.get_direct_buffer_address(&buffer)?;
+        if pointer.is_null() {
+            return Err(bad("invalid preview buffer"));
+        }
+        let path = PathBuf::from(text(env, &path)?);
+        let preview = readall::mobile::book_preview(&path)?;
+        if preview.rgba.len() > readall::mobile::PREVIEW_BYTES {
+            return Err(bad("preview exceeds buffer"));
+        }
+        // SAFETY: direct writable Java buffer has verified capacity and remains alive
+        // during this synchronous call. No pointer/slice escapes; caller owns the buffer.
+        let output = unsafe { std::slice::from_raw_parts_mut(pointer, preview.rgba.len()) };
+        output.copy_from_slice(&preview.rgba);
+        strings(
+            env,
+            &[
+                preview.title,
+                preview.author,
+                preview.format.into(),
+                preview.width.to_string(),
+                preview.height.to_string(),
+            ],
+        )
+    })
+}
 fn appearance_fields(value: Appearance) -> Vec<String> {
     std::iter::once(value.name.to_owned())
         .chain(value.colors.map(|c| c.to_string()))

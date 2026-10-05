@@ -7,6 +7,14 @@ public final class NativeReader implements AutoCloseable {
     static { System.loadLibrary("readall_android"); }
     public static final int NEXT=1, PREVIOUS=2, FIRST=3, LAST=4, LARGER=5, SMALLER=6, CONTENTS=7, JUMP=8, THEME=9, SAVE=10, BOOKMARK=11, RESIZE=12;
     public static final int BACK=13, PAUSE=14, FIND=20, ANNOTATIONS=21, SETTINGS=22, SELECT=23, COPY=24, PASTE=25, NOTE=26, HIGHLIGHT=27, DELETE=28, ACTIVATE=29, DISMISS=30, BACKSPACE=31, TOUCH=40;
+    static final int PREVIEW_BYTES=384*512*4;
+    static final class Preview {
+        final String title,author,format;final int width,height;
+        Preview(String[] v){if(v==null||v.length!=5)throw new IllegalStateException("invalid preview protocol");title=v[0];author=v[1];format=v[2];width=Integer.parseInt(v[3]);height=Integer.parseInt(v[4]);if(width<0||height<0||width>384||height>512||(width==0)!=(height==0))throw new IllegalStateException("invalid preview geometry");}
+    }
+    /** Blocking bounded metadata/cover inspection: invoke only on a bookshelf worker. */
+    static Preview preview(String path,ByteBuffer pixels){if(!pixels.isDirect()||pixels.isReadOnly()||pixels.capacity()<PREVIEW_BYTES)throw new IllegalArgumentException("preview needs a writable direct buffer");return new Preview(nativePreview(path,pixels));}
+    private static native String[] nativePreview(String path,ByteBuffer pixels);
     private long handle;
     public NativeReader(String book, String font, String state, int width, int height, int size, int margin) {
         this(book,font,state,width,height,size,margin,width,height);

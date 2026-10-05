@@ -4,7 +4,9 @@
 mod appearance;
 mod frame_clock;
 mod input;
+mod preview;
 pub use appearance::{Appearance, appearance};
+pub use preview::{BookPreview, PREVIEW_BYTES, book_preview};
 #[cfg(test)]
 mod tests;
 use crate::{
