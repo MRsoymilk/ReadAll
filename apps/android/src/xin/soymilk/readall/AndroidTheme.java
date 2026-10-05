@@ -15,13 +15,14 @@ import android.widget.TextView;
 /** Platform surfaces use the Rust palette; no Android-only copy of RGB values. */
 final class AndroidTheme {
     private AndroidTheme(){}
-    static void apply(Activity activity,ViewGroup root,View home,View loading,ReaderView page,ProgressBar progress,NativeReader.Appearance p){
+    static void apply(Activity activity,ViewGroup root,View home,View loading,ReaderView page,ProgressBar progress,PageLoadingIndicator pageLoading,NativeReader.Appearance p){
         root.setBackgroundColor(p.canvas);home.setBackgroundColor(p.canvas);loading.setBackgroundColor(p.panel);page.background(p.page);
         if(Build.VERSION.SDK_INT>=29)root.setForceDarkAllowed(false);
         tint(root,p);
         progress.setProgressTintList(ColorStateList.valueOf(p.accent));
         progress.setProgressBackgroundTintList(ColorStateList.valueOf(p.border));
         progress.setIndeterminateTintList(ColorStateList.valueOf(p.accent));
+        pageLoading.setIndeterminateTintList(ColorStateList.valueOf(p.accent));
         Window window=activity.getWindow();window.setBackgroundDrawable(new ColorDrawable(p.canvas));
         // API 35 edge-to-edge uses root insets as the bar backdrop. Older versions
         // still honor these colors. Icons must be set separately on every switch.

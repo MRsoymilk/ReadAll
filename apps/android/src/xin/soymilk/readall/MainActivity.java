@@ -40,7 +40,9 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     private volatile boolean importing,destroyed;
     private volatile long imported,total;
     private boolean resumed,frameScheduled,copyPending,remembered;
-    private long shownSerial,busySince;
+    private long shownSerial;
+    private final LoadingFeedback loadingFeedback=new LoadingFeedback();
+    private PageLoadingIndicator pageLoading;
     private NativeReader reader;
     private NativeReader.State lastState;
     private File currentFile;
@@ -84,6 +86,10 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);progress.setMax(1000);loading.addView(progress,new LinearLayout.LayoutParams(-1,dp(5)));
         LinearLayout actions=new LinearLayout(this);loading.addView(actions);button(actions,"返回 / 取消",this::returnHome);button(actions,"重试",()->{if(!currentUri.isEmpty())importBook(Uri.parse(currentUri));else openLast();});
         FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER);lp.setMargins(dp(20),0,dp(20),0);root.addView(loading,lp);loading.setVisibility(View.GONE);
+        pageLoading=new PageLoadingIndicator(this);
+        FrameLayout.LayoutParams spinner=new FrameLayout.LayoutParams(dp(22),dp(22),Gravity.BOTTOM|Gravity.RIGHT);spinner.setMargins(0,0,dp(12),dp(10));
+        // Overlay inside the root's system-bar/keyboard insets; never resize the page.
+        root.addView(pageLoading,spinner);
         setContentView(root);applyAppearance(appearance);loadAppearance();
         if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::goBack);
         if(saved!=null&&saved.getBoolean("reading",false))page.post(this::openLast);
@@ -93,7 +99,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
     private Button button(LinearLayout parent,String label,Runnable action){Button b=new Button(this);b.setText(label);b.setAllCaps(false);b.setOnClickListener(v->action.run());parent.addView(b,new LinearLayout.LayoutParams(parent.getOrientation()==LinearLayout.HORIZONTAL?0:-1,dp(48),parent.getOrientation()==LinearLayout.HORIZONTAL?1:0));return b;}
     private String stateDirectory(){return new File(getFilesDir(),"reader-state").getAbsolutePath();}
     private void applyAppearance(NativeReader.Appearance value){
-        appearance=value;AndroidTheme.apply(this,root,home,loading,page,progress,value);
+        appearance=value;AndroidTheme.apply(this,root,home,loading,page,progress,pageLoading,value);
         themeButton.setText(value.dark()?"切换到亮色":"切换到暗色");
         SharedPreferences mirror=getSharedPreferences("appearance",MODE_PRIVATE);
         if(!value.name.equals(mirror.getString("theme","")))mirror.edit().putString("theme",value.name).apply();
@@ -137,7 +143,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         if(token!=epoch||destroyed)return;if(page.getWidth()==0||page.getHeight()==0){page.post(()->startReader(file,name,font,token));return;}
         try{
             int[] v=page.viewportSize();reader=new NativeReader(file.getAbsolutePath(),font.getAbsolutePath(),new File(getFilesDir(),"reader-state").getAbsolutePath(),v[0],v[1],20,16,v[2],v[3]);
-            currentFile=file;currentName=name;shownSerial=0;remembered=false;lastState=null;busySince=0;home.setVisibility(View.GONE);showProgress("准备正文",0,0);requestFrame();
+            currentFile=file;currentName=name;shownSerial=0;remembered=false;lastState=null;loadingFeedback.reset();home.setVisibility(View.GONE);showProgress("准备正文",0,0);requestFrame();
         }catch(Exception|LinkageError e){showError(e);}
     }
     @Override public void viewport(int w,int h){ui.removeCallbacks(resizeTask);ui.postDelayed(resizeTask,90);}
@@ -161,10 +167,7 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
             if(s.closed()){
                 if(s.notice.isEmpty()){returnHome();return;}showError(new IllegalStateException(s.notice));return;
             }
-            if(s.busy()){
-                if(busySince==0)busySince=SystemClock.uptimeMillis();
-                if(s.serial==0||SystemClock.uptimeMillis()-busySince>180)showProgress(s.phase,s.done,s.total);
-            }else{busySince=0;loading.setVisibility(View.GONE);}
+            updateLoading(s);
             if(s.serial>0){
                 if(!appearance.name.equals(s.appearance.name))applyAppearance(s.appearance);
                 if(!remembered){remembered=true;getSharedPreferences("library",MODE_PRIVATE).edit().putString("book",currentFile.getAbsolutePath()).putString("name",currentName).putString("uri",currentUri).apply();}
@@ -210,13 +213,24 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
             }catch(Exception error){try{owner.hostReply(0,error.getMessage()==null?"系统服务不可用":error.getMessage());}catch(Exception ignored){}}
         }
     }
+    private void updateLoading(NativeReader.State state){
+        int feedback=loadingFeedback.update(shownSerial>0,state.busy(),SystemClock.uptimeMillis());
+        if(feedback==LoadingFeedback.INITIAL){
+            if(state.busy())showProgress(state.phase,state.done,state.total);else showProgress("显示页面",0,0);
+        }else{
+            // Once a book is visible, ordinary page work can ONLY use the corner spinner.
+            loading.setVisibility(View.GONE);pageLoading.show(feedback==LoadingFeedback.CORNER);
+        }
+    }
+    private void hidePageLoading(){loadingFeedback.reset();pageLoading.show(false);}
     private void showProgress(String phase,long done,long total){
-        loading.setVisibility(View.VISIBLE);progress.setVisibility(View.VISIBLE);progress.setIndeterminate(total<=0);
+        hidePageLoading();loading.setVisibility(View.VISIBLE);progress.setVisibility(View.VISIBLE);progress.setIndeterminate(total<=0);
         if(total>0)progress.setProgress((int)Math.min(1000,1000.0*done/total));
         status.setText(phase+(total>0?String.format(java.util.Locale.ROOT," · %.1f%%",100.0*Math.min(done,total)/total):"…"));
     }
-    private void showError(Throwable e){loading.setVisibility(View.VISIBLE);progress.setVisibility(View.GONE);status.setText("ReadAll："+(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));}
+    private void showError(Throwable e){hidePageLoading();loading.setVisibility(View.VISIBLE);progress.setVisibility(View.GONE);status.setText("ReadAll："+(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));}
     private void closeReader(){
+        hidePageLoading();shownSerial=0;
         page.cancelTouch();page.closeInput();ui.removeCallbacks(schedule);ui.removeCallbacks(resizeTask);choreographer.removeFrameCallback(frames);frameScheduled=false;copyPending=false;
         NativeReader owner=reader;reader=null;lastState=null;if(owner!=null)owner.close();
     }
@@ -226,10 +240,10 @@ public final class MainActivity extends Activity implements ReaderView.Listener 
         if(reader!=null){if(lastState==null||lastState.serial==0||lastState.closed())returnHome();else action(NativeReader.BACK,0,0);return;}
         finish();
     }
-    @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appearance!=null&&root!=null)AndroidTheme.apply(this,root,home,loading,page,progress,appearance);}
+    @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appearance!=null&&root!=null)AndroidTheme.apply(this,root,home,loading,page,progress,pageLoading,appearance);}
     @Override public void onBackPressed(){goBack();}
     @Override protected void onResume(){super.onResume();resumed=true;if(reader!=null)action(NativeReader.PAUSE,0,0);requestFrame();}
-    @Override protected void onPause(){resumed=false;page.cancelTouch();ui.removeCallbacks(schedule);choreographer.removeFrameCallback(frames);frameScheduled=false;if(reader!=null)try{reader.command(NativeReader.PAUSE,1,0);}catch(Exception ignored){}super.onPause();}
+    @Override protected void onPause(){resumed=false;hidePageLoading();page.cancelTouch();ui.removeCallbacks(schedule);choreographer.removeFrameCallback(frames);frameScheduled=false;if(reader!=null)try{reader.command(NativeReader.PAUSE,1,0);}catch(Exception ignored){}super.onPause();}
     @Override protected void onSaveInstanceState(Bundle state){state.putBoolean("reading",reader!=null);super.onSaveInstanceState(state);}
     @Override protected void onDestroy(){destroyed=true;++epoch;closeReader();io.shutdownNow();pixels.shutdownNow();release(null);super.onDestroy();}
 }
