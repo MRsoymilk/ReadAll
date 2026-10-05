@@ -32,6 +32,7 @@ impl Surface {
         if visible.area() > self.limits.max_blended_pixels {
             return Err(RenderError::BudgetExceeded("image pixel work"));
         }
+        let output = std::sync::Arc::make_mut(&mut self.pixels);
         for y in visible.y..visible.y + visible.height as i32 {
             let sy = ((i64::from(y) - i64::from(destination.y)) as u64 * u64::from(height)
                 / u64::from(destination.height)) as usize;
@@ -41,7 +42,7 @@ impl Surface {
                 let at = (sy * width as usize + sx) * 4;
                 let source =
                     Color::rgba(pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]);
-                let destination = &mut self.pixels[y as usize * self.width as usize + x as usize];
+                let destination = &mut output[y as usize * self.width as usize + x as usize];
                 *destination = source.over(*destination);
             }
         }

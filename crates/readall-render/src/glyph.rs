@@ -328,6 +328,7 @@ impl Surface {
             return Err(RenderError::BudgetExceeded("synthetic glyph work"));
         }
         let clip = clip.intersection(Rect::new(0, 0, self.width, self.height));
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in 0..mask.height {
             let y = i64::from(baseline.1) + i64::from(mask.top) + i64::from(row);
             if y < i64::from(clip.y) || y >= i64::from(clip.y) + i64::from(clip.height) {
@@ -355,8 +356,7 @@ impl Surface {
                     if x < i64::from(clip.x) || x >= i64::from(clip.x) + i64::from(clip.width) {
                         continue;
                     }
-                    let destination =
-                        &mut self.pixels[y as usize * self.width as usize + x as usize];
+                    let destination = &mut pixels[y as usize * self.width as usize + x as usize];
                     *destination = Color { a: alpha, ..color }.over(*destination);
                 }
             }
@@ -395,6 +395,7 @@ impl Surface {
         if rect.area() > self.limits.max_blended_pixels {
             return Err(RenderError::BudgetExceeded("glyph blending work"));
         }
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in 0..rect.height as usize {
             let target = (rect.y as usize + row) * self.width as usize + rect.x as usize;
             let source = (i64::from(rect.y) - i64::from(y) + row as i64) as usize
@@ -403,8 +404,7 @@ impl Surface {
             for column in 0..rect.width as usize {
                 let alpha = ((u16::from(color.a) * u16::from(mask.coverage[source + column]) + 127)
                     / 255) as u8;
-                self.pixels[target + column] =
-                    Color { a: alpha, ..color }.over(self.pixels[target + column]);
+                pixels[target + column] = Color { a: alpha, ..color }.over(pixels[target + column]);
             }
         }
         Ok(())

@@ -57,10 +57,11 @@ impl Surface {
             return Err(RenderError::BudgetExceeded("page copy pixels"));
         }
         let count = (x1 - x0) as usize;
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for y in y0..y1 {
             let from = (y - dy) as usize * source.width as usize + (x0 - dx) as usize;
             let to = y as usize * self.width as usize + x0 as usize;
-            self.pixels[to..to + count].copy_from_slice(&source.pixels[from..from + count]);
+            pixels[to..to + count].copy_from_slice(&source.pixels[from..from + count]);
         }
         Ok(())
     }
@@ -106,7 +107,9 @@ impl Surface {
             return self.copy_region_pixels(from, clip, (clip.x + direction * shift, clip.y), clip);
         }
         let curl = (p * std::f32::consts::PI).sin();
-        let roll = (clip.width as f32 * 0.17).min(140.0 * self.pixel_scale().0) * curl;
+        let density = self.pixel_scale().0;
+        let roll = (clip.width as f32 * 0.17).min(140.0 * density) * curl;
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
         for row in 0..clip.height as usize {
             let bend = ((row as f32 / clip.height.max(1) as f32) - 0.5) * roll * 0.35;
             let fold = ((1.0 - p) * w as f32 + bend).clamp(0.0, w as f32);
@@ -118,12 +121,10 @@ impl Surface {
                 } else {
                     (0, front as usize)
                 };
-                self.pixels[base + left..base + right]
+                pixels[base + left..base + right]
                     .copy_from_slice(&from.pixels[base + left..base + right]);
             }
-            let end = (fold + roll + 20.0 * self.pixel_scale().0 * curl)
-                .ceil()
-                .min(w as f32) as i32;
+            let end = (fold + roll + 20.0 * density * curl).ceil().min(w as f32) as i32;
             for local in front..end {
                 let x = if backwards { w - 1 - local } else { local };
                 let at = base + x as usize;
@@ -144,18 +145,16 @@ impl Surface {
                     let channel = |bg: u8, text: u8| {
                         ((0.93 * f32::from(bg) + 0.07 * f32::from(text)) * shade).round() as u8
                     };
-                    self.pixels[at] = Color::rgba(
+                    pixels[at] = Color::rgba(
                         channel(paper.r, ink.r),
                         channel(paper.g, ink.g),
                         channel(paper.b, ink.b),
                         255,
                     );
                 } else {
-                    let shadow = (1.0
-                        - (distance - roll) / (20.0 * self.pixel_scale().0 * curl).max(0.01))
-                    .clamp(0.0, 1.0);
-                    self.pixels[at] =
-                        Color::rgba(0, 0, 0, (shadow * 45.0) as u8).over(self.pixels[at]);
+                    let shadow = (1.0 - (distance - roll) / (20.0 * density * curl).max(0.01))
+                        .clamp(0.0, 1.0);
+                    pixels[at] = Color::rgba(0, 0, 0, (shadow * 45.0) as u8).over(pixels[at]);
                 }
             }
         }
