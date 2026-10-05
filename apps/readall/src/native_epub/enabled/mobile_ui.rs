@@ -205,6 +205,24 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
         self.cancel_touch()?;
         self.window.resize(width, height)
     }
+    pub(crate) fn resize_output(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> WindowResult<bool> {
+        self.cancel_touch()?;
+        let changed =
+            self.window
+                .session
+                .resize_output(width, height, pixel_width, pixel_height)?;
+        if changed {
+            self.window.reset_motion()?;
+            self.window.refresh_surface()?;
+        }
+        Ok(changed)
+    }
     pub(crate) fn pause(&mut self) -> WindowResult<bool> {
         self.cancel_touch()?;
         self.window.freeze_motion()?;

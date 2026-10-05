@@ -78,6 +78,7 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
         preferences: Settings,
     ) -> Result<Self> {
         crate::loading::stage("读取当前章节")?;
+        options.reader_chrome = true;
         if options.at.is_some() {
             return Err("EPUB session requires EpubLocator rather than TextLocator".into());
         }
@@ -300,8 +301,34 @@ impl<'book, 'archive, 'font, 'font_bytes> EpubSession<'book, 'archive, 'font, 'f
             return Ok(false);
         }
         let mut options = self.options.clone();
+        options.raster_size = options.raster_size.map(|(pw, ph)| {
+            (
+                ((u64::from(pw) * u64::from(width)) / u64::from(options.width)) as u32,
+                ((u64::from(ph) * u64::from(height)) / u64::from(options.height)) as u32,
+            )
+        });
         options.width = width;
         options.height = height;
+        self.reflow(options)
+    }
+
+    #[cfg(feature = "mobile")]
+    pub(crate) fn resize_output(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> Result<bool> {
+        if (width, height) == (self.options.width, self.options.height)
+            && self.options.raster_size == Some((pixel_width, pixel_height))
+        {
+            return Ok(false);
+        }
+        let mut options = self.options.clone();
+        options.width = width;
+        options.height = height;
+        options.raster_size = Some((pixel_width, pixel_height));
         self.reflow(options)
     }
 

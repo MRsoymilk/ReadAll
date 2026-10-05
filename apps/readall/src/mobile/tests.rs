@@ -25,6 +25,7 @@ impl Temp {
             height: 520,
             font_size: 16,
             margin: 24,
+            raster_size: None,
         }
     }
 }
@@ -210,6 +211,59 @@ fn mobile_commands_drive_shared_settings_touch_and_pause_without_reopening_book(
     assert_eq!(ready.page_mode, "book");
     assert_eq!(ready.locator, turned.locator);
     stop(&resumed);
+}
+#[test]
+fn device_pixels_do_not_change_logical_layout_and_density_resize_restores_anchor() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = Temp::new();
+    let body = format!(
+        "<html><body>{}</body></html>",
+        "<p>AAAA WWWW AAAA</p>".repeat(150)
+    );
+    let bytes = test_epub::make_epub_with_resources(&[&body], vec![]);
+    let mut config = temp.config("dense.epub", &bytes);
+    config.raster_size = Some((1080, 1404));
+    let reader = Reader::open(config).unwrap();
+    let first = wait(&reader, |s| s.frame.is_some() || s.closed);
+    assert!(!first.closed, "{}", first.notice);
+    let frame = first.frame.unwrap();
+    assert_eq!((frame.surface.width(), frame.surface.height()), (400, 520));
+    assert_eq!(
+        (
+            frame.surface.pixel_width(),
+            frame.surface.pixel_height(),
+            frame.byte_len()
+        ),
+        (1080, 1404, 1080 * 1404 * 4)
+    );
+    let mut pixels = vec![0; frame.byte_len()];
+    frame.write_rgba(&mut pixels).unwrap();
+    reader
+        .command(Command::Viewport {
+            width: 400,
+            height: 520,
+            pixel_width: 800,
+            pixel_height: 1040,
+        })
+        .unwrap();
+    let resized = wait(&reader, |s| {
+        s.frame
+            .as_ref()
+            .is_some_and(|f| f.surface.pixel_width() == 800)
+    });
+    assert_eq!(resized.locator, first.locator);
+    assert_eq!(resized.position, first.position);
+    assert!(
+        reader
+            .command(Command::Viewport {
+                width: 400,
+                height: 520,
+                pixel_width: 8192,
+                pixel_height: 8192
+            })
+            .is_err()
+    );
+    stop(&reader);
 }
 #[test]
 fn validated_mobile_paths_and_dimensions_precede_thread_creation() {

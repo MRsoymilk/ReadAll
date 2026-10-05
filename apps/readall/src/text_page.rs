@@ -1,4 +1,6 @@
 //! TXT page renderer shared by headless export and the native reading session.
+#[cfg(test)]
+mod density_tests;
 use readall_core::{
     DocumentId, Limits, TextDocument, TextLocator,
     layout::{LayoutConfig, MeasuredLayout, tab_advance},
@@ -8,7 +10,7 @@ use readall_font::{Font, FontError, FontLimits};
 use readall_platform::LocalFileSource;
 use readall_render::{
     Color, DrawCommand, Rect, RenderError, RenderLimits, Surface,
-    glyph::{GlyphMask, RasterLimits, rasterize},
+    glyph::{GlyphMask, RasterLimits, rasterize_scaled},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -32,8 +34,22 @@ pub(crate) struct Options {
     pub page: Option<usize>,
     pub at: Option<TextLocator>,
     pub allow_missing: bool,
+    /// Native reader chrome is outside the document, even with zero page margins.
+    pub reader_chrome: bool,
+    /// Optional device backing size; logical geometry and saved font size stay unchanged.
+    pub raster_size: Option<(u32, u32)>,
 }
 impl Options {
+    pub(crate) fn content_rect(&self) -> Rect {
+        let top = self.margin.max(if self.reader_chrome { 32 } else { 0 });
+        let bottom = self.margin.max(if self.reader_chrome { 4 } else { 0 });
+        Rect::new(
+            self.margin as i32,
+            top as i32,
+            self.width.saturating_sub(self.margin * 2),
+            self.height.saturating_sub(top + bottom),
+        )
+    }
     pub(crate) fn parse(args: &[OsString]) -> Result<Self> {
         if !args.len().is_multiple_of(2) {
             return Err("each render-text option requires a value".into());
@@ -48,6 +64,8 @@ impl Options {
             page: None,
             at: None,
             allow_missing: false,
+            reader_chrome: false,
+            raster_size: None,
         };
         let mut seen = HashSet::new();
         for pair in args.chunks_exact(2) {
@@ -153,6 +171,7 @@ struct CachedGlyph {
 pub(crate) struct GlyphCache<'f, 'data> {
     font: std::borrow::Cow<'f, Font<'data>>,
     scale: f32,
+    raster_scale: (f32, f32),
     allow_missing: bool,
     entries: HashMap<u16, CachedGlyph>,
     missing: HashSet<char>,
@@ -173,6 +192,7 @@ impl<'f, 'data> GlyphCache<'f, 'data> {
         Self {
             font,
             scale,
+            raster_scale: (1.0, 1.0),
             allow_missing,
             entries: HashMap::new(),
             missing: HashSet::new(),
@@ -240,6 +260,19 @@ impl<'f, 'data> GlyphCache<'f, 'data> {
         let index = self.ensure(ch)?;
         Ok(self.entries[&index].advance)
     }
+    pub(crate) fn set_raster_scale(&mut self, scale: (f32, f32)) {
+        if self.raster_scale != scale {
+            self.raster_scale = scale;
+            for entry in self.entries.values_mut() {
+                entry.mask = None;
+            }
+            self.mask_bytes = 0;
+        }
+    }
+    pub(crate) fn raster_budget(&self) -> u64 {
+        (128.0 * 1024.0 * 1024.0 * self.raster_scale.0.max(self.raster_scale.1).clamp(1.0, 4.0))
+            as u64
+    }
     pub(crate) fn begin_page(&mut self) {
         self.raster_work = 0;
         self.decoded_points = 0;
@@ -265,14 +298,21 @@ impl<'f, 'data> GlyphCache<'f, 'data> {
         if self.entries[&index].mask.is_none() {
             let glyph = self.font.glyph(index)?;
             self.charge_points(glyph.outline.points().len())?;
-            let mask = rasterize(&glyph.outline, self.scale, RasterLimits::default())?;
+            let mask = rasterize_scaled(
+                &glyph.outline,
+                (
+                    self.scale * self.raster_scale.0,
+                    self.scale * self.raster_scale.1,
+                ),
+                RasterLimits::default(),
+            )?;
             if mask.coverage().len() > self.mask_limit {
                 return Err(PageError::Budget("glyph mask cache"));
             }
             let work = self
                 .raster_work
                 .checked_add(mask.work())
-                .filter(|n| *n <= 128 * 1024 * 1024)
+                .filter(|n| *n <= self.raster_budget())
                 .ok_or(PageError::Budget("aggregate raster work"))?;
             if self.mask_bytes.saturating_add(mask.coverage().len()) > self.mask_limit {
                 for entry in self.entries.values_mut() {

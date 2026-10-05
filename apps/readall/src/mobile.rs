@@ -42,10 +42,16 @@ pub struct Config {
     pub height: u32,
     pub font_size: u32,
     pub margin: u32,
+    pub raster_size: Option<(u32, u32)>,
 }
 impl Config {
     fn validate(&self) -> io::Result<()> {
         geometry(self.width, self.height)?;
+        output_geometry(
+            self.width,
+            self.height,
+            self.raster_size.unwrap_or((self.width, self.height)),
+        )?;
         if !self.book.is_absolute() || !self.font.is_absolute() || !self.state_dir.is_absolute() {
             return Err(invalid("mobile reader requires absolute app-private paths"));
         }
@@ -73,6 +79,26 @@ fn geometry(width: u32, height: u32) -> io::Result<()> {
         Ok(())
     }
 }
+fn output_geometry(width: u32, height: u32, pixels: (u32, u32)) -> io::Result<()> {
+    geometry(width, height)?;
+    let (sx, sy) = (
+        pixels.0 as f64 / width as f64,
+        pixels.1 as f64 / height as f64,
+    );
+    if pixels.0 == 0
+        || pixels.1 == 0
+        || pixels.0 > 8192
+        || pixels.1 > 8192
+        || u64::from(pixels.0) * u64::from(pixels.1) > 4 * 1024 * 1024
+        || !(0.25..=8.0).contains(&sx)
+        || !(0.25..=8.0).contains(&sy)
+    {
+        return Err(invalid(
+            "mobile output exceeds device-pixel or scale budget",
+        ));
+    }
+    Ok(())
+}
 #[derive(Debug, Clone)]
 pub enum Command {
     Next,
@@ -81,18 +107,40 @@ pub enum Command {
     Last,
     Larger,
     Smaller,
-    Resize { width: u32, height: u32 },
+    Resize {
+        width: u32,
+        height: u32,
+    },
+    Viewport {
+        width: u32,
+        height: u32,
+        pixel_width: u32,
+        pixel_height: u32,
+    },
     Contents,
-    Jump { spine: usize, offset: usize },
+    Jump {
+        spine: usize,
+        offset: usize,
+    },
     CycleTheme,
     Bookmark,
     Save,
     Ui(UiAction),
-    Touch { kind: u32, x: i32, y: i32 },
+    Touch {
+        kind: u32,
+        x: i32,
+        y: i32,
+    },
     Back,
     Pause(bool),
-    Input { mode: String, text: String },
-    HostReply { kind: u32, text: String },
+    Input {
+        mode: String,
+        text: String,
+    },
+    HostReply {
+        kind: u32,
+        text: String,
+    },
 }
 #[derive(Debug, Clone)]
 pub enum Effect {
@@ -114,13 +162,17 @@ pub struct Frame {
 }
 impl Frame {
     pub fn byte_len(&self) -> usize {
-        self.surface.width() as usize * self.surface.height() as usize * 4
+        self.surface.pixels().len() * 4
     }
     pub fn write_rgba(&self, output: &mut [u8]) -> io::Result<()> {
         if output.len() != self.byte_len() {
             return Err(invalid("pixel buffer length does not match frame"));
         }
         for (out, color) in output.chunks_exact_mut(4).zip(self.surface.pixels()) {
+            if color.a == 255 {
+                out.copy_from_slice(&[color.r, color.g, color.b, 255]);
+                continue;
+            }
             let a = u16::from(color.a);
             out.copy_from_slice(&[
                 ((u16::from(color.r) * a + 127) / 255) as u8,
@@ -251,6 +303,12 @@ impl Reader {
         }
         match &command {
             Command::Resize { width, height } => geometry(*width, *height)?,
+            Command::Viewport {
+                width,
+                height,
+                pixel_width,
+                pixel_height,
+            } => output_geometry(*width, *height, (*pixel_width, *pixel_height))?,
             Command::Touch { kind, x, y }
                 if *kind > 9 || x.unsigned_abs() > 65536 || y.unsigned_abs() > 65536 =>
             {
@@ -389,6 +447,8 @@ fn worker(config: Config, shared: &Shared) -> Result<()> {
         page: None,
         at: None,
         allow_missing: true,
+        reader_chrome: true,
+        raster_size: config.raster_size,
     };
     let session = EpubSession::new_with_preferences(&book, &font, options, start, &[], settings)?;
     let mut ui = Presentation::new(session, progress.clone(), ui_font, store)?;
@@ -410,6 +470,12 @@ fn worker(config: Config, shared: &Shared) -> Result<()> {
             shared.update(|s| s.busy = true);
             let result: Result<bool> = (|| match command {
                 Command::Resize { width, height } => ui.resize(width, height),
+                Command::Viewport {
+                    width,
+                    height,
+                    pixel_width,
+                    pixel_height,
+                } => ui.resize_output(width, height, pixel_width, pixel_height),
                 Command::Contents => {
                     let contents = ui
                         .contents()?

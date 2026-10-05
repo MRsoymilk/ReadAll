@@ -57,6 +57,7 @@ pub(crate) fn draw(surface: &mut Surface, svg: &str, rect: Rect, color: Color) -
         return Err("SVG icon segment budget exceeded".into());
     }
 
+    let rect = surface.pixel_rect(rect);
     let scale_x = rect.width as f32 / 24.0;
     let scale_y = rect.height as f32 / 24.0;
     let stroke = 2.0 * scale_x.min(scale_y);
@@ -102,7 +103,7 @@ pub(crate) fn draw(surface: &mut Surface, svg: &str, rect: Rect, color: Color) -
             }
         }
     }
-    surface.draw(&commands)?;
+    surface.draw_pixels(&commands)?;
     Ok(())
 }
 

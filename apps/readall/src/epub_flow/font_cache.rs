@@ -9,6 +9,7 @@ pub(super) struct Fonts<'f, 'd> {
     pub(super) base: u32,
     pub(super) line_spacing: f32,
     pub(super) allow_missing: bool,
+    raster_scale: (f32, f32),
     pub(super) caches: BTreeMap<(usize, u32), GlyphCache<'f, 'd>>,
     pub(super) fallbacks: Vec<&'f Font<'d>>,
     embedded: Vec<EmbeddedFace>,
@@ -23,12 +24,19 @@ impl<'f, 'd> Fonts<'f, 'd> {
             base,
             line_spacing: 1.0,
             allow_missing,
+            raster_scale: (1.0, 1.0),
             caches: BTreeMap::new(),
             fallbacks: Vec::new(),
             embedded: Vec::new(),
             families: FontFamilies::default(),
             chapter: None,
             choices: HashMap::new(),
+        }
+    }
+    pub(super) fn set_raster_scale(&mut self, scale: (f32, f32)) {
+        self.raster_scale = scale;
+        for cache in self.caches.values_mut() {
+            cache.set_raster_scale(scale);
         }
     }
     pub(super) fn use_chapter(&mut self, chapter: &Chapter<'_, '_>) {
@@ -169,6 +177,7 @@ impl<'f, 'd> Fonts<'f, 'd> {
             // A clone retains shared author bytes or the original reader-font borrow.
             let mut cache = GlyphCache::owned(self.face(index).clone(), size, self.allow_missing);
             cache.set_mask_limit(2 * 1024 * 1024);
+            cache.set_raster_scale(self.raster_scale);
             self.caches.insert(key, cache);
         }
         self.caches.get_mut(&key).expect("font cache just inserted")

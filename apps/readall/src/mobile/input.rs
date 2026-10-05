@@ -9,7 +9,8 @@ pub(super) struct Inbox {
 }
 fn replaceable(old: &Command, new: &Command) -> bool {
     match (old, new) {
-        (Command::Resize { .. }, Command::Resize { .. }) => true,
+        (Command::Resize { .. }, Command::Resize { .. })
+        | (Command::Viewport { .. }, Command::Viewport { .. }) => true,
         (Command::Input { mode: a, .. }, Command::Input { mode: b, .. }) => a == b,
         (Command::Touch { kind: a, .. }, Command::Touch { kind: b, .. }) => {
             a == b && matches!(a, 3 | 6)

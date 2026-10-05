@@ -9,7 +9,10 @@ public final class NativeReader implements AutoCloseable {
     public static final int BACK=13, PAUSE=14, FIND=20, ANNOTATIONS=21, SETTINGS=22, SELECT=23, COPY=24, PASTE=25, NOTE=26, HIGHLIGHT=27, DELETE=28, ACTIVATE=29, DISMISS=30, BACKSPACE=31, TOUCH=40;
     private long handle;
     public NativeReader(String book, String font, String state, int width, int height, int size, int margin) {
-        handle=nativeOpen(book,font,state,width,height,size,margin);
+        this(book,font,state,width,height,size,margin,width,height);
+    }
+    public NativeReader(String book, String font, String state, int width, int height, int size, int margin, int pixelWidth, int pixelHeight) {
+        handle=nativeOpen(book,font,state,width,height,size,margin,pixelWidth,pixelHeight);
         if(handle<=0) throw new IllegalStateException("ReadAll native reader creation failed");
     }
     private void requireOpen() { if(handle==0) throw new IllegalStateException("ReadAll reader closed"); }
@@ -29,6 +32,7 @@ public final class NativeReader implements AutoCloseable {
         for(int i=0;i<items.length;i++) items[i]=new Item(fields[i*4],Integer.parseInt(fields[i*4+1]),Integer.parseInt(fields[i*4+2]),Integer.parseInt(fields[i*4+3]));
         return items;
     }
+    public synchronized void viewport(int width,int height,int pixelWidth,int pixelHeight) { requireOpen();nativeViewport(handle,width,height,pixelWidth,pixelHeight); }
     public synchronized void input(String mode,String text) { requireOpen();nativeInput(handle,mode,text); }
     public synchronized void hostReply(int kind,String text) { requireOpen();nativeHostReply(handle,kind,text); }
     public synchronized String[] effects() { requireOpen();String[] f=nativeEffects(handle);if(f==null||f.length%2!=0)throw new IllegalStateException("invalid host effects");return f; }
@@ -41,18 +45,20 @@ public final class NativeReader implements AutoCloseable {
         public final String status,phase,title,position,percent,locator,notice,uiMode,pageMode,input;
         public final boolean animating,editing;
         public final long done,total,serial,revision;
-        public final int width,height;
+        public final int width,height,logicalWidth,logicalHeight;
         State(String[] f) {
-            if(f==null || f.length!=19 || !"2".equals(f[0])) throw new IllegalStateException("unsupported ReadAll native protocol");
+            if(f==null || f.length!=21 || !"3".equals(f[0])) throw new IllegalStateException("unsupported ReadAll native protocol");
             status=f[1];phase=f[2];done=Long.parseLong(f[3]);total=Long.parseLong(f[4]);serial=Long.parseLong(f[5]);width=Integer.parseInt(f[6]);height=Integer.parseInt(f[7]);title=f[8];position=f[9];percent=f[10];locator=f[11];notice=f[12];revision=Long.parseLong(f[13]);
             uiMode=f[14];pageMode=f[15];animating="1".equals(f[16]);editing="1".equals(f[17]);input=f[18];
-            if(width<0 || height<0 || (long)width*height>4194304L) throw new IllegalStateException("invalid native frame geometry");
+            logicalWidth=Integer.parseInt(f[19]);logicalHeight=Integer.parseInt(f[20]);
+            if(width<0 || height<0 || logicalWidth<0 || logicalHeight<0 || (long)width*height>4194304L) throw new IllegalStateException("invalid native frame geometry");
         }
         public boolean busy() { return "loading".equals(status); }
         public boolean closed() { return "closed".equals(status); }
         public int byteLength() { return Math.toIntExact((long)width*height*4); }
     }
-    private static native long nativeOpen(String book,String font,String state,int width,int height,int size,int margin);
+    private static native long nativeOpen(String book,String font,String state,int width,int height,int size,int margin,int pixelWidth,int pixelHeight);
+    private static native void nativeViewport(long handle,int width,int height,int pixelWidth,int pixelHeight);
     private static native String[] nativeState(long handle);
     private static native String[] nativeContents(long handle);
     private static native void nativeCommand(long handle,int code,int a,int b);

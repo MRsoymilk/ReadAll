@@ -73,9 +73,16 @@ fn strings(env: &mut JNIEnv<'_>, values: &[String]) -> Result<jobjectArray> {
     Ok(array.into_raw())
 }
 fn state_fields(s: Snapshot) -> Vec<String> {
-    let (serial, width, height) = s.frame.as_ref().map_or((0, 0, 0), |f| {
-        (f.serial, f.surface.width(), f.surface.height())
-    });
+    let (serial, width, height, logical_width, logical_height) =
+        s.frame.as_ref().map_or((0, 0, 0, 0, 0), |f| {
+            (
+                f.serial,
+                f.surface.pixel_width(),
+                f.surface.pixel_height(),
+                f.surface.width(),
+                f.surface.height(),
+            )
+        });
     let status = if s.closed {
         "closed"
     } else if s.busy {
@@ -84,7 +91,7 @@ fn state_fields(s: Snapshot) -> Vec<String> {
         "ready"
     };
     vec![
-        "2".into(),
+        "3".into(),
         status.into(),
         s.phase.into(),
         s.done.to_string(),
@@ -103,6 +110,8 @@ fn state_fields(s: Snapshot) -> Vec<String> {
         u8::from(s.animating).to_string(),
         u8::from(s.editing).to_string(),
         s.input,
+        logical_width.to_string(),
+        logical_height.to_string(),
     ]
 }
 fn command(code: jint, a: jint, b: jint) -> Result<Command> {
@@ -159,6 +168,8 @@ pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeOpen(
     height: jint,
     size: jint,
     margin: jint,
+    pixel_width: jint,
+    pixel_height: jint,
 ) -> jlong {
     guard(&mut env, |env| {
         let config = Config {
@@ -169,6 +180,7 @@ pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeOpen(
             height: number(height)?,
             font_size: number(size)?,
             margin: number(margin)?,
+            raster_size: Some((number(pixel_width)?, number(pixel_height)?)),
         };
         let mut readers = readers()
             .lock()
@@ -336,6 +348,27 @@ pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeEffects(
         strings(env, &fields)
     })
 }
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_xin_soymilk_readall_NativeReader_nativeViewport(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    width: jint,
+    height: jint,
+    pixel_width: jint,
+    pixel_height: jint,
+) {
+    guard(&mut env, |_| {
+        with_reader(handle, |r| {
+            Ok(r.command(Command::Viewport {
+                width: number(width)?,
+                height: number(height)?,
+                pixel_width: number(pixel_width)?,
+                pixel_height: number(pixel_height)?,
+            })?)
+        })
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,8 +400,8 @@ mod tests {
             ..Snapshot::default()
         };
         let values = state_fields(state);
-        assert_eq!(values.len(), 19);
-        assert_eq!(values[0], "2");
+        assert_eq!(values.len(), 21);
+        assert_eq!(values[0], "3");
         assert_eq!(values[14], "expanded");
         assert_eq!(values[15], "slide");
         assert_eq!(values[8], "中文\t\n😀");
