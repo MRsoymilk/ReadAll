@@ -4,11 +4,21 @@ Android 与 Linux 现在复用同一个 `ReaderWindow` 阅读界面：不只是�
 
 ## 当前范围
 
-`apps/readall/src/mobile.rs` 提供有界消息队列、独立阅读线程、最新页面快照、加载阶段与取消。EPUB、MOBI、AZW3 仍使用原解析器、字体、图片、代码着色与分页；跨 JNI 只传递操作、状态和完成的像素帧。`crates/readall-android` 把句柄与异常边界单独隔离，不通过 Java 保存 Rust 裸指针。取消不在 Android 主线程等待解码线程退出；计入尚未完成退出的线程，最多允许四个阅读线程。
+`apps/readall/src/mobile.rs` 提供有界消息队列、独立阅读线程、最新页面快照、加载阶段与取消。EPUB、MOBI、AZW3 仍使用原解析器、字体、图片、代码着色与分页；跨 JNI 只传递操作、状态和完成的像素帧。`crates/readall-android` 把句柄与异常边界单独隔离，不通过 Kotlin 保存 Rust 裸指针。取消不在 Android 主线程等待解码线程退出；计入尚未完成退出的线程，最多允许四个阅读线程。
 
-手机外壳使用 SDK 自带的 Java/Android API，不要求 Android Studio、Gradle、Kotlin 编译器或 AndroidX。书籍打开后隐藏独立 Java 按钮栏；`ReaderView` 展示包含完整共享 UI 的 Rust 页面，不再使用系统 AlertDialog 显示目录。首页已改为 Android 原生多书书库，提供列表和封面网格两种视图；SAF 选择器、加载错误界面及系统键盘仍由 Android 管理。阅读界面继续与 Linux 共享，书库布局并非逐像素复制 Linux 文件浏览器。
+手机应用层已全部使用 Kotlin/JVM 调用 Android SDK 原生 View/API，使用固定版本的独立 Kotlin 编译器，不要求 Android Studio、Gradle、Compose 或 AndroidX。书籍打开后隐藏独立的平台按钮栏；`ReaderView` 展示包含完整共享 UI 的 Rust 页面，不再使用系统 AlertDialog 显示目录。首页已改为 Android 原生多书书库，提供列表和封面网格两种视图；SAF 选择器、加载错误界面及系统键盘仍由 Android 管理。阅读界面继续与 Linux 共享，书库布局并非逐像素复制 Linux 文件浏览器。
 
 最低 API 26，默认编译/目标 API 36，仅提供 ARM64 或 x86_64 单 ABI 调试包。共享 UI 已接入目录、搜索、标注列表、字号/边距/行距/主题/翻页模式、长按拖选和复制/高亮/笔记、书内链接返回、外链确认及图片查看。触摸选区拖动柄、双指缩放、跨页选择和完整可访问性语义树仍未实现。仿书模式是与 Linux 一致的 2D 卷页，不是真实三维纸张模拟。
+
+## Kotlin 全量迁移
+
+`src/xin/soymilk/readall/` 的 20 个应用模块以及原有 13 个测试/截图工具已全部由 Java 改为 Kotlin；另新增 `KotlinMigrationSmoke.kt`。应用与测试源目录没有手写 `.java`，构建入口发现 Java 残留会立即拒绝，避免悄悄使用旧实现。SDK 的 AAPT2 仍会在临时构建目录生成 `R.java` 资源索引，由 javac 编译；这不是 Java 应用代码，也不纳入源码。Rust 阅读引擎、Linux 端及 Python 构建脚本不改写成 Kotlin。
+
+JNI 仍使用 `xin.soymilk.readall.NativeReader` 的 12 个原生入口、原有参数描述符与操作码。Kotlin 通过 `@JvmStatic external` 保持静态入口，协议字段保持原有 JVM 字段访问；句柄操作保留同步保护，`copyPixels` 继续在短暂获取句柄后释放锁，不把整帧复制移回输入锁中。没有新增 C++ 桥接或替换 Rust 排版。
+
+包名、Activity 名称、debug 签名、版本、API、SharedPreferences 键、书库二进制结构、图书副本路径及 `reader-state` 保持不变。迁移测试读取迁移前 Java 写出的冻结索引，覆盖中文与代理对字符、置顶、别名和阅读进度；原值写回与 Java 索引逐字节一致，不需要清空数据或重新导入。
+
+已通过 13 组 Kotlin/JVM 回归、23 项 Python 构建测试、447 项 Rust 测试（4 项手动测试默认跳过）、严格 Clippy 与格式检查。原 Java 和新 Kotlin JNI 客户端在相同逻辑尺寸/字体下导出的展开、收起、目录和设置四个 1080×2330 阅读帧逐像素一致。APK 已检查 DEX 中 20 个应用模块均来自 `.kt`、未打包测试或编译器，并与旧包比较签名一致。构建/迁移记录位于 `target/android/build-report.json` 和 `target/kotlin-migration/`。这些检查不代替新版 Activity、首页原生 View、SAF、输入法及真机滚动验收；本轮没有向手机安装应用。
 
 ## Android 简约界面
 
@@ -20,7 +30,7 @@ Android 的简约样式覆盖书库首页、图书管理面板、首次加载卡
 
 长按图书或点击管理图标打开底部圆角面板，打开、置顶、修改书名、刷新封面与移除按行排列。修改与移除仍有独立确认，清理应用副本默认不勾选，存储语义不变；窄屏/横屏下长面板可滚动。普通按钮使用有边界的水波纹与键盘焦点描边。颜色继续取自现有 Rust 亮暗配色，图标为 `ShelfIcon` 内置线条路径，不新增字体、网络资源或第三方 UI 依赖。
 
-样式组件在 `ShelfStyle.java`，原生管理面板在 `ShelfDialogs.java`。`ShelfStoreSmoke` 新增间距、48 dp 命中区域、行间互不重叠、滚动后坐标一致和模式回退回归；实际 Android Views 经 SDK 编译，但宿主逻辑测试不代替真机视觉、TalkBack、字体放大与手势验收。本轮不自动安装应用。
+样式组件在 `ShelfStyle.kt`，原生管理面板在 `ShelfDialogs.kt`。`ShelfStoreSmoke` 新增间距、48 dp 命中区域、行间互不重叠、滚动后坐标一致和模式回退回归；实际 Android Views 经 SDK 编译，但宿主逻辑测试不代替真机视觉、TalkBack、字体放大与手势验收。本轮不自动安装应用。
 
 ## 结果提示自动收起
 
@@ -32,7 +42,7 @@ Android 的简约样式覆盖书库首页、图书管理面板、首次加载卡
 
 Android 的底部展开工具栏、收起控制、目录、搜索、设置、书签/标注、笔记、图片查看、选字操作条和外链确认使用圆角与轻量背景，减少粗分隔线和阴影。目录仍只有一个活动行，保留连续滚动、部分行命中和惯性；选中行使用浅色强调。搜索/笔记的提交按钮独立突出，设置名称和值分层显示，右侧加减按钮明确区分。设置名称只选择该项，只有点加减才修改值，避免点击文字时误减字号。
 
-手机菜单中的初始操作说明改为轻点/长按提示，不再显示桌面 Enter、Ctrl、F 键说明；Linux 的快捷键继续保留，外观同步到现代圆角菜单。外链仍需确认，关闭面板和取消输入的逻辑不变。此次没有移动现有工具栏、目录和输入框命中区域，Java 输入法与触摸坐标不变；正文 Surface、分页、书内定位和翻页模式仍与 Linux 共享。界面整体像素不要求两端一致，桌面的悬浮状态、收起箭头与快捷键说明和手机有所区别。
+手机菜单中的初始操作说明改为轻点/长按提示，不再显示桌面 Enter、Ctrl、F 键说明；Linux 的快捷键继续保留，外观同步到现代圆角菜单。外链仍需确认，关闭面板和取消输入的逻辑不变。此次没有移动现有工具栏、目录和输入框命中区域，Kotlin 输入法适配与触摸坐标不变；正文 Surface、分页、书内定位和翻页模式仍与 Linux 共享。界面整体像素不要求两端一致，桌面的悬浮状态、收起箭头与快捷键说明和手机有所区别。
 
 `menu_style.rs` 与 `tools/mobile_menu.rs` 负责共享皮肤，圆角基础绘制抽取到 `ui/shapes.rs` 供 Linux 书库复用。Linux 专属交互位于 `desktop.rs`，不接管 Android 触摸路由；圆角在设备像素分辨率下抗锯齿绘制，复用只读页面及目录缓存，不降低整页清晰度、不增加 UI 依赖。`ReaderMenuSmoke` 经真实 JVM/JNI 检查菜单像素、主题、字号加减、搜索与关闭位置；Rust 回归检查两端正文/布局/操作一致。另以真实中文字体导出 1080×2330 菜单帧；这些测试不代替真机触摸、辅助功能和视觉验收。
 
@@ -79,7 +89,7 @@ Android 的底部展开工具栏、收起控制、目录、搜索、设置、书
 
 正文、顶部进度、目录、工具栏、设置/搜索/标注面板、选区操作条和外链确认都来自共享主题。Android 首页、加载/错误卡片、进度条及页面空白区也使用 Rust 返回的颜色；状态栏/导航栏使用对应背景，并单独设置浅色或深色图标。关闭系统 Force Dark，避免对已经绘制好的暗色页面再次反相。系统文件选择器和键盘外观不由 ReadAll 控制；图片和作者显式背景不做反相。
 
-JNI 状态协议携带主题名和固定顺序的 ARGB 配色，`AndroidTheme.java` 不复制一份 RGB 常量表。纯配色查询不访问磁盘；首页保存/加载走 IO 线程，与阅读器使用同一个 `files/reader-state/library-v1/settings.conf`，只更新主题并保留其他字段。首次在首页选择主题也保持手机默认字号 20、边距 16；旧 `paper`/`sepia` 可读为亮色，显式保存时写成 `light`/`dark`。Android SharedPreferences 只镜像最近的主题名用于启动界面，不充当第二份阅读设置。
+JNI 状态协议携带主题名和固定顺序的 ARGB 配色，`AndroidTheme.kt` 不复制一份 RGB 常量表。纯配色查询不访问磁盘；首页保存/加载走 IO 线程，与阅读器使用同一个 `files/reader-state/library-v1/settings.conf`，只更新主题并保留其他字段。首次在首页选择主题也保持手机默认字号 20、边距 16；旧 `paper`/`sepia` 可读为亮色，显式保存时写成 `light`/`dark`。Android SharedPreferences 只镜像最近的主题名用于启动界面，不充当第二份阅读设置。
 
 `ThemeSmoke` 经真实 JVM/JNI 验证首页保存→阅读器打开→切换主题→返回/重开、1080 像素输出、旧名称兼容与阅读位置保持；Rust 覆盖两种主题下的工具栏/目录/设置像素及文本对比度。本轮主题的 Android 系统栏与视觉效果尚需真机验收，未自动安装应用。
 
@@ -91,7 +101,7 @@ JNI 状态协议携带主题名和固定顺序的 ARGB 配色，`AndroidTheme.ja
 
 移动阅读线程按约 16 ms 的帧节奏合并脏更新，在一帧内处理多个 MOVE 但只合成/发布一次。计时从合成开始算，绘制耗时计入预算，不在绘制结束后再额外等待 16 ms。尺寸、目录及设置等控制命令仍及时提交；手势开始/结束/取消不丢弃，同方向移动合并但保留反向转折。
 
-`Surface` 的不可变快照共享像素存储，只有后续绘制才分离，避免发布/缓存时反复复制高清整页，也不会改写显示中的旧帧。Java 像素复制只短暂获取句柄，不在多兆字节复制期间占用状态/输入方法的同步锁；JNI 捕获只读帧后再复制，旧帧、关闭、只读缓冲区及容量检查继续保留。没有降低原生像素输出分辨率，也没有取消文本抗锯齿。
+`Surface` 的不可变快照共享像素存储，只有后续绘制才分离，避免发布/缓存时反复复制高清整页，也不会改写显示中的旧帧。Kotlin 像素复制只短暂获取句柄，不在多兆字节复制期间占用状态/输入方法的同步锁；JNI 捕获只读帧后再复制，旧帧、关闭、只读缓冲区及容量检查继续保留。没有降低原生像素输出分辨率，也没有取消文本抗锯齿。
 
 新增 Rust 回归与 `SmoothScrollSmoke` 覆盖小于一行的移动、局部行裁剪/命中、惯性停止、正文跟手、批量绘制、只读快照隔离、高清 JNI 像素传递和复制/输入并发。`ReadAll.present` Trace 标记可用于之后的设备分析。这里的帧节奏是调度目标，不是实测真机 FPS；首次进入未缓存的大章节/图片仍可能短暂准备，正文仍沿用分页拼接并保留页间留白。手机视觉与帧率需覆盖安装后验收。
 
@@ -109,7 +119,7 @@ Rust 阅读线程接收有界有序输入，翻页/目录拖动的同方向连�
 
 Android 使用 Choreographer 申请显示回调，读取和像素传递在独立工作线程；最多一个像素复制任务，复用直接缓冲区与已经退出显示的 Bitmap。ReaderView 使用软件画布避免将仍被 RenderThread 使用的 Bitmap 交回缓冲池。阅读逻辑尺寸和像素缓冲尺寸独立传递：逻辑字号/工具栏仍与 Linux 一致，但字形轮廓、UI 图标和页面合成在设备像素密度下绘制，正常手机不再先画低分辨率整页再放大。触摸和惯性位移按显示帧的逻辑/像素比例回算；密度或窗口变化时重新准备对应字形缓存和帧。窗口旋转、IME 显示和后台切换会停止当前触摸、重排或暂停动画并保存内容锚点。实际设备帧率仍需真机测量，缓存未命中或大章节排版仍可能暂时等待。
 
-已使用 API 36、Build Tools 36.0.0、NDK 29.0.14206865 和系统 Rust 1.97.1 完成 ARM64 原生库交叉编译、Java/D8 编译、APK 签名与对齐校验。产物为 `target/android/readall-android-debug-arm64-v8a.apk`，调试预览版。用户已确认前一基础 APK 在手机上可打开 EPUB；本轮共享界面改造已做宿主回归与 APK 构建验证，尚未进行本轮真机视觉、触摸和帧率验收。
+已使用 API 36、Build Tools 36.0.0、NDK 29.0.14206865 和系统 Rust 1.97.1 完成 ARM64 原生库交叉编译、Kotlin/D8 编译、APK 签名与对齐校验。产物为 `target/android/readall-android-debug-arm64-v8a.apk`，调试预览版。用户已确认前一基础 APK 在手机上可打开 EPUB；本轮共享界面改造已做宿主回归与 APK 构建验证，尚未进行本轮真机视觉、触摸和帧率验收。
 
 ## 清晰度与连续滚动页缝
 
@@ -121,7 +131,7 @@ Android 使用 Choreographer 申请显示回调，读取和像素传递在独立
 
 ## 文件与状态
 
-系统选择器采用 `ACTION_OPEN_DOCUMENT`。只读取获授权的 `content://`，不猜测它对应的系统路径，也不申请 INTERNET、外部存储或“所有文件访问”权限。读取过程在 Java IO 线程执行，限 128 MiB，按内容 SHA-256 命名私有缓存，不使用可被操控的显示文件名拼路径。云文档由用户所选提供程序处理，本应用不主动下载网络资源。
+系统选择器采用 `ACTION_OPEN_DOCUMENT`。只读取获授权的 `content://`，不猜测它对应的系统路径，也不申请 INTERNET、外部存储或“所有文件访问”权限。读取过程在 Kotlin 管理的 IO 线程执行，限 128 MiB，按内容 SHA-256 命名私有缓存，不使用可被操控的显示文件名拼路径。云文档由用户所选提供程序处理，本应用不主动下载网络资源。
 
 书库索引位于 `files/bookshelf-v1/shelf-v1.bin`，图书副本在 `files/bookshelf-v1/books`，缩略图在 `files/bookshelf-v1/covers`；进度、书签和设置仍在 `files/reader-state`。升级时仅将旧版已记录的最后一本 `cache/books` 图书安全复制并登记，原缓存和原书保持不变，继续沿用按内容定位的阅读记录。新导入不再采用“只保留最近四本”的缓存淘汰逻辑。
 
@@ -129,7 +139,7 @@ Android 使用 Choreographer 申请显示回调，读取和像素传递在独立
 
 ## 工具路径与构建
 
-所有脚本调用都使用绝对工具路径，不写 `.zshrc`，不设置 `ANDROID_HOME`、`JAVA_HOME`、`PATH` 或 NDK 环境变量。Gentoo Java 包装器可能依赖未挂载配置，因此直接使用 `/usr/lib/jvm/openjdk-17/bin/java` 与 `javac`。SDK 与系统 Rust 安装也不会被脚本修改。只有显式 `prepare-rust` 会下载匹配的 Android 标准库到项目 `target`，普通 build/doctor 不自动下载安装工具链。
+所有脚本调用都使用绝对工具路径，不写 `.zshrc`，不设置 `ANDROID_HOME`、`JAVA_HOME`、`PATH` 或 NDK 环境变量。Gentoo Java 包装器可能依赖未挂载配置，因此直接使用 `/usr/lib/jvm/openjdk-17/bin/java` 与 `javac`。SDK 与系统 Rust 安装也不会被脚本修改。只有显式 `prepare-rust` / `prepare-kotlin` 准备命令会下载项目内工具链，普通 build/doctor 不自动下载安装工具链。Kotlin 编译通过指定 JDK 的 `bin/java` 启动，不依赖 `kotlinc` shell 包装器。
 
 先在项目根目录运行诊断：
 
@@ -137,7 +147,15 @@ Android 使用 Choreographer 申请显示回调，读取和像素传递在独立
 /usr/bin/python3 apps/android/tools/build.py doctor --sdk /opt/android-sdk
 ```
 
-必需组件是 SDK `platforms/android-36/android.jar`、Build Tools（`aapt2`、D8、`zipalign`、`apksigner`）、JDK 17、Android NDK，以及与所用 Rust 编译器匹配的 `aarch64-linux-android` 标准库。只安装 SDK 命令行管理器不代表这些组件全部存在。NDK 可以位于 SDK 的 `ndk/<版本>`，或用 `--ndk` 指定；脚本不会自动接受许可证或下载组件。
+必需组件是 SDK `platforms/android-36/android.jar`、Build Tools（`aapt2`、D8、`zipalign`、`apksigner`）、JDK 17、Kotlin 2.1.21、Android NDK，以及与所用 Rust 编译器匹配的 `aarch64-linux-android` 标准库。只安装 SDK 命令行管理器不代表这些组件全部存在。NDK 可以位于 SDK 的 `ndk/<版本>`，或用 `--ndk` 指定；脚本不会自动接受许可证或下载组件。
+
+Kotlin 工具链首次在本机准备：
+
+```bash
+/usr/bin/python3 /home/vv/project/ReadAll/apps/android/tools/build.py prepare-kotlin
+```
+
+编译器与配套依赖固定为 JetBrains Maven Central 发布的指定版本，并在 `kotlin_toolchain.py` 中锁定 SHA-256 和字节数。下载仅写入 `target/android/downloads/kotlin-2.1.21/`，校验后原子安装到 `target/android/toolchains/kotlin-2.1.21/kotlinc/`；已准备的目录可复用，不写 SDK/系统目录。工具链已在本轮准备完成。使用外部安装时可传 `--kotlin /absolute/kotlinc`。2.1.21 是兼容性固定版本，不宣称是最新版；构建检查 D8 >= 8.6.17，已验证当前 Build Tools 36.0.0 的 D8 8.10.9。Kotlin 常规编译不联网，预先缓存齐全时也可 `prepare-kotlin --offline`。
 
 Gentoo 系统 Rust 没有 Android 标准库时，不必安装 rustup 或替换系统 Rust。先执行一次：
 
@@ -161,7 +179,7 @@ Gentoo 系统 Rust 没有 Android 标准库时，不必安装 rustup 或替换�
 
 SDK 平台可用 `--api`、Build Tools 可用 `--build-tools` 指定。`--abi x86_64` 用于 x86_64 模拟器。Rust Android 标准库缺失时会明确报错，不替换系统 `/usr/bin/rustc`。字体优先使用 `--font`，否则复用桌面构建的捆绑字体缓存；不会单独下载或向用户分发字体文件。
 
-构建流程：Rust `cdylib` → AAPT2 → javac → D8 → APK ZIP → zipalign → debug 签名 → 签名与对齐检查。Java 8 编译时将 SDK `core-lambda-stubs.jar` 放在 `android.jar` 前面，避免 `LambdaMetafactory.metafactory` 缺失；D8 负责后续语言特性转换。所有输出都在根目录 `target/android/`。ARM64 APK 目标路径：
+构建流程：Rust `cdylib` → AAPT2 → Kotlin/JVM（应用源码，目标字节码 1.8）+ javac（仅 SDK 生成的 R.java）→ D8 → APK ZIP → zipalign → debug 签名 → 签名与对齐检查。Android 编译使用 SDK `android.jar` 作为平台 API，不以桌面 JDK 新 API 替代手机 API；宿主逻辑测试限制为 Java 8 API。APK 只加入 Kotlin 标准库与 JetBrains annotations 运行依赖，编译器、完整反射实现及编译器的 coroutine 依赖不打包；对应 Apache-2.0 许可与署名放入 assets。所有输出都在根目录 `target/android/`。ARM64 APK 目标路径：
 
 ```text
 target/android/readall-android-debug-arm64-v8a.apk
@@ -201,10 +219,11 @@ target/android/readall-android-debug-arm64-v8a.apk
 ```bash
 /usr/bin/python3 -B apps/android/tools/test_build.py
 /usr/bin/python3 -B apps/android/tools/test_rust_target.py
+/usr/bin/python3 -B apps/android/tools/test_kotlin_toolchain.py
 /usr/bin/python3 apps/android/tools/build.py host-test
 ```
 
-`host-test` 使用真实 JNI 动态库和 JDK `-Xcheck:jni`，不是模拟 JNI。测试原创 EPUB/字体样本、RGBA 像素传递、无效参数、过期帧拒绝、工具栏展开/收起、共享目录、三种模式、UTF-8 输入、系统效果队列、重排、主题、书签及关闭后恢复；并执行独立 Java TouchRouter 手势测试。Rust 测试额外逐像素对比 Linux 和移动端 presenter 的工具栏/目录/设置，验证矮屏目录布局、长按选区、取消、列表滚动不翻页和模式持久化。样本和状态全部位于 `target/android-host`，不会读写用户真实最近阅读或手机文件；每次运行有独立目录。该测试不依赖 Android SDK，也不能验证 Activity、SAF、Android Bitmap 或 APK 包装。
+`host-test` 使用真实 JNI 动态库和 JDK `-Xcheck:jni`，不是模拟 JNI。测试原创 EPUB/字体样本、RGBA 像素传递、无效参数、过期帧拒绝、工具栏展开/收起、共享目录、三种模式、UTF-8 输入、系统效果队列、重排、主题、书签及关闭后恢复；并执行 Kotlin TouchRouter 手势和 Java 索引兼容性测试。Rust 测试额外检查 Linux 和移动端 presenter 的正文、几何与操作一致，验证矮屏目录布局、长按选区、取消、列表滚动不翻页和模式持久化。样本和状态全部位于 `target/android-host`，不会读写用户真实最近阅读或手机文件；每次运行有独立目录。该测试需要 JDK 与已准备的 Kotlin 编译器，不依赖 Android SDK，也不能验证 Activity、SAF、Android Bitmap 或 APK 包装。每次清理专用测试 class 输出，避免旧 Java 字节码掩盖迁移缺失。
 
 缓存只读的受限构建环境可通过 `--vendor /absolute/vendor --offline` 使用已校验的依赖目录；这只是 Cargo 的命令参数，不修改全局配置或环境变量。普通宿主机无需该选项。
 
@@ -213,6 +232,11 @@ target/android/readall-android-debug-arm64-v8a.apk
 ARM64 APK 已通过真实 SDK/NDK 构建，签名 v2/v3、ELF 三个 LOAD 段 16 KiB 对齐、APK ZIP 对齐、JNI 导出和基础包结构已检查。下一步用授权设备测试安装、中文首屏、GIF/SVG、跨章、目录、旋转、后台恢复、读取取消和错误界面。重点验收本轮共享工具栏/目录、三种翻页模式、长按选区、中文输入法、剪贴板和链接交互；目录拖动新增 Rust 方向/边界/合并事件回归及真实 TouchRouter→JNI→目录点选验证，本轮仍需手机手势实测；不把宿主机测试结果当成手机帧率或视觉验收。
 
 ## 官方参考
+
+- Kotlin 命令行编译器：https://kotlinlang.org/docs/compiler-reference.html
+- Kotlin/JVM 与 Java 互操作：https://kotlinlang.org/docs/java-to-kotlin-interop.html
+- Kotlin 与 Android D8 版本兼容：https://developer.android.com/build/kotlin-support
+- Kotlin 2.1.21：https://github.com/JetBrains/kotlin/releases/tag/v2.1.21
 
 - Android SAF：https://developer.android.com/training/data-storage/shared/documents-files
 - JNI：https://developer.android.com/training/articles/perf-jni

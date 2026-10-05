@@ -18,24 +18,27 @@ Linux 书库和阅读菜单使用与 Android 协调的亮暗配色、圆角及�
 
 ## Android 开发入口
 
+Android 应用层已全量迁移到 **Kotlin/JVM + Android 原生 View + Rust/JNI**：20 个应用源码和原有 13 个测试/截图工具全部改为 `.kt`，另有 Kotlin 迁移兼容性测试。源目录禁止遗留手写 Java；只有 SDK 在临时目录生成的 `R.java` 资源索引仍经 javac 编译。Rust 引擎、Linux 代码和存储格式未改写，也未引入 Compose/Gradle。JNI 的 12 个静态入口、包名和签名保持一致，旧 Java 书库索引可逐字节往返读写；无需卸载、清空数据或重新导入。当前 Kotlin ARM64 APK 已构建，覆盖安装后的真机交互仍需验收。
+
 Android 与 Linux 共用 `ReaderWindow` 阅读界面及同一个 `readall` 引擎：顶部书名/进度、底部可展开/收起工具栏、目录与设置面板、左右滑动/仿书/上下平滑滚动三种模式均走相同 Rust 绘制和交互逻辑。目录不再使用独立系统弹窗；较矮屏幕使用无重叠的紧凑面板。手机通过单指滑动翻页、长按拖选文字、共享操作条复制/高亮/笔记，并接入书内链接、图片查看、搜索及标注列表；系统键盘、剪贴板、浏览器确认后的启动、SAF 和生命周期由 Android 外壳处理。
 
 手机首页已升级为多书书库，提供列表和封面网格两种视图，支持多选导入、搜索排序、置顶、显示书名修改、封面刷新、移除与继续阅读；亮暗主题、视图和排序可保存。旧版最后一本阅读记录可迁移，图书副本不再自动只保留四本，移除不删除系统原书或阅读标注。书库使用 Android 原生布局，阅读页面仍与 Linux 共用。选区拖动柄、双指缩放和完整可访问性语义树尚未实现。绘制与触摸共用密度换算，最新帧有界传递，背景暂停及输入取消不会积压无限任务。像素一致性和 JVM/JNI 回归不代替实际手机帧率测试；没有引入 WebView、AndroidX 或 Gradle。
 
 Android 已分离逻辑排版与设备像素：保留字号和 UI 比例，正文轮廓、文字与图标按实际像素重新绘制，不再把低分辨率整页放大；输出有 4M 像素上限。原生阅读会话在排版前预留标题栏空间，修正小边距下连续滚动页缝截掉首行上半部的问题。密度变化不改变逻辑分页；界面预留区域修正可能重新分页，但以内容锚点恢复进度。本轮手机清晰度和帧率仍待验收。
 
-Android 目录支持连续、可停在半行的上下拖动、惯性减速和按住停止，不再一行一行跳动；目录文字缓存与命中测试共用像素偏移。正文拖动直接跟手，松手后按速度衰减。移动端输入按约 16 ms 合并绘制，共享不可变页面快照，并缩短 Java 像素复制的同步锁范围；保留原生清晰度。调度目标不等于真机帧率，首次加载未缓存大章节仍可能等待，详见 Android 说明。
+Android 目录支持连续、可停在半行的上下拖动、惯性减速和按住停止，不再一行一行跳动；目录文字缓存与命中测试共用像素偏移。正文拖动直接跟手，松手后按速度衰减。移动端输入按约 16 ms 合并绘制，共享不可变页面快照，并缩短 Kotlin 像素复制的同步锁范围；保留原生清晰度。调度目标不等于真机帧率，首次加载未缓存大章节仍可能等待，详见 Android 说明。
 
 首页「列表 / 封面」可直接切换，两种视图均支持上下惯性滚动；点图书打开，长按或点击 ⋯ 管理。立体模式已移除，旧版保存的该模式自动改为封面模式，保留原浏览图书、排序和阅读记录。封面按需使用有界异步缓存，无封面时显示书名封面；首屏不等待全书正文排版。首页已加入宿主回归和 SDK 构建验证，SAF 多选、视觉效果与真机帧率仍待安装后验收。
 
-构建工具全部通过绝对路径参数调用，不修改 shell 环境变量。见 [Android 构建、SDK 可见性及验收说明](apps/android/README.md)。
+构建工具全部通过绝对路径参数调用，不修改 shell 环境变量。首次使用 `prepare-kotlin` 下载并校验固定版本工具链到项目 `target`；本轮已准备 Kotlin 2.1.21，普通构建不自动下载编译器。见 [Android 构建、SDK 可见性及验收说明](apps/android/README.md)。
 
 ```bash
+/usr/bin/python3 apps/android/tools/build.py prepare-kotlin
 /usr/bin/python3 apps/android/tools/build.py doctor --sdk /opt/android-sdk
 /usr/bin/python3 apps/android/tools/build.py build --sdk /opt/android-sdk
 ```
 
-ARM64 产物为 `target/android/readall-android-debug-arm64-v8a.apk`。系统 Rust 缺少 Android 标准库时，可显式运行 `prepare-rust` 将完全匹配的官方目标库下载到项目缓存，不安装 rustup、不替换系统 Rust；构建通过目标专用 `--sysroot` 使用它。Java Lambda 编译已接入 SDK 的 `core-lambda-stubs.jar`。宿主机 `host-test` 和 APK 构建校验不代替手机安装与交互测试。
+ARM64 产物为 `target/android/readall-android-debug-arm64-v8a.apk`。系统 Rust 缺少 Android 标准库时，可显式运行 `prepare-rust` 将完全匹配的官方目标库下载到项目缓存，不安装 rustup、不替换系统 Rust；构建通过目标专用 `--sysroot` 使用它。Kotlin 通过绝对 JDK 路径编译，D8 打包 Kotlin 标准库和 annotations，检查编译器/D8 兼容性及原生库的 16 KiB 对齐。宿主机 `host-test` 和 APK 构建校验不代替手机安装与交互测试。
 
 ## v0.1.0 已实现
 
