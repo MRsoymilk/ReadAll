@@ -40,10 +40,8 @@ impl Home<'_> {
     pub(super) fn visible_recent_count(&self) -> usize {
         // Keep every visible row/button above the status line, including at the
         // minimum supported window height. Never leave invisible click targets.
-        let space = (self.surface.height() as i32 - 54 - RECENT_TOP + 4).max(0) as usize;
-        (space / RECENT_ROW_HEIGHT as usize)
-            .min(RECENT_VISIBLE)
-            .min(self.recent.len())
+        self.recent_capacity()
+            .min(self.recent.len().saturating_sub(self.recent_scroll))
     }
 
     pub(super) fn recent_delete_rect(&self, index: usize) -> Rect {
@@ -72,7 +70,7 @@ impl Home<'_> {
         let count = self.visible_recent_count();
         self.recent_rows.truncate(count);
         for index in 0..count {
-            let path = &self.recent[index];
+            let path = &self.recent[self.recent_scroll + index];
             let clip = self.recent_name_clip(index);
             if self
                 .recent_rows
@@ -117,8 +115,8 @@ impl Home<'_> {
         let row = self.recent_row_rect(index);
         let button = self.recent_delete_rect(index);
         let hover = self.hover_target();
-        let hovered =
-            matches!(hover, HoverTarget::RecentRow(i) | HoverTarget::RecentDelete(i) if i == index);
+        let hovered = matches!(hover, HoverTarget::RecentRow(i) | HoverTarget::RecentDelete(i) if i == index)
+            || self.recent_selected == Some(self.recent_scroll + index);
         let delete_hover = hover == HoverTarget::RecentDelete(index);
         let view = &self.recent_rows[index];
         let pressed = delete_hover && self.pending_recent_delete.as_ref() == Some(&view.path);
@@ -219,7 +217,7 @@ impl Home<'_> {
         let pressed = self.pending_recent_delete.take();
         self.pointer = Some((x, y));
         if let (Some(path), HoverTarget::RecentDelete(index)) = (&pressed, self.hover_target())
-            && self.recent.get(index) == Some(path)
+            && self.recent.get(self.recent_scroll + index) == Some(path)
         {
             return self.remove_recent(index);
         }
@@ -231,7 +229,7 @@ impl Home<'_> {
     }
 
     fn remove_recent(&mut self, index: usize) -> WindowResult<bool> {
-        let Some(path) = self.recent.get(index).cloned() else {
+        let Some(path) = self.recent.get(self.recent_scroll + index).cloned() else {
             return Ok(false);
         };
         let result = self
@@ -241,7 +239,17 @@ impl Home<'_> {
             .and_then(|store| store.remove(&path));
         match result {
             Ok(recent) => {
+                let removed = self.recent_scroll + index;
                 self.recent = recent;
+                self.recent_selected = self.recent_selected.and_then(|i| {
+                    self.recent
+                        .len()
+                        .checked_sub(1)
+                        .map(|last| i.saturating_sub(usize::from(i > removed)).min(last))
+                });
+                self.recent_scroll = self
+                    .recent_scroll
+                    .min(self.recent.len().saturating_sub(self.recent_capacity()));
                 self.recent_rows.clear();
                 // The next item may shift under the pointer: do not keep a stale
                 // pressed/highlighted row or accidentally activate that next book.

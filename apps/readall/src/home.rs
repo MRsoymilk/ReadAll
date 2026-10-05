@@ -10,6 +10,8 @@ pub(crate) fn run(_: &mut impl Write) -> Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod enabled {
+    mod desktop;
+    mod preview;
     mod recent_rows;
     #[cfg(test)]
     mod recent_tests;
@@ -38,7 +40,6 @@ mod enabled {
     const PREVIEW_MAX_EPUB_BYTES: u64 = 16 * 1024 * 1024;
     const RECENT_TOP: i32 = 366;
     const RECENT_ROW_HEIGHT: i32 = 34;
-    const RECENT_VISIBLE: usize = 3;
 
     #[derive(Debug, Clone)]
     struct FileEntry {
@@ -153,7 +154,7 @@ mod enabled {
             self.preview = if entry.directory {
                 None
             } else {
-                Some(epub_preview(&entry.path))
+                Some("正在读取元数据预览…".into())
             };
         }
     }
@@ -218,6 +219,8 @@ mod enabled {
         RecentDelete(usize),
         BrowserBack,
         BrowserRow(usize),
+        Sidebar(usize),
+        Theme,
     }
 
     struct Home<'font> {
@@ -229,6 +232,11 @@ mod enabled {
         recent: Vec<PathBuf>,
         recent_store: Option<RecentStore>,
         recent_rows: Vec<RecentRowView>,
+        recent_scroll: usize,
+        recent_selected: Option<usize>,
+        wheel_remainder: f64,
+        preview_worker: preview::Preview,
+        status_notice: Option<(String, std::time::Instant)>,
         pending_recent_delete: Option<PathBuf>,
         selected_book: Option<PathBuf>,
         close_requested: bool,
@@ -252,6 +260,11 @@ mod enabled {
                 recent,
                 recent_store,
                 recent_rows: Vec::new(),
+                recent_scroll: 0,
+                recent_selected: None,
+                wheel_remainder: 0.0,
+                preview_worker: preview::Preview::new()?,
+                status_notice: None,
                 pending_recent_delete: None,
                 selected_book: None,
                 close_requested: false,
@@ -320,7 +333,11 @@ mod enabled {
         }
 
         fn activate_recent(&mut self, index: usize) -> WindowResult<bool> {
-            let Some(path) = self.recent.get(index).cloned() else {
+            let Some(path) = self
+                .recent
+                .get(self.recent_scroll.saturating_add(index))
+                .cloned()
+            else {
                 return Ok(false);
             };
             self.selected_book = Some(path);
@@ -334,6 +351,14 @@ mod enabled {
         }
 
         fn hover_target_at(&self, x: i32, y: i32) -> HoverTarget {
+            if point_in(self.theme_rect(), x, y) {
+                return HoverTarget::Theme;
+            }
+            for index in 0..3 {
+                if point_in(self.sidebar_rect(index), x, y) {
+                    return HoverTarget::Sidebar(index);
+                }
+            }
             match &self.mode {
                 Mode::Library => {
                     let card = self.open_card_rect();
@@ -378,7 +403,7 @@ mod enabled {
             self.pointer = pointer;
             let after = self.hover_target();
             let delete_cancelled = self.pending_recent_delete.as_ref().is_some_and(|path| {
-                !matches!(after, HoverTarget::RecentDelete(index) if self.recent.get(index) == Some(path))
+                !matches!(after, HoverTarget::RecentDelete(index) if self.recent.get(self.recent_scroll.saturating_add(index)) == Some(path))
             });
             if delete_cancelled {
                 self.pending_recent_delete = None;
@@ -392,6 +417,11 @@ mod enabled {
                 browser.selected = index;
                 browser.refresh_preview();
                 true
+            } else if let HoverTarget::RecentRow(index) | HoverTarget::RecentDelete(index) = after {
+                let selected = Some(self.recent_scroll.saturating_add(index));
+                let changed = selected != self.recent_selected;
+                self.recent_selected = selected;
+                changed
             } else {
                 false
             };
@@ -443,6 +473,11 @@ mod enabled {
         }
 
         fn paint(&mut self) -> WindowResult<()> {
+            self.recent_scroll = self
+                .recent_scroll
+                .min(self.recent.len().saturating_sub(self.recent_capacity()));
+            self.observe_home_notice(std::time::Instant::now());
+            self.queue_preview(std::time::Instant::now());
             let palette = self.theme.palette();
             self.surface.draw(&[DrawCommand::FillRect {
                 rect: Rect::new(0, 0, self.surface.width(), self.surface.height()),
@@ -477,10 +512,18 @@ mod enabled {
                 },
             ])?;
 
-            self.surface.draw(&[DrawCommand::FillRect {
-                rect: theme_button,
-                color: palette.button,
-            }])?;
+            let theme_hovered = self.hover_target() == HoverTarget::Theme;
+            crate::ui::rounded(
+                &mut self.surface,
+                theme_button,
+                12,
+                if theme_hovered {
+                    palette.hover
+                } else {
+                    palette.button
+                },
+            )?;
+            self.paint_sidebar()?;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
             text.draw(
                 theme_button.x + 12,
@@ -490,10 +533,7 @@ mod enabled {
                 palette.ink,
             )?;
             text.draw(28, 24, 28, "ReadAll", palette.ink)?;
-            text.draw(30, 62, 13, "原生 Rust 阅读器", palette.muted)?;
-            text.draw(30, 126, 14, "书库", palette.accent)?;
-            text.draw(30, 166, 15, "打开图书", palette.ink)?;
-            text.draw(30, 206, 15, "最近阅读", palette.muted)?;
+            text.draw(30, 62, 13, "本地图书 · 专注阅读", palette.muted)?;
             text.draw(250, 28, 24, section, palette.ink)?;
             Ok(())
         }
@@ -504,49 +544,41 @@ mod enabled {
             let content_w = self.surface.width().saturating_sub(280);
             let card = self.open_card_rect();
             let hovered = self.hover_target() == HoverTarget::OpenCard;
-            self.surface.draw(&[
-                DrawCommand::FillRect {
-                    rect: card,
-                    color: palette.accent,
+            crate::ui::rounded(
+                &mut self.surface,
+                card,
+                18,
+                if hovered {
+                    palette.hover
+                } else {
+                    palette.panel
                 },
-                DrawCommand::FillRect {
-                    rect: Rect::new(card.x + 3, card.y + 3, card.width - 6, card.height - 6),
-                    color: if hovered {
-                        palette.hover
-                    } else {
-                        palette.panel
-                    },
-                },
-                DrawCommand::FillRect {
-                    rect: Rect::new(card.x + 3, card.y + 3, 8, card.height - 6),
-                    color: palette.accent,
-                },
-            ])?;
+            )?;
+            crate::ui::rounded(
+                &mut self.surface,
+                Rect::new(card.x + 18, card.y + 27, 3, 36),
+                2,
+                palette.accent,
+            )?;
 
             let info_y = 328;
-            self.surface.draw(&[DrawCommand::FillRect {
-                rect: Rect::new(
-                    250,
-                    info_y,
-                    content_w.min(650),
-                    self.surface
-                        .height()
-                        .saturating_sub(info_y as u32 + 54)
-                        .min(158),
-                ),
-                color: palette.panel,
-            }])?;
+            let recent_panel = Rect::new(
+                250,
+                info_y,
+                content_w.min(650),
+                self.surface.height().saturating_sub(info_y as u32 + 54),
+            );
+            crate::ui::rounded(&mut self.surface, recent_panel, 16, palette.panel)?;
             let footer_y = self.surface.height() as i32 - 42;
             let mut text = UiPainter::new(self.ui_font, &mut self.surface)?;
             text.draw(282, 148, 24, "打开电子书", palette.ink)?;
-            text.draw(
-                282,
-                190,
+            let subtitle = text.fit(
                 15,
                 "支持 EPUB / MOBI / AZW3，选择后阅读",
-                palette.muted,
+                card.width.saturating_sub(58),
             )?;
-            text.draw(282, 230, 14, "点击卡片或按 Enter", palette.accent)?;
+            text.draw_clipped(282, 190, 15, &subtitle, palette.muted, card)?;
+            text.draw(282, 230, 14, "点击打开 · ↑↓ 选择最近阅读", palette.accent)?;
             text.draw(282, info_y + 20, 17, "最近阅读", palette.ink)?;
             if self.recent.is_empty() {
                 text.draw(282, info_y + 62, 14, "暂无最近阅读", palette.muted)?;
@@ -603,25 +635,25 @@ mod enabled {
                 } else {
                     palette.panel
                 };
-                self.surface.draw(&[
-                    DrawCommand::FillRect {
-                        rect: Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
-                        color: row_color,
+                crate::ui::rounded(
+                    &mut self.surface,
+                    Rect::new(250, y, row_width, (ROW_HEIGHT - 5) as u32),
+                    8,
+                    row_color,
+                )?;
+                self.surface.draw(&[DrawCommand::FillRect {
+                    rect: Rect::new(
+                        250,
+                        y,
+                        if selected { 5 } else { 1 },
+                        (ROW_HEIGHT - 5) as u32,
+                    ),
+                    color: if selected {
+                        palette.accent
+                    } else {
+                        palette.border
                     },
-                    DrawCommand::FillRect {
-                        rect: Rect::new(
-                            250,
-                            y,
-                            if selected { 5 } else { 1 },
-                            (ROW_HEIGHT - 5) as u32,
-                        ),
-                        color: if selected {
-                            palette.accent
-                        } else {
-                            palette.border
-                        },
-                    },
-                ])?;
+                }])?;
             }
 
             let footer_y = self.surface.height() as i32 - 42;
@@ -673,10 +705,14 @@ mod enabled {
                 let preview = text.fit(13, preview, footer_width)?;
                 text.draw(250, preview_y, 13, &preview, palette.accent)?;
             }
-            let footer = format!(
-                "{} 项 · Enter 打开 · Backspace 上一级 · Esc 退出",
-                browser.entries.len()
-            );
+            let footer = if self.status.starts_with("无法访问") {
+                self.status.clone()
+            } else {
+                format!(
+                    "{} 项 · Enter 打开 · Backspace 上一级 · Esc 返回书库",
+                    browser.entries.len()
+                )
+            };
             let footer = text.fit(13, &footer, footer_width)?;
             text.draw(250, footer_y, 13, &footer, palette.muted)?;
             Ok(())
@@ -765,6 +801,9 @@ mod enabled {
         }
 
         fn action(&mut self, action: Action) -> WindowResult<bool> {
+            if let Some(changed) = self.desktop_home_action(action)? {
+                return Ok(changed);
+            }
             if action == Action::Command(readall_platform::window::ReaderCommand::Theme)
                 || matches!(action, Action::Click { x, y } if point_in(self.theme_rect(), x, y))
             {
@@ -772,17 +811,33 @@ mod enabled {
                 return self.toggle_theme();
             }
             if matches!(self.mode, Mode::Browser(_)) {
-                return self.browser_action(action);
+                return match self.browser_action(action) {
+                    Ok(changed) => Ok(changed),
+                    Err(error) => {
+                        self.status = format!("无法访问：{error}");
+                        self.paint()?;
+                        Ok(true)
+                    }
+                };
             }
             match action {
-                Action::Activate => self.open_browser(),
+                Action::Activate => {
+                    if let Some(index) = self.recent_selected {
+                        self.activate_recent(index.saturating_sub(self.recent_scroll))
+                    } else {
+                        self.open_browser()
+                    }
+                }
                 Action::Click { x, y } => {
                     self.pending_recent_delete = None;
                     self.pointer = Some((x, y));
                     match self.hover_target() {
                         HoverTarget::OpenCard => self.open_browser(),
                         HoverTarget::RecentDelete(index) => {
-                            self.pending_recent_delete = self.recent.get(index).cloned();
+                            self.pending_recent_delete = self
+                                .recent
+                                .get(self.recent_scroll.saturating_add(index))
+                                .cloned();
                             self.paint_recent_rows(std::time::Instant::now())?;
                             Ok(true)
                         }
@@ -822,12 +877,25 @@ mod enabled {
             }
         }
 
+        fn precise_scroll(&self) -> bool {
+            true
+        }
+
         fn animation_interval(&self) -> Option<std::time::Duration> {
-            self.recent_animation_interval()
+            self.recent_animation_interval().or_else(|| {
+                (self.preview_worker.pending() || self.status_notice.is_some())
+                    .then_some(std::time::Duration::from_millis(40))
+            })
         }
 
         fn animation_tick(&mut self) -> WindowResult<bool> {
-            self.tick_recent_rows(std::time::Instant::now())
+            let now = std::time::Instant::now();
+            if self.poll_preview(now) | self.expire_home_notice(now) {
+                self.paint()?;
+                Ok(true)
+            } else {
+                self.tick_recent_rows(now)
+            }
         }
 
         fn close_requested(&self) -> bool {
@@ -1043,7 +1111,8 @@ mod enabled {
                 .min(browser.entries.len().saturating_sub(browser.scroll));
             let mut active = 0;
             for row in 0..visible {
-                let y = (LIST_TOP + row as i32 * ROW_HEIGHT + 2) as u32;
+                // Sample the interior, not the antialiased corner of the rounded row.
+                let y = (LIST_TOP + row as i32 * ROW_HEIGHT + 20) as u32;
                 let pixel = home.surface.pixel(home.surface.width() - 44, y).unwrap();
                 let current = browser.scroll + row == selected;
                 assert_eq!(
@@ -1087,6 +1156,17 @@ mod enabled {
             };
             assert!(home.action(motion).unwrap());
             assert_browser_highlight(&home, 1);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                home.poll_preview(
+                    std::time::Instant::now() + std::time::Duration::from_millis(200),
+                );
+                if matches!(&home.mode,Mode::Browser(b) if b.preview.as_ref().is_some_and(|text|text.contains("ReadAll")))
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             let Mode::Browser(browser) = &home.mode else {
                 unreachable!()
             };

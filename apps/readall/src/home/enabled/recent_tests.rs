@@ -102,6 +102,13 @@ fn delete_button_removes_only_history_and_updates_visible_rows_without_opening()
     while !home.recent.is_empty() {
         click_delete(&mut home, 0);
     }
+    assert_eq!(home.recent_animation_interval(), None);
+    assert!(
+        home.animation_interval().is_some(),
+        "deletion result needs a short-lived expiry timer"
+    );
+    assert!(home.expire_home_notice(Instant::now() + Duration::from_secs(7)));
+    home.paint().unwrap();
     assert_eq!(home.animation_interval(), None);
     assert!(home.recent_rows.is_empty());
     assert!(
