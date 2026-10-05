@@ -40,7 +40,9 @@ final class ShelfController implements ShelfHome.Callbacks {
     private String sort;
     ShelfController(Activity activity,ExecutorService io,NativeReader.Appearance appearance,Host host){
         this.activity=activity;this.io=io;this.appearance=appearance;this.host=host;directory=new File(activity.getFilesDir(),"bookshelf-v1");prefs=activity.getSharedPreferences("bookshelf",Activity.MODE_PRIVATE);
-        mode=ShelfGeometry.mode(prefs.getInt("mode",ShelfGeometry.COVERS));sort=prefs.getString("sort","recent");
+        int savedMode=prefs.getInt("mode",ShelfGeometry.COVERS);mode=ShelfGeometry.mode(savedMode);
+        // Migrate only the view preference; keep the stored book focus, sort and library intact.
+        if(savedMode!=mode)prefs.edit().putInt("mode",mode).apply();sort=prefs.getString("sort","recent");
         cache=new ShelfCoverCache(new File(directory,"covers"),this::invalidate);
         view=new ShelfHome(activity,cache,appearance,mode,sort,this);
     }

@@ -22,19 +22,26 @@ public final class ShelfStoreSmoke {
             Path index=tmp.resolve("shelf-v1.bin");byte[] valid=Files.readAllBytes(index),bad="foreign index".getBytes(java.nio.charset.StandardCharsets.UTF_8);Files.write(index,bad);boolean rejected=false;try{a.add(one);}catch(IOException e){rejected=true;}check(rejected&&Arrays.equals(Files.readAllBytes(index),bad),"corrupt index silently overwritten");Files.write(index,valid);check(new ShelfStore(tmp.toFile()).load().size()==21,"restart lost entries");
             rejected=false;try{new ShelfStore.Book("../outside.epub","x","x","x","EPUB","","",0,0,-1,false);}catch(IOException e){rejected=true;}check(rejected,"path traversal accepted");
             rejected=false;try{a.progress(two.id,Double.NaN,2);}catch(IOException e){rejected=true;}check(rejected,"invalid progress accepted");
-            for(float width:new float[]{256,320,393,848,1200})for(float height:new float[]{128,256,848})for(int count:new int[]{0,1,5,1000})for(int mode=0;mode<=2;mode++){
-                float max=ShelfGeometry.maxOffset(width,height,count,mode);check(max>=0&&Float.isFinite(max),"bad extent");for(float offset:new float[]{0,max/2,max}){int first=ShelfGeometry.first(width,count,mode,offset),end=ShelfGeometry.end(width,height,count,mode,offset);check(first>=0&&end>=first&&end<=count,"visible range invalid");if(mode==ShelfGeometry.FLOW)check(end-first<=10,"carousel unbounded");}
+            for(float width:new float[]{256,320,393,848,1200})for(float height:new float[]{128,256,848})for(int count:new int[]{0,1,5,1000})for(int mode=ShelfGeometry.LIST;mode<=ShelfGeometry.COVERS;mode++){
+                float max=ShelfGeometry.maxOffset(width,height,count,mode);check(max>=0&&Float.isFinite(max),"bad extent");for(float offset:new float[]{0,max/2,max}){int first=ShelfGeometry.first(width,count,mode,offset),end=ShelfGeometry.end(width,height,count,mode,offset);check(first>=0&&end>=first&&end<=count,"visible range invalid");int columns=mode==ShelfGeometry.LIST?1:ShelfGeometry.columns(width);check(end-first<=((int)Math.ceil(height/ShelfGeometry.pitch(width,mode))+2)*columns,"visible list/grid range unbounded");}
             }
-            for(float oldWidth:new float[]{1,320,393,848})for(float width:new float[]{320,393,848})for(int from=0;from<=2;from++)for(int to=0;to<=2;to++){
+            for(float oldWidth:new float[]{1,320,393,848})for(float width:new float[]{320,393,848})for(int from=ShelfGeometry.LIST;from<=ShelfGeometry.COVERS;from++)for(int to=ShelfGeometry.LIST;to<=ShelfGeometry.COVERS;to++){
                 int anchorIndex=23;float old=ShelfGeometry.restoreOffset(oldWidth,from,anchorIndex,oldWidth,from,0),restoredOffset=ShelfGeometry.restoreOffset(width,to,anchorIndex,oldWidth,from,old);
                 int first=ShelfGeometry.first(width,1000,to,restoredOffset);check(Float.isFinite(restoredOffset)&&restoredOffset>=0,"resize offset invalid");
-                if(to==ShelfGeometry.FLOW)check(ShelfGeometry.focused(1000,restoredOffset)==anchorIndex,"carousel focus lost on resize");
-                else check(first<=anchorIndex&&anchorIndex<first+(to==ShelfGeometry.LIST?1:ShelfGeometry.columns(width)),"focused book lost when columns change");
+                check(first<=anchorIndex&&anchorIndex<first+(to==ShelfGeometry.LIST?1:ShelfGeometry.columns(width)),"focused book lost when columns change");
             }
             check(ShelfGeometry.restoreOffset(393,ShelfGeometry.COVERS,-1,1,ShelfGeometry.COVERS,999)==0,"removed focus should recover to start");
-            ShelfGeometry.Pose left=new ShelfGeometry.Pose(-1,200),right=new ShelfGeometry.Pose(1,200),center=new ShelfGeometry.Pose(0,200);check(left.x==-right.x&&left.angle==-right.angle&&center.scale==1&&left.scale<1,"perspective order/geometry");
-            check(ShelfGeometry.mode(99)==ShelfGeometry.COVERS,"unknown mode not recovered");
-            System.out.println("PASS bookshelf: atomic persistence, deduplication, alias/pin/search/sort, progress, safe removal, corruption refusal, concurrent writers and bounded three-mode geometry");
+            check(ShelfGeometry.LIST==0&&ShelfGeometry.COVERS==1,"existing view IDs must remain stable");
+            check(ShelfGeometry.mode(0)==ShelfGeometry.LIST&&ShelfGeometry.mode(1)==ShelfGeometry.COVERS,"valid views changed");
+            for(int savedMode:new int[]{2,-1,99,Integer.MIN_VALUE,Integer.MAX_VALUE}){
+                int next=ShelfGeometry.mode(savedMode);check(next==ShelfGeometry.COVERS,"removed/unknown view must fall back to covers");
+                for(float width:new float[]{256,320,393,848})for(int anchorIndex:new int[]{0,1,23,999}){
+                    float offset=ShelfGeometry.restoreOffset(width,next,anchorIndex,width,next,0);int first=ShelfGeometry.first(width,1000,next,offset);
+                    check(first<=anchorIndex&&anchorIndex<first+ShelfGeometry.columns(width),"legacy focus lost after view fallback");
+                }
+            }
+            check(Arrays.equals(Files.readAllBytes(index),valid),"view changes must not rewrite books or reading state");
+            System.out.println("PASS bookshelf: atomic persistence, deduplication, alias/pin/search/sort, progress, safe removal, corruption refusal, concurrent writers, bounded list/grid geometry and removed-view fallback");
         }finally{try(java.util.stream.Stream<Path> paths=Files.walk(tmp)){paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.deleteIfExists(p);}catch(IOException e){throw new UncheckedIOException(e);}});}}
     }
 }
