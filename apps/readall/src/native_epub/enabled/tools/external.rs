@@ -177,29 +177,19 @@ impl ReaderWindow<'_, '_, '_, '_> {
         let (cancel, open) = self.external_buttons();
         let palette = self.session.settings().theme.palette();
         let (background, ink) = (palette.panel, palette.ink);
-        self.surface.draw(&[
-            DrawCommand::FillRect {
-                rect: Rect::new(
-                    0,
-                    32,
-                    self.surface.width(),
-                    self.surface.height().saturating_sub(32),
-                ),
-                color: palette.scrim,
-            },
-            DrawCommand::FillRect {
-                rect: panel,
-                color: background,
-            },
-            DrawCommand::FillRect {
-                rect: cancel,
-                color: palette.button,
-            },
-            DrawCommand::FillRect {
-                rect: open,
-                color: palette.accent,
-            },
-        ])?;
+        self.surface.draw(&[DrawCommand::FillRect {
+            rect: Rect::new(
+                0,
+                32,
+                self.surface.width(),
+                self.surface.height().saturating_sub(32),
+            ),
+            color: palette.scrim,
+        }])?;
+        self.menu_fill(panel, background, 20)?;
+        self.menu_fill(cancel, palette.button, 10)?;
+        self.menu_fill(open, palette.accent, 10)?;
+        let mobile = self.mobile_chrome();
         let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
         let width = panel.width.saturating_sub(28);
         text.draw_clipped(panel.x + 14, panel.y + 12, 17, "打开外部网页？", ink, panel)?;
@@ -233,11 +223,19 @@ impl ReaderWindow<'_, '_, '_, '_> {
                 address_clip,
             )?;
         }
-        let hint = format!(
-            "↑↓ 查看网址 · Ctrl+C 复制 · Enter 打开 · Esc 取消  {}/{}",
-            self.tools.external.scroll + 1,
-            lines.len().max(1)
-        );
+        let hint = if mobile {
+            format!(
+                "将交给系统浏览器打开 · {}/{}",
+                self.tools.external.scroll + 1,
+                lines.len().max(1)
+            )
+        } else {
+            format!(
+                "↑↓ 查看网址 · Ctrl+C 复制 · Enter 打开 · Esc 取消  {}/{}",
+                self.tools.external.scroll + 1,
+                lines.len().max(1)
+            )
+        };
         let hint = text.fit(11, &hint, width)?;
         text.draw_clipped(panel.x + 14, cancel.y - 26, 11, &hint, ink, panel)?;
         text.draw_clipped(cancel.x + 10, cancel.y + 8, 12, "取消", ink, cancel)?;

@@ -56,7 +56,7 @@ fn tap(ui: &mut Presentation<'_, '_, '_, '_>, rect: Rect) {
 }
 
 #[test]
-fn android_and_linux_chrome_toc_and_settings_are_pixel_identical() {
+fn android_menu_skin_differs_but_linux_geometry_document_and_actions_stay_shared() {
     let bytes = test_epub::make_epub();
     let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
     let data = test_font::make_font();
@@ -67,7 +67,14 @@ fn android_and_linux_chrome_toc_and_settings_are_pixel_identical() {
     let mut linux = ReaderWindow::new_lazy(session(), None, ui_font()).unwrap();
     linux.tools.store = Some(temp.store());
     let mut mobile = Presentation::new(session(), None, ui_font(), temp.store()).unwrap();
-    assert_eq!(linux.surface().pixels(), mobile.surface().pixels());
+    assert_ne!(linux.surface().pixels(), mobile.surface().pixels());
+    assert_eq!(
+        linux.session.frame().surface.pixels(),
+        mobile.session().frame().surface.pixels()
+    );
+    assert_eq!(linux.toolbar_rect(), mobile.window.toolbar_rect());
+    assert_eq!(linux.toc_panel_rect(), mobile.window.toc_panel_rect());
+    assert_eq!(linux.tool_panel(), mobile.window.tool_panel());
     for index in [5, 1, 1] {
         let rect = if linux.toolbar == ToolbarMode::Collapsed {
             linux.collapsed_rect()
@@ -84,7 +91,14 @@ fn android_and_linux_chrome_toc_and_settings_are_pixel_identical() {
             linux.action(action).unwrap();
             mobile.action(action).unwrap();
         }
-        assert_eq!(linux.surface().pixels(), mobile.surface().pixels());
+        assert_ne!(linux.surface().pixels(), mobile.surface().pixels());
+        assert_eq!(
+            linux.session.frame().surface.pixels(),
+            mobile.session().frame().surface.pixels()
+        );
+        assert_eq!(linux.toolbar_rect(), mobile.window.toolbar_rect());
+        assert_eq!(linux.toc_panel_rect(), mobile.window.toc_panel_rect());
+        assert_eq!(linux.tool_panel(), mobile.window.tool_panel());
     }
     for action in [
         Action::Command(ReaderCommand::Settings),
@@ -98,7 +112,14 @@ fn android_and_linux_chrome_toc_and_settings_are_pixel_identical() {
     ] {
         linux.action(action).unwrap();
         mobile.action(action).unwrap();
-        assert_eq!(linux.surface().pixels(), mobile.surface().pixels());
+        assert_ne!(linux.surface().pixels(), mobile.surface().pixels());
+        assert_eq!(
+            linux.session.frame().surface.pixels(),
+            mobile.session().frame().surface.pixels()
+        );
+        assert_eq!(linux.toolbar_rect(), mobile.window.toolbar_rect());
+        assert_eq!(linux.toc_panel_rect(), mobile.window.toc_panel_rect());
+        assert_eq!(linux.tool_panel(), mobile.window.tool_panel());
         assert_eq!(linux.session.settings(), mobile.session().settings());
     }
 }
@@ -123,6 +144,38 @@ fn with_long_toc(dense: bool, test: impl FnOnce(&mut Presentation<'_, '_, '_, '_
     .unwrap();
     ui.contents().unwrap();
     test(&mut ui);
+}
+
+#[test]
+fn modern_settings_labels_do_not_mutate_values_and_controls_match_high_density_pixels() {
+    for dense in [false, true] {
+        with_long_toc(dense, |ui| {
+            let anchor = ui.session().anchor().clone();
+            ui.action(Action::Command(ReaderCommand::Settings)).unwrap();
+            assert!(!ui.ui_state().notice.contains('↑'));
+            let p = ui.window.tool_panel();
+            let row_y = p.y + 88 + 42;
+            let size = ui.session().settings().size;
+            tap(ui, Rect::new(p.x + 18, row_y + 3, 60, 30));
+            assert_eq!(
+                ui.session().settings().size,
+                size,
+                "labels must not decrement"
+            );
+            tap(ui, Rect::new(p.x + p.width as i32 - 60, row_y + 3, 40, 32));
+            assert_eq!(ui.session().settings().size, size + 2);
+            tap(ui, Rect::new(p.x + p.width as i32 - 108, row_y + 3, 40, 32));
+            assert_eq!(ui.session().settings().size, size);
+            tap(ui, Rect::new(p.x + p.width as i32 - 38, p.y + 5, 28, 25));
+            assert_eq!(ui.window.tools.mode, tools::Mode::None);
+            assert_eq!(ui.session().anchor(), &anchor);
+            ui.action(Action::Command(ReaderCommand::Find)).unwrap();
+            assert!(!ui.ui_state().notice.contains("Enter"));
+            ui.input("search", "AAAA".into()).unwrap();
+            tap(ui, Rect::new(p.x + p.width as i32 - 78, p.y + 40, 66, 38));
+            assert!(ui.ui_state().notice.contains("个结果"));
+        });
+    }
 }
 
 #[test]

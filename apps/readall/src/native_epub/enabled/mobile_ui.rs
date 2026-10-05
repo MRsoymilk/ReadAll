@@ -1,6 +1,6 @@
 //! Android uses the desktop ReaderWindow, not a second toolbar/TOC renderer.
 //! This adapter translates touch and host services; layout, panels, hit testing,
-//! selection, page effects and settings stay in the shared implementation.
+//! selection, page effects and settings stay shared; Android has a compact menu skin.
 use super::scroll_physics::Inertia;
 use super::*;
 use crate::reader_data::{PageMode, Store};
@@ -51,6 +51,8 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
         let mut window = ReaderWindow::new_lazy(session, progress, font)?;
         window.host_effects = Some(VecDeque::new());
         window.tools.store = Some(store);
+        // Apply the Android menu skin before publishing the first readable frame.
+        window.refresh_surface()?;
         Ok(Self {
             window,
             drag: Drag::None,

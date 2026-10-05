@@ -28,7 +28,8 @@ public final class ThemeSmoke {
                 long revision=s.revision;r.command(NativeReader.PAUSE,1,0);s=JniSmoke.waitFor(r,v->v.revision>revision&&!v.busy());
                 ByteBuffer bytes=ByteBuffer.allocateDirect(s.byteLength());check(r.copyPixels(s,bytes),"theme frame copy failed");
                 check(color(bytes,0,0,s.width)==s.appearance.page,"header did not use shared page color");
-                check(color(bytes,38,1220,s.width)==s.appearance.panel,"toolbar retained old fixed color");
+                check(color(bytes,s.width/2,1220,s.width)==s.appearance.panel,"toolbar retained old fixed color");
+                check(color(bytes,38,1220,s.width)!=s.appearance.panel,"rounded toolbar corner should reveal the page");
                 r.command(NativeReader.SETTINGS);JniSmoke.waitFor(r,v->v.uiMode.equals("settings")&&!v.busy());r.command(NativeReader.BACK);JniSmoke.waitFor(r,v->v.uiMode.equals("expanded")&&!v.busy());
             }
         }

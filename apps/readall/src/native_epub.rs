@@ -19,6 +19,7 @@ mod enabled {
     mod azw3_tests;
     #[cfg(test)]
     mod loading_tests;
+    mod menu_style;
     #[cfg(test)]
     mod mobi_tests;
     #[cfg(feature = "mobile")]
@@ -383,6 +384,9 @@ mod enabled {
         }
 
         fn draw_collapsed_control(&mut self) -> WindowResult<()> {
+            if self.mobile_chrome() {
+                return self.draw_mobile_collapsed();
+            }
             let palette = self.session.settings().theme.palette();
             let rect = self.collapsed_rect();
             let hovered = self.hover_target() == ReaderHover::Collapsed;
@@ -410,6 +414,9 @@ mod enabled {
         }
 
         fn draw_toolbar(&mut self) -> WindowResult<()> {
+            if self.mobile_chrome() {
+                return self.draw_mobile_toolbar();
+            }
             let palette = self.session.settings().theme.palette();
             let rect = self.toolbar_rect();
             let hover = self.hover_target();
@@ -534,6 +541,9 @@ mod enabled {
         }
 
         fn draw_toc(&mut self) -> WindowResult<()> {
+            if self.mobile_chrome() {
+                return self.draw_mobile_toc();
+            }
             let palette = self.session.settings().theme.palette();
             let panel = self.toc_panel_rect();
             self.surface.draw(&[

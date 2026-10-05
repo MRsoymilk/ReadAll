@@ -80,6 +80,43 @@ impl ReaderWindow<'_, '_, '_, '_> {
         let Some(bar) = self.selection_actions_rect() else {
             return Ok(());
         };
+        if self.mobile_chrome() {
+            self.menu_fill(bar, palette.panel, 13)?;
+            for (index, label) in ["复制", "高亮", "笔记", "取消"].into_iter().enumerate() {
+                let cell = Self::selection_button(bar, index);
+                if index == 0 {
+                    self.menu_fill(
+                        Rect::new(
+                            cell.x + 4,
+                            cell.y + 4,
+                            cell.width.saturating_sub(8),
+                            cell.height.saturating_sub(4),
+                        ),
+                        palette.selected,
+                        9,
+                    )?;
+                }
+                self.menu_label(
+                    cell,
+                    label,
+                    13,
+                    if index == 0 {
+                        palette.accent
+                    } else {
+                        palette.ink
+                    },
+                )?;
+            }
+            let hint = if self.tools.status.is_empty() {
+                "选中文字"
+            } else {
+                &self.tools.status
+            };
+            let mut text = UiPainter::new(&self.ui_font, &mut self.surface)?;
+            let hint = text.fit(10, hint, bar.width.saturating_sub(24))?;
+            text.draw_clipped(bar.x + 12, bar.y + 37, 10, &hint, palette.muted, bar)?;
+            return Ok(());
+        }
         self.surface.draw(&[
             DrawCommand::FillRect {
                 rect: Rect::new(bar.x + 2, bar.y + 2, bar.width, bar.height),

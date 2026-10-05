@@ -4,6 +4,7 @@ mod gestures;
 #[cfg(test)]
 mod link_tests;
 mod links;
+mod mobile_menu;
 mod selection_actions;
 #[cfg(test)]
 mod selection_tests;
@@ -184,7 +185,12 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             self.session.book_title().to_owned(),
         )?;
         self.reload_annotations()?;
-        self.tools.status = "书签已保存；F3 查看".into();
+        self.tools.status = if self.mobile_chrome() {
+            "书签已保存，可在标注中查看"
+        } else {
+            "书签已保存；F3 查看"
+        }
+        .into();
         Ok(())
     }
     fn tool_highlight(&mut self) -> WindowResult<()> {
@@ -305,27 +311,47 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 self.tools.dirty = true;
                 self.tools.selected = 0;
                 self.tools.scroll = 0;
-                self.tools.status = "输入查询，Enter 搜索；↑↓ 选择，Enter 跳转；Ctrl+V 粘贴".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "输入关键词后点搜索，轻点结果跳转"
+                } else {
+                    "输入查询，Enter 搜索；↑↓ 选择，Enter 跳转；Ctrl+V 粘贴"
+                }
+                .into();
             }
             ReaderCommand::Bookmarks => {
                 self.reload_annotations()?;
                 self.tools.mode = Mode::Annotations;
                 self.tools.selected = 0;
                 self.tools.scroll = 0;
-                self.tools.status = "Enter/点击跳转；Delete 删除选中的标注".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "轻点书签或标注，返回对应位置"
+                } else {
+                    "Enter/点击跳转；Delete 删除选中的标注"
+                }
+                .into();
             }
             ReaderCommand::Bookmark => self.tool_bookmark()?,
             ReaderCommand::Highlight => self.tool_highlight()?,
             ReaderCommand::Note => {
                 self.tools.mode = Mode::Note;
                 self.tools.query.clear();
-                self.tools.status = "输入笔记，Enter 保存；Esc 取消；Ctrl+V 可粘贴中文".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "输入笔记后点保存，关闭可取消"
+                } else {
+                    "输入笔记，Enter 保存；Esc 取消；Ctrl+V 可粘贴中文"
+                }
+                .into();
             }
             ReaderCommand::Settings => {
                 self.tools.mode = Mode::Settings;
                 self.tools.selected = 0;
                 self.tools.scroll = 0;
-                self.tools.status = "↑↓ 选择；+/− 修改；点击右侧加减按钮".into();
+                self.tools.status = if self.mobile_chrome() {
+                    "轻点右侧加减按钮，设置自动保存"
+                } else {
+                    "↑↓ 选择；+/− 修改；点击右侧加减按钮"
+                }
+                .into();
             }
             ReaderCommand::Theme => {
                 let mut settings = self.session.settings();
@@ -336,7 +362,13 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 self.tools.mode = Mode::None;
                 self.tools.selecting = !self.tools.selecting;
                 self.tools.clear_selection();
-                self.tools.status = if self.tools.selecting {
+                self.tools.status = if self.mobile_chrome() {
+                    if self.tools.selecting {
+                        "长按拖动选择文字，松手后选择操作"
+                    } else {
+                        "长按选择文字，轻点链接跳转"
+                    }
+                } else if self.tools.selecting {
                     "文字选择优先：链接也可选字；Ctrl+C 复制；F8 高亮；F7 笔记；F9 返回普通阅读"
                 } else {
                     "普通阅读：直接拖选文字，单击链接跳转；Ctrl+C 复制，F8 高亮，F7 笔记"
@@ -411,6 +443,15 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
                 return Ok(Some(true));
             }
             if self.tools.mode == Mode::Zoom {
+                if self.mobile_chrome() {
+                    let (minus, plus) = self.mobile_zoom_buttons();
+                    if point_in(minus, x, y) {
+                        self.tools.factor = (self.tools.factor / 1.25).max(0.25);
+                    } else if point_in(plus, x, y) {
+                        self.tools.factor = (self.tools.factor * 1.25).min(8.0);
+                    }
+                    return Ok(Some(true));
+                }
                 if y < panel.y + 40 {
                     if x < panel.x + 120 {
                         self.tools.factor = (self.tools.factor / 1.25).max(0.25);
@@ -433,11 +474,21 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
             if let Some(index) = self.tool_row_at(x, y) {
                 self.tools.selected = index;
                 if self.tools.mode == Mode::Settings {
-                    self.change_setting(if x < panel.x + panel.width as i32 - 64 {
-                        -1
+                    if self.mobile_chrome() {
+                        let row_y = panel.y + 88 + (index - self.tools.scroll) as i32 * 42;
+                        let (minus, plus) = self.mobile_setting_buttons(row_y);
+                        if point_in(minus, x, y) {
+                            self.change_setting(-1)?;
+                        } else if point_in(plus, x, y) {
+                            self.change_setting(1)?;
+                        }
                     } else {
-                        1
-                    })?;
+                        self.change_setting(if x < panel.x + panel.width as i32 - 64 {
+                            -1
+                        } else {
+                            1
+                        })?;
+                    }
                 } else {
                     self.tool_activate()?;
                 }
@@ -679,6 +730,9 @@ impl<'book, 'archive, 'font, 'data> ReaderWindow<'book, 'archive, 'font, 'data> 
         Ok(())
     }
     pub(super) fn draw_tools(&mut self) -> WindowResult<()> {
+        if self.mobile_chrome() {
+            return self.draw_mobile_tools();
+        }
         let palette = self.session.settings().theme.palette();
         if self.tools.mode == Mode::External {
             return self.draw_external_link();
