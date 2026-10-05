@@ -5,6 +5,8 @@ use super::*;
 use crate::reader_data::{PageMode, Store};
 use readall_platform::window::ReaderCommand;
 use std::collections::VecDeque;
+mod toc_drag;
+use toc_drag::TocDrag;
 
 #[cfg(test)]
 mod tests;
@@ -14,6 +16,7 @@ enum Drag {
     #[default]
     None,
     Page,
+    Toc(TocDrag),
     List {
         last_y: i32,
         remainder: i64,
@@ -277,13 +280,13 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
             }
             2 => {
                 self.allow_fling = false;
-                if self.window.tools.mode != tools::Mode::None
-                    || self.window.toolbar == ToolbarMode::Toc
-                {
+                if self.window.tools.mode != tools::Mode::None {
                     self.drag = Drag::List {
                         last_y: y,
                         remainder: 0,
                     };
+                } else if self.window.toolbar == ToolbarMode::Toc {
+                    self.drag = TocDrag::start(&self.window, x, y).map_or(Drag::None, Drag::Toc);
                 } else if self.body(x, y) {
                     self.window.action(Action::PanStart { x, y })?;
                     self.drag = Drag::Page;
@@ -292,6 +295,7 @@ impl<'b, 'a, 'f, 'd> Presentation<'b, 'a, 'f, 'd> {
             }
             3 => match &mut self.drag {
                 Drag::Page => self.window.action(Action::PointerMove { x, y })?,
+                Drag::Toc(drag) => drag.move_to(&mut self.window, y),
                 Drag::List { last_y, remainder } => {
                     *remainder += i64::from(*last_y) - i64::from(y);
                     *last_y = y;

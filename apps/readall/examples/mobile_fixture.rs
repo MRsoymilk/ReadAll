@@ -28,7 +28,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             epub::make_png(40, 20, [10, 90, 180, 255]),
         )],
     );
-    for (name, bytes) in [("book.epub", book), ("font.ttf", font::make_font())] {
+    let toc =
+        epub::make_epub_with_resources(&["<html><body><p>AAAA WWWW</p></body></html>"; 30], vec![]);
+    for (name, bytes) in [
+        ("book.epub", book),
+        ("toc.epub", toc),
+        ("font.ttf", font::make_font()),
+    ] {
         let path = root.join(name);
         if path.exists() {
             if fs::read(&path)? != bytes {

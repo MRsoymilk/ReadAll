@@ -102,6 +102,200 @@ fn android_and_linux_chrome_toc_and_settings_are_pixel_identical() {
         assert_eq!(linux.session.settings(), mobile.session().settings());
     }
 }
+fn with_long_toc(dense: bool, test: impl FnOnce(&mut Presentation<'_, '_, '_, '_>)) {
+    let chapters = vec!["<html><body><p>AAAA WWWW</p></body></html>"; 30];
+    let bytes = test_epub::make_epub_with_resources(&chapters, vec![]);
+    let book = EpubBook::parse(&bytes, EpubLimits::default()).unwrap();
+    let data = test_font::make_font();
+    let font = Font::parse(&data, 0, FontLimits::default()).unwrap();
+    let temp = Temp::new();
+    let mut opts = options();
+    if dense {
+        opts.raster_size = Some((1080, 1728));
+    }
+    let session = EpubSession::new(&book, &font, opts, Start::Beginning).unwrap();
+    let mut ui = Presentation::new(
+        session,
+        None,
+        UiFont::from_bytes(data.clone(), "fixture.ttf".into()).unwrap(),
+        temp.store(),
+    )
+    .unwrap();
+    ui.contents().unwrap();
+    test(&mut ui);
+}
+
+#[test]
+fn toc_touch_moves_list_content_with_the_finger_not_keyboard_focus() {
+    for dense in [false, true] {
+        with_long_toc(dense, |ui| {
+            for theme in [
+                crate::reader_data::Theme::Paper,
+                crate::reader_data::Theme::Dark,
+            ] {
+                if ui.window.session.settings().theme != theme {
+                    ui.action(Action::Command(ReaderCommand::Theme)).unwrap();
+                }
+                ui.contents().unwrap();
+                let anchor = ui.session().anchor().clone();
+                let (x, y) = center(ui.window.toc_panel_rect());
+                ui.touch(0, x, y).unwrap();
+                ui.touch(2, x, y).unwrap();
+                ui.touch(3, x, y - 76).unwrap();
+                assert_eq!(
+                    ui.window.toc_scroll, 2,
+                    "upward drag must immediately reveal later rows"
+                );
+                assert_eq!(
+                    ui.window.toc_selected, 2,
+                    "do not walk focus down a stationary list"
+                );
+                ui.touch(3, x, y - 38).unwrap();
+                assert_eq!(
+                    ui.window.toc_scroll, 1,
+                    "downward drag must move content back down"
+                );
+                assert_eq!(
+                    ui.window.toc_selected, 2,
+                    "a still-visible selected entry stays selected"
+                );
+                ui.touch(4, x, y - 38).unwrap();
+                ui.touch(9, 0, 600).unwrap();
+                assert_eq!(
+                    ui.window.toc_scroll, 1,
+                    "TOC release must not fling the book"
+                );
+                assert_eq!(ui.session().anchor(), &anchor);
+                assert!(!ui.ui_state().animating);
+                // Desktop navigation remains selection-based, independent of Android dragging.
+                ui.action(Action::Next).unwrap();
+                assert_eq!((ui.window.toc_scroll, ui.window.toc_selected), (1, 3));
+            }
+            let panel = ui.window.toc_panel_rect();
+            let row = 2;
+            let index = ui.window.toc_scroll + row;
+            let expected = ui.window.toc[index].clone();
+            let (x, y) = (panel.x + 24, panel.y + 48 + row as i32 * 38 + 12);
+            ui.touch(0, x, y).unwrap();
+            ui.touch(1, x, y).unwrap();
+            assert_eq!(ui.session().anchor().spine_index(), expected.spine);
+            assert_eq!(ui.ui_state().mode, "expanded");
+        });
+    }
+}
+
+#[test]
+fn toc_drag_boundaries_reverse_immediately_and_do_not_accumulate_overscroll() {
+    with_long_toc(false, |ui| {
+        let (x, y) = center(ui.window.toc_panel_rect());
+        let last = ui.window.toc.len() - ui.window.visible_toc_rows();
+        let anchor = ui.session().anchor().clone();
+        ui.touch(2, x, y).unwrap();
+        ui.touch(3, x, y + 200).unwrap();
+        assert_eq!(ui.window.toc_scroll, 0);
+        ui.touch(3, x, y + 162).unwrap();
+        assert_eq!(
+            ui.window.toc_scroll, 1,
+            "reverse at top without paying back overscroll"
+        );
+        ui.touch(3, x, y - 10000).unwrap();
+        assert_eq!(
+            ui.window.toc_scroll, last,
+            "coalesced movement clamps to the actual list end"
+        );
+        ui.touch(3, x, y - 10000).unwrap();
+        assert_eq!(
+            ui.window.toc_scroll, last,
+            "a duplicate position must not drain queued rows"
+        );
+        ui.touch(3, x, y - 9962).unwrap();
+        assert_eq!(
+            ui.window.toc_scroll,
+            last - 1,
+            "reverse at bottom immediately"
+        );
+        assert!(ui.window.toc_selected >= ui.window.toc_scroll);
+        assert!(ui.window.toc_selected < ui.window.toc_scroll + ui.window.visible_toc_rows());
+        ui.touch(8, x, y).unwrap();
+        ui.touch(3, x, y).unwrap();
+        ui.touch(9, 0, 600).unwrap();
+        assert_eq!(ui.window.toc_scroll, last - 1);
+        assert_eq!(ui.session().anchor(), &anchor);
+    });
+}
+
+#[test]
+fn toc_drag_coalescing_keeps_distance_and_only_rows_start_a_drag() {
+    with_long_toc(false, |ui| {
+        let panel = ui.window.toc_panel_rect();
+        let (x, y) = center(panel);
+        ui.touch(2, x, panel.y + 20).unwrap();
+        ui.touch(3, x, panel.y - 180).unwrap();
+        ui.touch(4, x, panel.y - 180).unwrap();
+        assert_eq!(
+            (ui.window.toc_scroll, ui.window.toc_selected),
+            (0, 0),
+            "header drags do not scroll the list"
+        );
+        for segmented in [false, true] {
+            ui.contents().unwrap();
+            ui.touch(0, x, y).unwrap();
+            ui.touch(2, x, y).unwrap();
+            if segmented {
+                for distance in 1..=245 {
+                    ui.touch(3, x, y - distance).unwrap();
+                }
+            } else {
+                ui.touch(3, x, y - 245).unwrap();
+            }
+            assert_eq!(ui.window.toc_scroll, 6);
+            ui.touch(4, x, y - 245).unwrap();
+            ui.touch(2, x, y).unwrap();
+            ui.touch(3, x, y - 21).unwrap();
+            assert_eq!(
+                ui.window.toc_scroll, 6,
+                "release clears partial-row distance"
+            );
+            ui.touch(3, x, y - 38).unwrap();
+            assert_eq!(ui.window.toc_scroll, 7);
+            ui.touch(4, x, y - 38).unwrap();
+        }
+    });
+}
+
+#[test]
+fn short_empty_and_replaced_toc_panels_do_not_scroll_or_change_focus() {
+    with_long_toc(false, |ui| {
+        let entries = ui.window.toc.clone();
+        let anchor = ui.session().anchor().clone();
+        let (x, y) = center(ui.window.toc_panel_rect());
+        for count in [0, 1, ui.window.visible_toc_rows()] {
+            ui.window.toc = entries[..count].to_vec();
+            ui.touch(0, x, y).unwrap();
+            ui.touch(2, x, y).unwrap();
+            ui.touch(3, x, y - 300).unwrap();
+            ui.touch(3, x, y + 300).unwrap();
+            ui.touch(4, x, y + 300).unwrap();
+            assert_eq!((ui.window.toc_scroll, ui.window.toc_selected), (0, 0));
+            assert_eq!(ui.session().anchor(), &anchor);
+        }
+        ui.window.toc = entries;
+        ui.touch(2, x, y).unwrap();
+        ui.action(Action::Command(ReaderCommand::Settings)).unwrap();
+        let settings = ui.session().settings();
+        let pixels = ui.surface().pixels().to_vec();
+        ui.touch(3, x, y - 300).unwrap();
+        assert_eq!(
+            ui.surface().pixels(),
+            pixels,
+            "an old TOC drag must not navigate a new panel"
+        );
+        assert_eq!(ui.session().settings(), settings);
+        assert_eq!(ui.window.toc_scroll, 0);
+        ui.touch(8, x, y).unwrap();
+    });
+}
+
 #[test]
 fn touch_toolbar_expands_collapses_and_toc_drag_never_turns_book_pages() {
     let chapters: Vec<_> = (0..20)
