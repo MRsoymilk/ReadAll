@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "readall"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "readall-core",
  "readall-epub",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "readall-android"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jni",
  "readall",
@@ -706,11 +706,11 @@ dependencies = [
 
 [[package]]
 name = "readall-archive"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "readall-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "unicode-linebreak",
  "unicode-segmentation",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "readall-epub"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "readall-archive",
  "readall-core",
@@ -726,11 +726,11 @@ dependencies = [
 
 [[package]]
 name = "readall-font"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "readall-image"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gif",
  "image-webp",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "readall-mobi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "html-escape",
  "readall-archive",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "readall-platform"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "readall-core",
  "readall-render",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "readall-render"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "readall-font",
 ]
