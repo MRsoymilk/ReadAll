@@ -19,11 +19,13 @@ public final class NativeReader implements AutoCloseable {
     public synchronized State state() { requireOpen();return new State(nativeState(handle)); }
     public synchronized void command(int code) { command(code,0,0); }
     public synchronized void command(int code,int a,int b) { requireOpen();nativeCommand(handle,code,a,b); }
-    /** Caller owns target exclusively until this method returns. Position is ignored. */
-    public synchronized boolean copyPixels(State state, ByteBuffer target) {
-        requireOpen();
+    private synchronized long checkedHandle() { requireOpen();return handle; }
+    /** Caller owns target exclusively until return. Native captures an immutable frame
+     * before copying; do not hold this monitor over megabytes of pixels and block UI input. */
+    public boolean copyPixels(State state, ByteBuffer target) {
+        long owner=checkedHandle();
         if(!target.isDirect() || target.isReadOnly() || target.capacity()<state.byteLength()) throw new IllegalArgumentException("writable direct frame buffer required");
-        return nativeCopyPixels(handle,state.serial,target);
+        return nativeCopyPixels(owner,state.serial,target);
     }
     public synchronized Item[] contents() {
         requireOpen();String[] fields=nativeContents(handle);

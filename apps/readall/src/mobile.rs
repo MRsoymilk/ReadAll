@@ -2,6 +2,7 @@
 //! Only immutable frames/state cross JNI. Parsing, interaction and animation live
 //! on this owner thread; Android supplies touch, IME, clipboard and browser services.
 mod appearance;
+mod frame_clock;
 mod input;
 pub use appearance::{Appearance, appearance};
 #[cfg(test)]
@@ -376,6 +377,9 @@ impl Drop for Permit {
 }
 fn publish(shared: &Shared, ui: &mut Presentation<'_, '_, '_, '_>, changed: bool) {
     let state = ui.ui_state();
+    // Surface snapshots are immutable/COW; never copy a full device-sized buffer
+    // while holding the state mutex used by Android's UI thread.
+    let surface = changed.then(|| ui.surface().clone());
     shared.update(|snapshot| {
         let session = ui.session();
         snapshot.busy = false;
@@ -392,12 +396,9 @@ fn publish(shared: &Shared, ui: &mut Presentation<'_, '_, '_, '_>, changed: bool
         snapshot.editing = state.editing;
         snapshot.input = state.input;
         snapshot.notice = state.notice;
-        if changed {
+        if let Some(surface) = surface {
             let serial = snapshot.frame.as_ref().map_or(1, |frame| frame.serial + 1);
-            snapshot.frame = Some(Arc::new(Frame {
-                serial,
-                surface: ui.surface().clone(),
-            }));
+            snapshot.frame = Some(Arc::new(Frame { serial, surface }));
         }
     });
     let mut effects = shared.effects.lock().unwrap_or_else(|e| e.into_inner());
@@ -464,14 +465,21 @@ fn worker(config: Config, shared: &Shared) -> Result<()> {
     if ui.load_annotations()? {
         publish(shared, &mut ui, true);
     }
+    ui.defer_frames();
+    let mut clock = frame_clock::FrameClock::new(Instant::now());
     let mut paused = false;
     let mut last_tick = Instant::now();
     while !shared.tracker.is_cancelled() && !ui.closed() {
         let interval = if paused { None } else { ui.interval() };
-        let delay = interval.map_or(Duration::from_millis(60), |dt| {
+        let mut delay = interval.map_or(Duration::from_millis(60), |dt| {
             dt.saturating_sub(last_tick.elapsed())
         });
+        if let Some(frame_delay) = clock.delay(Instant::now()) {
+            delay = delay.min(frame_delay);
+        }
+        let mut urgent = false;
         if let Some(command) = shared.inbox.receive(delay) {
+            urgent = !matches!(&command, Command::Touch { .. });
             shared.update(|s| s.busy = true);
             let result: Result<bool> = (|| match command {
                 Command::Resize { width, height } => ui.resize(width, height),
@@ -514,33 +522,48 @@ fn worker(config: Config, shared: &Shared) -> Result<()> {
                 command => ui.legacy(&command),
             })();
             match result {
-                Ok(changed) => publish(shared, &mut ui, changed),
+                Ok(changed) => clock.mark(changed),
                 Err(error) if !shared.tracker.is_cancelled() => {
                     ui.notice(error.to_string())?;
-                    publish(shared, &mut ui, true);
+                    clock.mark(true);
                 }
                 Err(_) => break,
             }
-        } else if !paused && shared.inbox.interrupt_idle(&shared.interrupt) {
+        } else if !paused
+            && !clock.pending()
+            && !ui.ui_state().animating
+            && shared.inbox.interrupt_idle(&shared.interrupt)
+        {
             let result = {
                 let _guard = loading::speculate(Arc::clone(&shared.interrupt));
                 ui.idle()
             };
             if let Ok(true) = result {
-                publish(shared, &mut ui, true);
+                clock.mark(true);
             }
         }
+        // Pace from the start of composition, not its end: drawing time must
+        // consume the frame budget instead of adding another 16 ms of waiting.
+        let frame_started = Instant::now();
         if !paused && ui.interval().is_some_and(|dt| last_tick.elapsed() >= dt) {
-            last_tick = Instant::now();
+            last_tick = frame_started;
             match ui.tick() {
-                Ok(true) => publish(shared, &mut ui, true),
-                Ok(false) => {}
+                Ok(changed) => clock.mark(changed),
                 Err(error) if !shared.tracker.is_cancelled() => {
                     ui.notice(error.to_string())?;
-                    publish(shared, &mut ui, true);
+                    clock.mark(true);
                 }
                 Err(_) => break,
             }
+        }
+        if clock.due(frame_started, urgent) {
+            ui.flush_frame()?;
+            publish(shared, &mut ui, true);
+            clock.presented(frame_started);
+        } else if urgent {
+            publish(shared, &mut ui, false);
+        } else {
+            shared.update(|s| s.busy = false);
         }
     }
     // Preserve the content anchor on app background/close, not every animation frame.
