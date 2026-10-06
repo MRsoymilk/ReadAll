@@ -77,7 +77,7 @@ impl fmt::Display for Error {
                 f.write_str("source length changed while reading; reopen the document")
             }
             Self::UnsupportedFormat(FormatHint::Pdf) => {
-                f.write_str("PDF signature detected; the PDF engine is not implemented yet")
+                f.write_str("PDF signature detected; use the fixed-page PDF reader instead of the plain-text reader")
             }
             Self::UnsupportedFormat(FormatHint::ZipArchive) => f.write_str(
                 "ZIP archive detected (possibly EPUB); the EPUB engine is not implemented yet",

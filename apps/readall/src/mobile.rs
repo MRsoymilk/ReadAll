@@ -4,6 +4,7 @@
 mod appearance;
 mod frame_clock;
 mod input;
+mod pdf;
 mod preview;
 pub use appearance::{Appearance, appearance};
 pub use preview::{BookPreview, PREVIEW_BYTES, book_preview};
@@ -410,6 +411,14 @@ fn publish(shared: &Shared, ui: &mut Presentation<'_, '_, '_, '_>, changed: bool
 fn worker(config: Config, shared: &Shared) -> Result<()> {
     let mut source = LocalFileSource::open(&config.book)?;
     let bytes = loading::read(&mut source, 128 * 1024 * 1024, "读取图书")?;
+    if readall_pdf::is_pdf(&bytes)
+        || matches!(
+            publication::path_format(&config.book),
+            Some(publication::Format::Pdf)
+        )
+    {
+        return pdf::worker(config, shared, bytes);
+    }
     let prepared = publication::prepare(bytes, &config.book)?;
     loading::stage("解析图书结构")?;
     let book = EpubBook::parse(&prepared.bytes, EpubLimits::default())?;

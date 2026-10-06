@@ -90,7 +90,12 @@ impl Document {
             title: decode_pdf_string(raw.title.as_deref()),
             author: decode_pdf_string(raw.author.as_deref()),
         };
-        Ok(Self { pdf, id, metadata, limits })
+        Ok(Self {
+            pdf,
+            id,
+            metadata,
+            limits,
+        })
     }
 
     pub fn page_count(&self) -> usize {
@@ -111,12 +116,24 @@ impl Document {
         max_width: u32,
         max_height: u32,
     ) -> Result<RenderedPage, PdfError> {
-        if max_width == 0 || max_height == 0 || max_width > u16::MAX as u32 || max_height > u16::MAX as u32 {
+        if max_width == 0
+            || max_height == 0
+            || max_width > u16::MAX as u32
+            || max_height > u16::MAX as u32
+        {
             return Err(PdfError::InvalidViewport);
         }
-        let page = self.pdf.pages().get(page_index).ok_or(PdfError::PageOutOfRange)?;
+        let page = self
+            .pdf
+            .pages()
+            .get(page_index)
+            .ok_or(PdfError::PageOutOfRange)?;
         let (source_width, source_height) = page.render_dimensions();
-        if !source_width.is_finite() || !source_height.is_finite() || source_width <= 0.0 || source_height <= 0.0 {
+        if !source_width.is_finite()
+            || !source_height.is_finite()
+            || source_width <= 0.0
+            || source_height <= 0.0
+        {
             return Err(PdfError::Invalid);
         }
         let mut scale = (max_width as f64 / source_width as f64)
@@ -157,7 +174,9 @@ pub fn is_pdf(bytes: &[u8]) -> bool {
 }
 
 fn decode_pdf_string(value: Option<&[u8]>) -> String {
-    let Some(bytes) = value else { return String::new() };
+    let Some(bytes) = value else {
+        return String::new();
+    };
     if let Some(rest) = bytes.strip_prefix(&[0xfe, 0xff]) {
         let units = rest
             .chunks_exact(2)
@@ -182,12 +201,7 @@ fn decode_pdf_string(value: Option<&[u8]>) -> String {
     }
     match std::str::from_utf8(bytes) {
         Ok(text) => text.chars().take(512).collect(),
-        Err(_) => bytes
-            .iter()
-            .copied()
-            .map(char::from)
-            .take(512)
-            .collect(),
+        Err(_) => bytes.iter().copied().map(char::from).take(512).collect(),
     }
 }
 
@@ -213,10 +227,7 @@ mod tests {
             out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
         }
         out.extend_from_slice(
-            format!(
-                "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
-            )
-            .as_bytes(),
+            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
         );
         out
     }
@@ -233,7 +244,10 @@ mod tests {
         assert_eq!(document.page_count(), 1);
         let page = document.render_fit(0, 400, 400).unwrap();
         assert_eq!((page.width, page.height), (266, 400));
-        assert_eq!(page.rgba.len(), page.width as usize * page.height as usize * 4);
+        assert_eq!(
+            page.rgba.len(),
+            page.width as usize * page.height as usize * 4
+        );
         assert!(page.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 

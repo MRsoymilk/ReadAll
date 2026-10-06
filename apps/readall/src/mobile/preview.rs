@@ -24,6 +24,19 @@ pub fn book_preview(path: &Path) -> Result<BookPreview> {
     preview_bytes(&bytes)
 }
 fn preview_bytes(bytes: &[u8]) -> Result<BookPreview> {
+    if readall_pdf::is_pdf(bytes) {
+        let document =
+            readall_pdf::Document::parse(bytes.to_vec(), readall_pdf::Limits::default())?;
+        let page = document.thumbnail()?;
+        return Ok(BookPreview {
+            title: document.metadata().title.chars().take(512).collect(),
+            author: document.metadata().author.chars().take(512).collect(),
+            format: "PDF",
+            width: page.width,
+            height: page.height,
+            rgba: page.rgba,
+        });
+    }
     let (title, author, format, cover) = if readall_mobi::is_mobi(bytes) {
         let book = MobiBook::parse(bytes, MobiLimits::default())?;
         let meta = book.metadata();

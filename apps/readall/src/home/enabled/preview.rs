@@ -22,7 +22,7 @@ impl Preview {
             .name("readall-library-preview".into())
             .spawn(move || {
                 while let Ok(path) = work.recv() {
-                    let text = epub_preview(&path);
+                    let text = book_preview(&path);
                     if done.send((path, text)).is_err() {
                         break;
                     }

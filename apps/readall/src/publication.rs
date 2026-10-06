@@ -8,6 +8,7 @@ pub(crate) enum Format {
     Epub,
     Mobi,
     Azw3,
+    Pdf,
 }
 impl Format {
     pub(crate) fn label(self) -> &'static str {
@@ -15,12 +16,15 @@ impl Format {
             Self::Epub => "EPUB",
             Self::Mobi => "MOBI",
             Self::Azw3 => "AZW3/KF8",
+            Self::Pdf => "PDF",
         }
     }
 }
 pub(crate) fn path_format(path: &Path) -> Option<Format> {
     let ext = path.extension()?.to_str()?;
-    if ext.eq_ignore_ascii_case("epub") {
+    if ext.eq_ignore_ascii_case("pdf") {
+        Some(Format::Pdf)
+    } else if ext.eq_ignore_ascii_case("epub") {
         Some(Format::Epub)
     } else if ext.eq_ignore_ascii_case("azw3") {
         Some(Format::Azw3)
@@ -38,6 +42,9 @@ pub(crate) struct Prepared {
     pub format: Format,
 }
 pub(crate) fn prepare(bytes: Vec<u8>, path: &Path) -> Result<Prepared> {
+    if readall_pdf::is_pdf(&bytes) || matches!(path_format(path), Some(Format::Pdf)) {
+        return Err("PDF uses the fixed-page reader pipeline".into());
+    }
     if readall_mobi::is_mobi(&bytes) {
         crate::loading::stage("校验 MOBI 文件结构")?;
         let book = MobiBook::parse(&bytes, MobiLimits::default())?;
@@ -79,7 +86,11 @@ pub(crate) fn open(args: &[std::ffi::OsString], output: &mut impl std::io::Write
     #[cfg(all(target_os = "linux", feature = "wayland"))]
     {
         if args.len() == 1 {
-            return crate::native_epub::open_path(Path::new(&args[0]), output);
+            let path = Path::new(&args[0]);
+            if matches!(path_format(path), Some(Format::Pdf)) {
+                return crate::native_pdf::open_path(path, output);
+            }
+            return crate::native_epub::open_path(path, output);
         }
         let mut options = args.to_vec();
         if !options.is_empty() && !options.iter().any(|s| s == "--font") {
@@ -100,6 +111,7 @@ mod tests {
             assert_eq!(path_format(Path::new(name)), Some(Format::Mobi));
         }
         assert_eq!(path_format(Path::new("book.azw3")), Some(Format::Azw3));
+        assert_eq!(path_format(Path::new("paper.PDF")), Some(Format::Pdf));
         assert_eq!(path_format(Path::new("book.AZW3")), Some(Format::Azw3));
         assert!(prepare(b"not KF8".to_vec(), Path::new("fake.azw3")).is_err());
         assert_eq!(path_format(Path::new("book.txt")), None);

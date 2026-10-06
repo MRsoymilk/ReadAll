@@ -1,4 +1,4 @@
-//! Native ReadAll library and EPUB file browser.
+//! Native ReadAll library and book file browser.
 use std::io::Write;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -37,7 +37,7 @@ mod enabled {
     const ROW_HEIGHT: i32 = 48;
     const LIST_TOP: i32 = 150;
     const LIST_BOTTOM_MARGIN: i32 = 96;
-    const PREVIEW_MAX_EPUB_BYTES: u64 = 16 * 1024 * 1024;
+    const PREVIEW_MAX_BOOK_BYTES: u64 = 16 * 1024 * 1024;
     const RECENT_TOP: i32 = 366;
     const RECENT_ROW_HEIGHT: i32 = 34;
 
@@ -77,9 +77,9 @@ mod enabled {
                     Err(_) => continue,
                 };
                 let directory = kind.is_dir();
-                let epub =
+                let book_file =
                     kind.is_file() && crate::publication::path_format(&item.path()).is_some();
-                if directory || epub {
+                if directory || book_file {
                     entries.push(FileEntry {
                         name,
                         path: item.path(),
@@ -159,12 +159,12 @@ mod enabled {
         }
     }
 
-    fn epub_preview(path: &Path) -> String {
+    fn book_preview(path: &Path) -> String {
         let size = match fs::metadata(path) {
             Ok(metadata) => metadata.len(),
             Err(_) => return "元数据预览不可用，仍可尝试打开".into(),
         };
-        if size > PREVIEW_MAX_EPUB_BYTES {
+        if size > PREVIEW_MAX_BOOK_BYTES {
             return format!(
                 "{} · {:.1} MiB · 元数据预览已跳过（预览上限 16 MiB）",
                 crate::publication::path_format(path).map_or("图书", |f| f.label()),
@@ -172,10 +172,28 @@ mod enabled {
             );
         }
         let mut limits = EpubLimits::default();
-        limits.zip.max_archive_bytes = PREVIEW_MAX_EPUB_BYTES as usize;
+        limits.zip.max_archive_bytes = PREVIEW_MAX_BOOK_BYTES as usize;
         let parsed = (|| -> Result<String> {
             let mut source = LocalFileSource::open(path)?;
             let bytes = read_bounded(&mut source, limits.zip.max_archive_bytes)?;
+            if readall_pdf::is_pdf(&bytes) {
+                let document = readall_pdf::Document::parse(bytes, readall_pdf::Limits::default())?;
+                let meta = document.metadata();
+                let title = if meta.title.trim().is_empty() {
+                    "(未命名)"
+                } else {
+                    meta.title.trim()
+                };
+                let author = if meta.author.trim().is_empty() {
+                    "作者未知"
+                } else {
+                    meta.author.trim()
+                };
+                return Ok(format!(
+                    "《{title}》 · {author} · {} 页 · PDF",
+                    document.page_count()
+                ));
+            }
             if readall_mobi::is_mobi(&bytes) {
                 let book =
                     readall_mobi::MobiBook::parse(&bytes, readall_mobi::MobiLimits::default())?;
@@ -269,7 +287,7 @@ mod enabled {
                 selected_book: None,
                 close_requested: false,
                 pointer: None,
-                status: "支持 EPUB / MOBI / AZW3，点击“打开图书”开始".into(),
+                status: "支持 EPUB / MOBI / AZW3 / PDF，点击“打开图书”开始".into(),
             };
             home.paint()?;
             Ok(home)
@@ -304,7 +322,7 @@ mod enabled {
             self.pending_recent_delete = None;
             self.recent_rows.clear();
             self.mode = Mode::Browser(Browser::load(Self::default_directory())?);
-            self.status = "选择 EPUB / MOBI / AZW3 图书".into();
+            self.status = "选择 EPUB / MOBI / AZW3 / PDF 图书".into();
             self.paint()?;
             Ok(true)
         }
@@ -438,13 +456,13 @@ mod enabled {
                 Mode::Library => None,
             };
             let Some(selected) = selected else {
-                self.status = "当前目录没有可打开的 EPUB / MOBI / AZW3 图书".into();
+                self.status = "当前目录没有可打开的 EPUB / MOBI / AZW3 / PDF 图书".into();
                 self.paint()?;
                 return Ok(true);
             };
             if selected.directory {
                 self.mode = Mode::Browser(Browser::load(selected.path)?);
-                self.status = "选择 EPUB / MOBI / AZW3 图书".into();
+                self.status = "选择 EPUB / MOBI / AZW3 / PDF 图书".into();
                 self.paint()?;
                 return Ok(true);
             }
@@ -461,11 +479,11 @@ mod enabled {
             match parent {
                 Some(parent) => {
                     self.mode = Mode::Browser(Browser::load(parent)?);
-                    self.status = "选择 EPUB / MOBI / AZW3 图书".into();
+                    self.status = "选择 EPUB / MOBI / AZW3 / PDF 图书".into();
                 }
                 None => {
                     self.mode = Mode::Library;
-                    self.status = "支持 EPUB / MOBI / AZW3，点击“打开图书”开始".into();
+                    self.status = "支持 EPUB / MOBI / AZW3 / PDF，点击“打开图书”开始".into();
                 }
             }
             self.paint()?;
@@ -574,7 +592,7 @@ mod enabled {
             text.draw(282, 148, 24, "打开电子书", palette.ink)?;
             let subtitle = text.fit(
                 15,
-                "支持 EPUB / MOBI / AZW3，选择后阅读",
+                "支持 EPUB / MOBI / AZW3 / PDF，选择后阅读",
                 card.width.saturating_sub(58),
             )?;
             text.draw_clipped(282, 190, 15, &subtitle, palette.muted, card)?;
@@ -697,7 +715,7 @@ mod enabled {
                     272,
                     LIST_TOP + 30,
                     15,
-                    "当前目录没有 EPUB / MOBI / AZW3 文件",
+                    "当前目录没有 EPUB / MOBI / AZW3 / PDF 文件",
                     palette.muted,
                 )?;
             }
@@ -932,7 +950,15 @@ mod enabled {
             };
             writeln!(output, "正在打开图书: {:?}", book)?;
             output.flush()?;
-            match crate::native_epub::open_path(&book, output) {
+            let opened = if matches!(
+                crate::publication::path_format(&book),
+                Some(crate::publication::Format::Pdf)
+            ) {
+                crate::native_pdf::open_path(&book, output)
+            } else {
+                crate::native_epub::open_path(&book, output)
+            };
+            match opened {
                 Ok(()) => {
                     if let Err(error) =
                         RecentStore::from_environment().and_then(|store| store.record(&book))
@@ -1026,13 +1052,13 @@ mod enabled {
             let temp = Temp::new();
             let valid = temp.0.join("valid.epub");
             fs::write(&valid, test_epub::make_epub()).unwrap();
-            let preview = epub_preview(&valid);
+            let preview = book_preview(&valid);
             assert!(preview.contains("ReadAll"));
             assert!(preview.contains("作者未知"));
 
             let invalid = temp.0.join("invalid.epub");
             fs::write(&invalid, b"not an epub").unwrap();
-            assert_eq!(epub_preview(&invalid), "元数据预览不可用，仍可尝试打开");
+            assert_eq!(book_preview(&invalid), "元数据预览不可用，仍可尝试打开");
         }
 
         #[test]
@@ -1045,7 +1071,7 @@ mod enabled {
             bytes[start] = 8;
             bytes.truncate(start + 1);
             fs::write(&path, &bytes).unwrap();
-            let preview = epub_preview(&path);
+            let preview = book_preview(&path);
             assert!(preview.contains("ReadAll MOBI 中文") && preview.contains("ReadAll Tests"));
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }

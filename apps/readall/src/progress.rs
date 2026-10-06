@@ -99,6 +99,55 @@ impl EpubProgressStore {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PdfProgressStore {
+    root: PathBuf,
+}
+
+impl PdfProgressStore {
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub(crate) fn from_environment() -> io::Result<Self> {
+        Ok(Self::new(environment_root()?))
+    }
+
+    fn path_for(&self, id: DocumentId) -> PathBuf {
+        self.root.join(format!("pdf-{id}.state"))
+    }
+
+    pub(crate) fn load(&self, id: DocumentId, pages: usize) -> io::Result<Option<usize>> {
+        let Some(raw) = read_locator(&self.path_for(id), "readall-pdf-progress-v1")? else {
+            return Ok(None);
+        };
+        let page = raw
+            .strip_prefix("page-")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid PDF page locator"))?
+            .parse::<usize>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid PDF page number"))?;
+        if page >= pages {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "saved PDF page is outside the document",
+            ));
+        }
+        Ok(Some(page))
+    }
+
+    pub(crate) fn save(&self, id: DocumentId, page: usize) -> io::Result<()> {
+        let target = self.path_for(id);
+        write_locator(
+            &self.root,
+            &target,
+            &format!("pdf-{id}"),
+            "readall-pdf-progress-v1",
+            &format!("page-{page}"),
+        )
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 fn environment_root() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
@@ -286,6 +335,22 @@ mod tests {
         let locator = book.locator(1, 11).unwrap();
         store.save(&locator).unwrap();
         assert_eq!(store.load(&book).unwrap(), Some(locator));
+    }
+
+    #[test]
+    fn pdf_progress_is_content_keyed_and_page_bounded() {
+        let temp = Temp::new();
+        let store = PdfProgressStore::new(temp.0.join("state"));
+        let first = DocumentId::of(b"first pdf");
+        let second = DocumentId::of(b"second pdf");
+        assert_eq!(store.load(first, 10).unwrap(), None);
+        store.save(first, 4).unwrap();
+        assert_eq!(store.load(first, 10).unwrap(), Some(4));
+        assert_eq!(store.load(second, 10).unwrap(), None);
+        assert_eq!(
+            store.load(first, 4).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

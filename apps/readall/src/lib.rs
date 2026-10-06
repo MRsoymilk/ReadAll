@@ -17,6 +17,8 @@ mod loading;
 pub mod mobile;
 mod native;
 mod native_epub;
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+mod native_pdf;
 #[cfg(any(
     test,
     feature = "mobile",

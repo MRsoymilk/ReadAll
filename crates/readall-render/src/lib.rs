@@ -215,14 +215,22 @@ impl Surface {
         rgba: &[u8],
     ) -> Result<(), RenderError> {
         let right = x.checked_add(width).ok_or(RenderError::InvalidDimensions)?;
-        let bottom = y.checked_add(height).ok_or(RenderError::InvalidDimensions)?;
+        let bottom = y
+            .checked_add(height)
+            .ok_or(RenderError::InvalidDimensions)?;
         if width == 0 || height == 0 || right > self.width || bottom > self.height {
             return Err(RenderError::InvalidDimensions);
         }
         let pixels = usize::try_from(u64::from(width) * u64::from(height))
             .map_err(|_| RenderError::InvalidDimensions)?;
-        if rgba.len() != pixels.checked_mul(4).ok_or(RenderError::InvalidDimensions)? {
-            return Err(RenderError::InvalidGeometry("RGBA byte length does not match rectangle"));
+        if rgba.len()
+            != pixels
+                .checked_mul(4)
+                .ok_or(RenderError::InvalidDimensions)?
+        {
+            return Err(RenderError::InvalidGeometry(
+                "RGBA byte length does not match rectangle",
+            ));
         }
         if u64::from(width) * u64::from(height) > self.limits.max_blended_pixels {
             return Err(RenderError::BudgetExceeded("pixel work"));
@@ -392,9 +400,7 @@ mod tests {
                 1,
                 2,
                 2,
-                &[
-                    1, 2, 3, 255, 4, 5, 6, 128, 7, 8, 9, 255, 10, 11, 12, 0,
-                ],
+                &[1, 2, 3, 255, 4, 5, 6, 128, 7, 8, 9, 255, 10, 11, 12, 0],
             )
             .unwrap();
         assert_eq!(image.pixel(1, 1), Some(Color::rgba(1, 2, 3, 255)));
