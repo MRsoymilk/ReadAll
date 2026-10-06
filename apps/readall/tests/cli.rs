@@ -85,7 +85,7 @@ fn unsupported_formats_exit_with_an_explicit_error() {
         (
             "sample.pdf",
             b"%PDF-1.7".as_slice(),
-            "PDF engine is not implemented",
+            "use the fixed-page PDF reader instead of the plain-text reader",
         ),
         (
             "sample.epub",

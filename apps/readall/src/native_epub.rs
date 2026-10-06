@@ -1324,7 +1324,7 @@ pub(crate) fn run(args: &[OsString], output: &mut impl Write) -> Result<()> {
     if let Err(error) = &result
         && let Some(path) = args.first().map(std::path::PathBuf::from)
     {
-        match crate::diagnostics::log_epub_failure(&path, error.as_ref()) {
+        match crate::diagnostics::log_publication_failure(&path, error.as_ref()) {
             Ok(log) => {
                 let _ = writeln!(output, "错误日志: {}", log.display());
             }

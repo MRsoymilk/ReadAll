@@ -27,7 +27,11 @@ pub(crate) fn open_path(path: &Path, output: &mut impl Write) -> Result<()> {
             .unwrap_or("PDF")
             .to_owned()
     } else {
-        document.metadata().title.trim().to_owned()
+        document
+            .metadata()
+            .title
+            .trim()
+            .replace(['\n', '\r', '\0'], " ")
     };
     let store = Store::from_environment().ok();
     let settings = store
@@ -235,10 +239,6 @@ impl WindowHandler for PdfWindow {
             }
             _ => Ok(false),
         }
-    }
-
-    fn precise_scroll(&self) -> bool {
-        true
     }
 
     fn surface(&self) -> &Surface {

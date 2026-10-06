@@ -62,12 +62,15 @@ where
 }
 
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
-pub(crate) fn log_epub_failure(path: &Path, error: &(dyn Error + 'static)) -> io::Result<PathBuf> {
-    log_epub_failure_at(&diagnostic_root(), path, error)
+pub(crate) fn log_publication_failure(
+    path: &Path,
+    error: &(dyn Error + 'static),
+) -> io::Result<PathBuf> {
+    log_publication_failure_at(&diagnostic_root(), path, error)
 }
 
 #[cfg(any(test, all(target_os = "linux", feature = "wayland")))]
-fn log_epub_failure_at(
+fn log_publication_failure_at(
     root: &Path,
     path: &Path,
     error: &(dyn Error + 'static),
@@ -80,7 +83,7 @@ fn log_epub_failure_at(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    writeln!(file, "===== ReadAll EPUB failure =====")?;
+    writeln!(file, "===== ReadAll publication failure =====")?;
     writeln!(
         file,
         "unix_time: {}.{:09}",
@@ -216,9 +219,9 @@ mod tests {
         let book = root.join("坏书.epub");
         fs::write(&book, b"epub bytes").unwrap();
         let error = boxed_stage("parse EPUB ZIP/container/OPF", Box::new(Inner));
-        let path = log_epub_failure_at(&root, &book, error.as_ref()).unwrap();
+        let path = log_publication_failure_at(&root, &book, error.as_ref()).unwrap();
         let log = fs::read_to_string(path).unwrap();
-        assert!(log.contains("ReadAll EPUB failure"));
+        assert!(log.contains("ReadAll publication failure"));
         assert!(log.contains("坏书.epub"));
         assert!(log.contains("book_size: 10"));
         assert!(log.contains("parse EPUB ZIP/container/OPF"));

@@ -968,7 +968,7 @@ mod enabled {
                 }
                 Err(error) => {
                     writeln!(output, "无法打开图书: {error}")?;
-                    match crate::diagnostics::log_epub_failure(&book, error.as_ref()) {
+                    match crate::diagnostics::log_publication_failure(&book, error.as_ref()) {
                         Ok(path) => writeln!(output, "错误日志: {}", path.display())?,
                         Err(log_error) => writeln!(
                             output,

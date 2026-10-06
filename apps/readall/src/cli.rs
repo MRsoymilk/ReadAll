@@ -441,11 +441,12 @@ mod tests {
     }
 
     #[test]
-    fn help_does_not_claim_gui_or_pdf_support() {
+    fn help_reports_fixed_page_pdf_support_without_claiming_text_tools() {
         let mut output = Vec::new();
         run(vec![OsString::from("--help")], &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("inspect"));
+        assert!(text.contains("open-pdf <book.pdf>"));
+        assert!(text.contains("PDF text selection/search/annotations are not implemented yet"));
         assert!(text.contains("Full EPUB styling"));
     }
 
