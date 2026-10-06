@@ -334,7 +334,7 @@ def host_test(args: argparse.Namespace) -> int:
     libraries = compile_classes(args, sources, classes)
     cp = os.pathsep.join(map(str, [classes, *libraries]))
     plain = {"TouchSmoke", "ViewportSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfNoticeSmoke", "KotlinMigrationSmoke"}
-    for name in ["JniSmoke", "TouchSmoke", "ViewportSmoke", "DensitySmoke", "ThemeSmoke", "TocDragSmoke", "SmoothScrollSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfPreviewSmoke", "ShelfNoticeSmoke", "ReaderMenuSmoke", "KotlinMigrationSmoke"]:
+    for name in ["JniSmoke", "PdfSmoke", "TouchSmoke", "ViewportSmoke", "DensitySmoke", "ThemeSmoke", "TocDragSmoke", "SmoothScrollSmoke", "LoadingFeedbackSmoke", "ShelfStoreSmoke", "ShelfPreviewSmoke", "ShelfNoticeSmoke", "ReaderMenuSmoke", "KotlinMigrationSmoke"]:
         run([executable(args.java / "bin/java"), "-Djava.awt.headless=true", "-Xcheck:jni", f"-Djava.library.path={output / 'debug'}", "-cp", cp, "xin.soymilk.readall." + name, *([] if name in plain else [fixture])], timeout=120)
     print("PASS Kotlin/JVM JNI, reading/gestures/themes/loading, bookshelf persistence and menus; NOT Android device validation.")
     return 0
