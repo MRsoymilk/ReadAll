@@ -1,4 +1,5 @@
 /target/
+/.readall/
 /dist/
 *.ppm
 *.tmp

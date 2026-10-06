@@ -86,6 +86,9 @@ def android_flags(sysroot: Path | None = None) -> list[str]:
 def java_bootclasspath(found: dict[str, Path]) -> str:
     return os.pathsep.join(str(found[key]) for key in ["lambda_stubs", "platform"])
 
+def debug_keystore(args: argparse.Namespace) -> Path:
+    return args.keystore or (ROOT / ".readall/android/debug.keystore")
+
 def prepare_rust(args: argparse.Namespace) -> int:
     if args.offline:
         raise BuildError("prepare-rust needs an explicit online download; build remains offline-capable")
@@ -298,7 +301,13 @@ def build(args: argparse.Namespace) -> int:
             archive.write(native, f"lib/{args.abi}/libreadall_android.so", compress_type=zipfile.ZIP_STORED)
         aligned = stage / "aligned.apk"
         run([found["zipalign"], "-P", "16", "-f", "4", unsigned, aligned])
-        key = output / "debug.keystore"
+        key = debug_keystore(args)
+        key.parent.mkdir(parents=True, exist_ok=True)
+        legacy_key = output / "debug.keystore"
+        if not key.exists() and legacy_key.is_file():
+            shutil.copy2(legacy_key, key)
+            key.chmod(0o600)
+            print("Migrated legacy debug keystore:", key)
         if not key.exists():
             run([found["keytool"], "-genkeypair", "-keystore", key, "-storepass", "android", "-keypass", "android", "-alias", "androiddebugkey", "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-dname", "CN=ReadAll Debug,O=ReadAll,C=JP"])
             key.chmod(0o600)
@@ -308,7 +317,7 @@ def build(args: argparse.Namespace) -> int:
         run([found["zipalign"], "-c", "-P", "16", "4", signed])
         apk = output / f"readall-android-debug-{args.abi}.apk"
         os.replace(signed, apk)
-        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True, "kotlin_version": kotlin_toolchain.VERSION, "kotlin_home": str(kotlin_home(args)), "kotlin_sources": len(app_sources), "handwritten_java_sources": 0, "jvm_runtime": [p.name for p in libraries]}, indent=2)+"\n")
+        (output / "build-report.json").write_text(json.dumps({"apk": str(apk), "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(), "abi": args.abi, "version": version_name, "api": args.api, "min_api": args.min_api, "elf_load_alignment": alignments, "ndk": str(found["ndk"]), "rustc": str(args.rustc), "rust_sysroot": str(found.get("rust_sysroot", "system")), "debug_only": True, "debug_keystore": str(key), "kotlin_version": kotlin_toolchain.VERSION, "kotlin_home": str(kotlin_home(args)), "kotlin_sources": len(app_sources), "handwritten_java_sources": 0, "jvm_runtime": [p.name for p in libraries]}, indent=2)+"\n")
         print("APK:", apk)
     return 0
 
@@ -373,6 +382,7 @@ def main() -> int:
     parser.add_argument("--rustc", type=absolute, default=Path("/usr/bin/rustc"))
     parser.add_argument("--rust-sysroot", type=absolute)
     parser.add_argument("--font", type=absolute)
+    parser.add_argument("--keystore", type=absolute, help="persistent debug signing keystore; defaults to .readall/android/debug.keystore")
     parser.add_argument("--vendor", type=absolute)
     parser.add_argument("--adb", type=absolute)
     parser.add_argument("--serial")

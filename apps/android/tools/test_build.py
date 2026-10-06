@@ -32,6 +32,13 @@ class BuildTests(unittest.TestCase):
         args=argparse.Namespace(rustc=Path('/usr/bin/rustc'),offline=True,vendor=None)
         self.assertNotIn('--sysroot',build.cargo_options(args))
 
+    def test_debug_keystore_survives_target_cleanup_and_accepts_explicit_override(self):
+        default = build.debug_keystore(argparse.Namespace(keystore=None))
+        self.assertEqual(default, build.ROOT/'.readall/android/debug.keystore')
+        self.assertNotEqual(default.parent, build.ROOT/'target/android')
+        explicit = Path('/secure/readall-debug.keystore')
+        self.assertEqual(build.debug_keystore(argparse.Namespace(keystore=explicit)), explicit)
+
     def test_java_lambda_stubs_precede_android_boot_classes(self):
         found={'lambda_stubs':Path('/sdk/build-tools/36.0.0/core-lambda-stubs.jar'),'platform':Path('/sdk/platforms/android-36/android.jar')}
         self.assertEqual(build.java_bootclasspath(found),'/sdk/build-tools/36.0.0/core-lambda-stubs.jar:/sdk/platforms/android-36/android.jar')
