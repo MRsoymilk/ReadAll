@@ -51,7 +51,7 @@ class ShelfController(private val activity: Activity, private val io: ExecutorSe
         val legacy = activity.getSharedPreferences("library", Activity.MODE_PRIVATE); val path = legacy.getString("book", "").orEmpty()
         if (path.isNotEmpty()) {
             val old = File(path).canonicalFile; val legacyRoot = File(activity.cacheDir, "books").canonicalFile
-            if (old.isFile && old.parentFile == legacyRoot && old.name.matches(Regex("[0-9a-f]{64}\\.(epub|mobi)")) && old.length() <= BookFiles.MAX_BOOK) {
+            if (old.isFile && old.parentFile == legacyRoot && old.name.matches(Regex("[0-9a-f]{64}\\.(epub|mobi|pdf)")) && old.length() <= BookFiles.MAX_BOOK) {
                 val owner = store(); val target = File(owner.books, old.name); BookFiles.checkRoom(owner.books, target, old.length())
                 if (!target.exists()) {
                     val temporary = File.createTempFile("migration-", ".tmp", owner.books)

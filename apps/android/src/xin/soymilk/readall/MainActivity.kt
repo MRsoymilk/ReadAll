@@ -159,7 +159,7 @@ class MainActivity : Activity(), ReaderView.Listener {
         try {
             if (path.isEmpty() || !file.isFile || (!file.canonicalPath.startsWith(File(cacheDir, "books").canonicalPath + File.separator) && !file.canonicalPath.startsWith(shelf.booksDirectory().canonicalPath + File.separator))) { if (uri.isNotEmpty()) importBook(Uri.parse(uri)) else pick(); return }
         } catch (error: Exception) { showError(error); return }
-        closeReader(); val token = ++epoch; currentUri = uri; currentShelfId = if (file.name.matches(Regex("[0-9a-f]{64}\\.(epub|mobi)"))) file.name.substring(0, 64) else ""
+        closeReader(); val token = ++epoch; currentUri = uri; currentShelfId = if (file.name.matches(Regex("[0-9a-f]{64}\\.(epub|mobi|pdf)"))) file.name.substring(0, 64) else ""
         importing = true; imported = 0; total = 0; home.visibility = View.GONE; showProgress("准备继续阅读", 0, 0); requestFrame()
         prepareFont(file, saved.getString("name", "图书") ?: "图书", token)
     }

@@ -6,6 +6,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.lang.reflect.InvocationTargetException
 import java.nio.ByteBuffer
+import java.util.Locale
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -28,6 +29,30 @@ object ShelfPreviewSmoke {
         }
         return book
     }
+    private fun pdfFixture(root: File): File {
+        val book = File(root, "shelf-preview.pdf")
+        val out = ByteArrayOutputStream()
+        val offsets = ArrayList<Int>()
+        fun write(text: String) { out.write(text.toByteArray(Charsets.ISO_8859_1)) }
+        fun objectBytes(number: Int, body: String) {
+            offsets.add(out.size())
+            write("$number 0 obj\n$body\nendobj\n")
+        }
+        write("%PDF-1.4\n")
+        objectBytes(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        objectBytes(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+        objectBytes(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Resources << >> /Contents 4 0 R >>")
+        val stream = "0.1 0.4 0.8 rg 0 0 200 300 re f\n"
+        objectBytes(4, "<< /Length ${stream.toByteArray(Charsets.US_ASCII).size} >>\nstream\n${stream}endstream")
+        objectBytes(5, "<< /Title (PDF Preview) /Author (Test Author) >>")
+        val xref = out.size()
+        write("xref\n0 6\n0000000000 65535 f \n")
+        offsets.forEach { write(String.format(Locale.ROOT, "%010d 00000 n \n", it)) }
+        write("trailer\n<< /Size 6 /Root 1 0 R /Info 5 0 R >>\nstartxref\n$xref\n%%EOF\n")
+        book.writeBytes(out.toByteArray())
+        return book
+    }
+
     @JvmStatic fun main(args: Array<String>) {
         val root = File(args[0]); val image = BufferedImage(800, 1000, BufferedImage.TYPE_INT_RGB); val row = IntArray(800) { 0x0a5ab4 }
         repeat(1000) { image.setRGB(0, it, 800, 1, row, 0, 800) }; val out = ByteArrayOutputStream(); ImageIO.write(image, "png", out)
@@ -38,11 +63,14 @@ object ShelfPreviewSmoke {
             check((pixels[0].toInt() and 255) == 10 && (pixels[1].toInt() and 255) == 90 && (pixels[2].toInt() and 255) == 180 && (pixels[3].toInt() and 255) == 255)
             check(before.contentEquals(JniSmoke.hash(book)))
         }
+        val pdf = pdfFixture(root); val pdfBefore = JniSmoke.hash(pdf); val pdfPreview = NativeReader.preview(pdf.absolutePath, pixels)
+        check(pdfPreview.title == "PDF Preview" && pdfPreview.author == "Test Author" && pdfPreview.format == "PDF")
+        check(pdfPreview.width == 341 && pdfPreview.height == 512 && pixels[3] == 255.toByte()); check(pdfBefore.contentEquals(JniSmoke.hash(pdf)))
         val bad = fixture(root, "shelf-preview-no-image.epub", false, "broken image".toByteArray()); check(NativeReader.preview(bad.absolutePath, pixels).width == 0)
         JniSmoke.expect<IllegalArgumentException>("read-only buffer accepted") { NativeReader.preview(bad.absolutePath, pixels.asReadOnlyBuffer()) }
         val call = NativeReader::class.java.getDeclaredMethod("nativePreview", String::class.java, ByteBuffer::class.java).apply { isAccessible = true }
         var rejected = false; try { call.invoke(null, bad.absolutePath, ByteBuffer.allocateDirect(4)) } catch (e: InvocationTargetException) { rejected = e.cause is IllegalStateException }; check(rejected)
         pixels.put(0, 77); JniSmoke.expect<IllegalStateException>("relative path accepted") { NativeReader.preview("relative.epub", pixels) }; check(pixels[0] == 77.toByte())
-        println("PASS Kotlin/JNI EPUB2/3 previews: metadata/Unicode, bounded covers, RGBA, broken images, buffers, paths and unchanged source")
+        println("PASS Kotlin/JNI EPUB2/3/PDF previews: metadata/Unicode, bounded covers, PDF first page, RGBA, broken images, buffers, paths and unchanged source")
     }
 }

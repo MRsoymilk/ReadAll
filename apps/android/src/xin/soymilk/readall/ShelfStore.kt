@@ -22,7 +22,7 @@ class ShelfStore @Throws(IOException::class) constructor(root: File) {
         @JvmField val name: String; @JvmField val title: String; @JvmField val author: String
         @JvmField val format: String; @JvmField val uri: String; @JvmField val alias: String
         init {
-            if (!file.matches(Regex("[0-9a-f]{64}\\.(epub|mobi)"))) throw IOException("书库文件标识无效")
+            if (!file.matches(Regex("[0-9a-f]{64}\\.(epub|mobi|pdf)"))) throw IOException("书库文件标识无效")
             id = file.substring(0, 64); this.name = clean(name, 512); this.title = clean(title, 512); this.author = clean(author, 512)
             this.format = clean(format, 32); this.uri = clean(uri, 8192); this.alias = clean(alias, 512)
             if (added < 0 || opened < 0 || !percent.isFinite() || percent < -1 || percent > 100) throw IOException("书库阅读状态无效")

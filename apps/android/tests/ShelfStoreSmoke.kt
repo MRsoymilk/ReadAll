@@ -13,6 +13,8 @@ object ShelfStoreSmoke {
         val tmp = Files.createTempDirectory("readall-shelf-test-")
         try {
             val a = ShelfStore(tmp.toFile()); val b = ShelfStore(tmp.toFile()); val one = book(1, "中文书籍😀", 1); val two = book(2, "Second book", 2)
+            val pdf = ShelfStore.Book(String.format(Locale.ROOT, "%064x.pdf", 3), "paper.pdf", "PDF Paper", "Author", "PDF", "content://fixture/pdf", "", 3, 0, -1.0, false)
+            check(pdf.file.endsWith(".pdf") && pdf.format == "PDF" && a.bookFile(pdf).name == pdf.file)
             a.add(one); a.add(two); check(a.load().size == 2); a.opened(one.id, 10); val migrated = b.load()[0]
             check(migrated.opened == 10L && migrated.percent == -1.0 && migrated.progress() == "待恢复进度")
             a.rename(one.id, "自定义标题"); a.pin(one.id, true); a.progress(one.id, 42.5, 20); a.add(book(1, "原书更新", 4))

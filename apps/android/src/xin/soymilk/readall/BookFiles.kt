@@ -47,12 +47,17 @@ object BookFiles {
             }
             if (cancelled.get()) throw IOException("导入已取消")
             val extension = RandomAccessFile(temporary, "r").use { input ->
-                if (input.length() < 4) throw IOException("文件过短，不是有效图书")
-                if (input.readInt() == 0x504b0304) ".epub" else {
-                    if (input.length() < 68) throw IOException("当前支持 EPUB、MOBI 和 AZW3")
-                    input.seek(60); val magic = ByteArray(8); input.readFully(magic)
-                    if (!magic.contentEquals("BOOKMOBI".toByteArray(Charsets.US_ASCII))) throw IOException("当前支持 EPUB、MOBI 和 AZW3")
-                    ".mobi" // Native detection distinguishes MOBI6/7 and KF8, preserving stored IDs.
+                val length = input.length(); if (length < 4) throw IOException("文件过短，不是有效图书")
+                val probe = ByteArray(minOf(1024L, length).toInt()); input.seek(0); input.readFully(probe)
+                when {
+                    probe[0] == 0x50.toByte() && probe[1] == 0x4b.toByte() && probe[2] == 0x03.toByte() && probe[3] == 0x04.toByte() -> ".epub"
+                    hasPdfHeader(probe) -> ".pdf"
+                    length >= 68 -> {
+                        input.seek(60); val magic = ByteArray(8); input.readFully(magic)
+                        if (!magic.contentEquals("BOOKMOBI".toByteArray(Charsets.US_ASCII))) throw IOException("当前支持 EPUB、MOBI、AZW3 和 PDF")
+                        ".mobi" // Native detection distinguishes MOBI6/7 and KF8, preserving stored IDs.
+                    }
+                    else -> throw IOException("当前支持 EPUB、MOBI、AZW3 和 PDF")
                 }
             }
             val hex = digest.digest().joinToString("") { String.format(Locale.ROOT, "%02x", it.toInt() and 255) }
@@ -63,9 +68,14 @@ object BookFiles {
             return Imported(result, name)
         } finally { if (!moved) temporary.delete() }
     }
+    private fun hasPdfHeader(bytes: ByteArray): Boolean {
+        if (bytes.size < 5) return false
+        for (i in 0..bytes.size - 5) if (bytes[i] == '%'.code.toByte() && bytes[i + 1] == 'P'.code.toByte() && bytes[i + 2] == 'D'.code.toByte() && bytes[i + 3] == 'F'.code.toByte() && bytes[i + 4] == '-'.code.toByte()) return true
+        return false
+    }
     @JvmStatic @Throws(IOException::class) fun checkRoom(directory: File, current: File, incoming: Long) {
         if (current.isFile) return
-        val files = directory.listFiles { file -> file.isFile && file.name.matches(Regex("[0-9a-f]{64}\\.(epub|mobi)")) } ?: throw IOException("无法检查图书存储")
+        val files = directory.listFiles { file -> file.isFile && file.name.matches(Regex("[0-9a-f]{64}\\.(epub|mobi|pdf)")) } ?: throw IOException("无法检查图书存储")
         var used = incoming; for (file in files) used += file.length()
         if (used > 2L * 1024 * 1024 * 1024) throw IOException("应用内图书副本达到 2 GiB 上限；没有自动删除任何图书")
     }
